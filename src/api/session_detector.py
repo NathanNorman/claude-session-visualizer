@@ -12,6 +12,8 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 ACTIVE_CPU_THRESHOLD = 0.5  # CPU% above this = active (Claude uses little CPU when waiting for API)
 ACTIVE_RECENCY_SECONDS = 30  # File modified within this many seconds = active
 MAX_SESSION_AGE_HOURS = 2  # Only show sessions with activity in last N hours
+STATE_DIR = Path.home() / ".claude" / "visualizer" / "session-state"
+STATE_FILE_MAX_AGE_SECONDS = 300  # Consider state files stale after 5 minutes
 
 # No longer need TTY cache - we now match by process cwd
 
@@ -56,6 +58,47 @@ def calculate_cost(usage: dict) -> float:
     )
 
     return round(cost, 2)
+
+
+def read_session_state(session_id: str) -> dict | None:
+    """Read hook-generated state file for a session.
+
+    Returns:
+        State dict with 'state', 'current_activity', etc. or None if not found/stale
+    """
+    if not session_id:
+        return None
+
+    state_file = STATE_DIR / f"{session_id}.json"
+
+    if not state_file.exists():
+        return None
+
+    try:
+        # Check file age - ignore stale files
+        mtime = state_file.stat().st_mtime
+        age = time.time() - mtime
+
+        if age > STATE_FILE_MAX_AGE_SECONDS:
+            return None
+
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+
+        # Validate required fields
+        if 'state' not in state or 'updated_at' not in state:
+            return None
+
+        # Ensure state is valid value
+        if state['state'] not in ('active', 'waiting'):
+            return None
+
+        # Add metadata
+        state['_state_file_age'] = age
+        return state
+
+    except (json.JSONDecodeError, OSError, KeyError):
+        return None
 
 
 def get_process_cwd(pid: int) -> str | None:
@@ -689,9 +732,21 @@ def get_sessions() -> list[dict]:
             continue
 
         recency = metadata.get('recency', 999999)
-        file_recently_modified = recency < ACTIVE_RECENCY_SECONDS
-        high_cpu = proc['cpu'] > ACTIVE_CPU_THRESHOLD
-        state = 'active' if (file_recently_modified or high_cpu) else 'waiting'
+
+        # Try hooks-based state first (instant, accurate)
+        hook_state = read_session_state(metadata.get('sessionId'))
+
+        if hook_state:
+            state = hook_state['state']
+            state_source = 'hooks'
+            current_activity = hook_state.get('current_activity')
+        else:
+            # Fallback to CPU/recency heuristics
+            file_recently_modified = recency < ACTIVE_RECENCY_SECONDS
+            high_cpu = proc['cpu'] > ACTIVE_CPU_THRESHOLD
+            state = 'active' if (file_recently_modified or high_cpu) else 'waiting'
+            state_source = 'polling'
+            current_activity = None
 
         result.append({
             'sessionId': metadata['sessionId'],
@@ -712,6 +767,9 @@ def get_sessions() -> list[dict]:
             # Feature 04: Cost tracking
             'estimatedCost': metadata.get('estimatedCost', 0),
             'cumulativeUsage': metadata.get('cumulativeUsage', {}),
+            # Hooks-based state info
+            'stateSource': state_source,
+            'currentActivity': current_activity,
         })
 
     # Add basic git info to each session

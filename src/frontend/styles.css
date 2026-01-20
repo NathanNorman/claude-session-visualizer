@@ -58,11 +58,7 @@ header h1 { font-size: 24px; font-weight: 600; }
     color: var(--active-color);
 }
 
-#sessions-container {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 20px;
-}
+/* Note: #sessions-container styles are in the "Feature 02: Session Grouping" section below */
 
 .session-card {
     background: var(--card-bg);
@@ -144,6 +140,44 @@ header h1 { font-size: 24px; font-weight: 600; }
 }
 
 .slug { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+
+/* Current activity display (hooks-based state detection) */
+.current-activity {
+    font-size: 0.75rem;
+    color: #888;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 280px;
+    margin-top: 4px;
+    padding: 4px 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+}
+
+.session-card.active .current-activity {
+    color: var(--active-color);
+    background: rgba(74, 222, 128, 0.1);
+}
+
+/* State source indicator (hooks vs polling) */
+.state-source-indicator {
+    font-size: 0.65rem;
+    margin-left: 2px;
+    opacity: 0.8;
+    cursor: help;
+}
+
+/* Activity animation for tool execution */
+@keyframes activity-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.current-activity.tool-running {
+    animation: activity-pulse 1.5s ease-in-out infinite;
+}
 
 .context-size {
     font-family: 'SF Mono', Monaco, monospace;
@@ -239,6 +273,43 @@ header h1 { font-size: 24px; font-weight: 600; }
 
 .session-card.active .activity-item:last-child {
     color: var(--active-color);
+}
+
+/* ============================================================================
+   Hooks-Based State Display
+   ============================================================================ */
+
+/* State source indicator (lightning bolt for hooks) */
+.state-source-indicator {
+    margin-left: 6px;
+    font-size: 10px;
+    opacity: 0.8;
+}
+
+/* Current activity display */
+.current-activity {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    background: rgba(74, 222, 128, 0.1);
+    border-left: 3px solid var(--active-color);
+    border-radius: 0 6px 6px 0;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 12px;
+    color: var(--text-primary);
+    animation: activity-pulse 2s ease-in-out infinite;
+}
+
+.current-activity.tool-running {
+    background: rgba(96, 165, 250, 0.1);
+    border-left-color: var(--waiting-color);
+}
+
+@keyframes activity-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
 }
 
 /* Feature 03: Token Usage Visualization */
@@ -2913,15 +2984,6 @@ body.keyboard-mode .session-card .card-number {
     color: var(--text-primary);
 }
 
-/* Machine group styling for session list */
-.session-group.machine-group {
-    border-left: 3px solid var(--waiting-color);
-}
-
-.session-group.machine-group .group-header {
-    background: rgba(96, 165, 250, 0.1);
-}
-
 /* Button styles for machine management */
 .btn-small {
     padding: 6px 12px;
@@ -3316,12 +3378,8 @@ body.focus-mode .session-card.waiting {
     display: none;
 }
 
-body.focus-mode .session-group .group-sessions:empty {
-    display: none;
-}
-
-/* Hide groups that have no visible sessions in focus mode */
-body.focus-mode .session-group:has(.group-sessions:empty) {
+/* Hide rows that have no visible sessions in focus mode */
+body.focus-mode .session-row:has(.session-row-cards:empty) {
     display: none;
 }
 

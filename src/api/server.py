@@ -537,9 +537,13 @@ async def refresh_all_summaries():
                     last_activity.replace('Z', '+00:00')
                 ).timestamp()
 
-                # If no new activity since last summary, skip
+                # If no new activity since last summary, skip but include cached summary
                 if activity_time <= cached['timestamp']:
-                    skipped.append({'sessionId': session_id, 'reason': 'no_new_activity'})
+                    skipped.append({
+                        'sessionId': session_id,
+                        'reason': 'no_new_activity',
+                        'summary': cached['summary']  # Include cached summary for frontend
+                    })
                     continue
             except (ValueError, TypeError):
                 pass  # If parsing fails, refresh anyway

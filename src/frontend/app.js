@@ -86,7 +86,17 @@ function hasSessionChanged(oldSession, newSession) {
            oldSession.cpuPercent !== newSession.cpuPercent ||
            JSON.stringify(oldSession.recentActivity) !== JSON.stringify(newSession.recentActivity) ||
            oldSession.aiSummary !== newSession.aiSummary ||
-           oldSession.lastActivity !== newSession.lastActivity;
+           oldSession.lastActivity !== newSession.lastActivity ||
+           oldSession.stateSource !== newSession.stateSource ||
+           hasActivityChanged(oldSession, newSession);
+}
+
+// Detect currentActivity changes (hooks-based real-time activity)
+function hasActivityChanged(oldSession, newSession) {
+    if (!oldSession || !newSession) return true;
+    const oldActivity = oldSession.currentActivity?.description || oldSession.currentActivity?.tool_name || '';
+    const newActivity = newSession.currentActivity?.description || newSession.currentActivity?.tool_name || '';
+    return oldActivity !== newActivity;
 }
 
 function computeSessionDiff(oldSessions, newSessions) {
@@ -688,15 +698,31 @@ function createCard(session, index = 0) {
         </div>
     ` : '';
 
-    const activityHtml = formatActivityLog(session.recentActivity || []);
+    const activityLogHtml = formatActivityLog(session.recentActivity || []);
     const noteHtml = renderNote(session);
+
+    // State source indicator (hooks = real-time, polling = heuristic)
+    const stateIcon = session.stateSource === 'hooks' ? '<span class="state-source-indicator" title="Real-time hooks detection">⚡</span>' : '';
+
+    // Current activity display (only when hooks-based and active)
+    let currentActivityHtml = '';
+    if (session.currentActivity && session.state === 'active') {
+        let activityText = session.currentActivity.description || session.currentActivity.tool_name || '';
+        if (activityText.length > 35) {
+            activityText = activityText.substring(0, 32) + '...';
+        }
+        if (activityText) {
+            const activityIcon = getActivityIcon(session.currentActivity);
+            currentActivityHtml = `<div class="current-activity ${session.currentActivity.type === 'tool_use' ? 'tool-running' : ''}">${activityIcon} ${escapeHtml(activityText)}</div>`;
+        }
+    }
 
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
         <div class="card-header">
             <span class="status-badge ${session.state}">
                 <span class="status-indicator"></span>
-                ${session.state}
+                ${session.state}${stateIcon}
             </span>
             <div class="card-actions">
                 <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${session.sessionId}')">⋮</button>
@@ -725,7 +751,8 @@ function createCard(session, index = 0) {
         <div class="cwd" title="${escapeHtml(session.cwd || 'Unknown')}"><span class="cwd-path">${escapeHtml(session.cwd || 'Unknown')}</span>${branchHtml}</div>
         ${gitHtml}
         ${formatTokenBar(session.contextTokens)}
-        <div class="activity-log">${activityHtml}</div>
+        ${currentActivityHtml}
+        <div class="activity-log">${activityLogHtml}</div>
         <div class="metrics-preview" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')">
             <span class="metrics-icon">📊</span>
             <span class="metrics-label">View Metrics</span>
@@ -1018,6 +1045,34 @@ async function refreshAllSummaries() {
             if (session) {
                 session.aiSummary = item.summary;
                 previousSessions.set(item.sessionId, session);
+            }
+        }
+
+        // Also apply cached summaries from skipped sessions (no_new_activity)
+        for (const item of data.details.skipped) {
+            if (item.summary) {
+                const card = document.querySelector(`[data-session-id="${item.sessionId}"]`);
+                if (card) {
+                    const existingSummary = card.querySelector('.ai-summary');
+                    if (existingSummary) {
+                        existingSummary.textContent = item.summary;
+                    } else {
+                        const slugEl = card.querySelector('.slug');
+                        if (slugEl) {
+                            const newSummaryEl = document.createElement('div');
+                            newSummaryEl.className = 'ai-summary';
+                            newSummaryEl.textContent = item.summary;
+                            slugEl.insertAdjacentElement('afterend', newSummaryEl);
+                        }
+                    }
+                }
+
+                // Update cache
+                const session = previousSessions.get(item.sessionId);
+                if (session) {
+                    session.aiSummary = item.summary;
+                    previousSessions.set(item.sessionId, session);
+                }
             }
         }
 
@@ -1368,10 +1423,52 @@ function updateCard(card, session) {
         }
     }
 
+    // Update current activity display (hooks-based real-time activity)
+    updateCurrentActivity(card, session, prev);
+
     card.querySelector('.meta').innerHTML = `
         <span>PID: ${session.pid || '--'}</span>
         <span>CPU: ${formatCpu(session.cpuPercent)}%</span>
         <span>${formatTime(session.lastActivity)}</span>`;
+}
+
+// Update current activity element (hooks-based real-time activity)
+function updateCurrentActivity(card, session, prev) {
+    // Only update if activity has changed
+    if (prev && !hasActivityChanged(prev, session)) return;
+
+    const currentActivityEl = card.querySelector('.current-activity');
+    const activityLog = card.querySelector('.activity-log');
+
+    // Check if we should show current activity
+    if (session.currentActivity && session.state === 'active') {
+        let activityText = session.currentActivity.description || session.currentActivity.tool_name || '';
+        if (activityText.length > 35) {
+            activityText = activityText.substring(0, 32) + '...';
+        }
+
+        if (activityText) {
+            const activityIcon = getActivityIcon(session.currentActivity);
+            const isToolRunning = session.currentActivity.type === 'tool_use';
+
+            if (currentActivityEl) {
+                // Update existing element
+                currentActivityEl.className = `current-activity ${isToolRunning ? 'tool-running' : ''}`;
+                currentActivityEl.innerHTML = `${activityIcon} ${escapeHtml(activityText)}`;
+            } else if (activityLog) {
+                // Create new element and insert before activity log
+                const newActivityEl = document.createElement('div');
+                newActivityEl.className = `current-activity ${isToolRunning ? 'tool-running' : ''}`;
+                newActivityEl.innerHTML = `${activityIcon} ${escapeHtml(activityText)}`;
+                activityLog.parentNode.insertBefore(newActivityEl, activityLog);
+            }
+        } else if (currentActivityEl) {
+            currentActivityEl.remove();
+        }
+    } else if (currentActivityEl) {
+        // Remove element if session is not active or has no current activity
+        currentActivityEl.remove();
+    }
 }
 
 function formatTime(isoString) {
@@ -1437,6 +1534,31 @@ function formatActivityLog(activities) {
     return activities.map(a =>
         `<div class="activity-item">${escapeHtml(a)}</div>`
     ).join('');
+}
+
+// Get icon for current activity based on activity type/tool
+function getActivityIcon(activity) {
+    if (!activity) return '▶';
+
+    const toolName = activity.tool_name || '';
+
+    // Map tool names to icons
+    if (toolName === 'Bash') return '⚡';
+    if (toolName === 'Read') return '📖';
+    if (toolName === 'Write') return '✏️';
+    if (toolName === 'Edit') return '✏️';
+    if (toolName === 'Grep') return '🔍';
+    if (toolName === 'Glob') return '📁';
+    if (toolName === 'Task') return '🤖';
+    if (toolName === 'WebFetch') return '🌐';
+    if (toolName.startsWith('mcp__')) return '🔌';
+
+    // Activity type fallback
+    if (activity.type === 'tool_use') return '⚙️';
+    if (activity.type === 'user_prompt') return '💬';
+    if (activity.type === 'idle') return '⏸';
+
+    return '▶';
 }
 
 function escapeHtml(text) {
@@ -1777,50 +1899,52 @@ function updateSessionsInPlace(sessions) {
     renderedSessionIds = currentIds;
 }
 
-// Append a new session card to the appropriate group
+// Append a new session card to the appropriate group (session-row structure)
 function appendNewSession(container, session) {
     const projectName = session.cwd?.split('/').pop() || session.slug || 'Unknown';
 
-    // Find existing group
-    let groupDiv = null;
-    let sessionsDiv = null;
+    // Find existing row (session-row structure from renderGroups)
+    let rowDiv = null;
+    let cardsDiv = null;
 
-    container.querySelectorAll('.session-group').forEach(group => {
-        const groupNameEl = group.querySelector('.group-name');
-        if (groupNameEl && groupNameEl.textContent === projectName) {
-            groupDiv = group;
-            sessionsDiv = group.querySelector('.group-sessions');
+    container.querySelectorAll('.session-row').forEach(row => {
+        const rowNameEl = row.querySelector('.row-name');
+        if (rowNameEl && rowNameEl.textContent === projectName) {
+            rowDiv = row;
+            cardsDiv = row.querySelector('.session-row-cards');
         }
     });
 
-    // If no group exists, create one
-    if (!groupDiv) {
-        groupDiv = document.createElement('div');
-        groupDiv.className = 'session-group';
-        groupDiv.dataset.groupName = projectName;
+    // If no row exists, create one (matching renderGroups structure)
+    if (!rowDiv) {
+        rowDiv = document.createElement('div');
+        rowDiv.className = 'session-row';
 
-        const header = document.createElement('div');
-        header.className = 'group-header';
-        header.onclick = () => toggleGroup(projectName);
-        header.innerHTML = `
-            <span class="collapse-icon">▼</span>
-            <span class="group-name">${escapeHtml(projectName)}</span>
-            <span class="group-stats">1 session</span>
+        const labelDiv = document.createElement('div');
+        labelDiv.className = 'session-row-label';
+        labelDiv.innerHTML = `
+            <span class="row-name">${escapeHtml(projectName)}</span>
+            <span class="row-stats">1 <span class="row-active">(1 active)</span></span>
         `;
-        groupDiv.appendChild(header);
+        rowDiv.appendChild(labelDiv);
 
-        sessionsDiv = document.createElement('div');
-        sessionsDiv.className = 'group-sessions';
-        groupDiv.appendChild(sessionsDiv);
+        cardsDiv = document.createElement('div');
+        cardsDiv.className = 'session-row-cards';
+        cardsDiv.dataset.cardCount = '1';
+        rowDiv.appendChild(cardsDiv);
 
-        container.appendChild(groupDiv);
+        container.appendChild(rowDiv);
     }
 
-    // Add the card to the group (respect compact mode)
+    // Add the card to the row (respect compact mode)
     const cardIndex = container.querySelectorAll('[data-session-id]').length;
     const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
     const card = createCardFn(session, cardIndex);
-    sessionsDiv.appendChild(card);
+    cardsDiv.appendChild(card);
+
+    // Update card count for CSS sizing
+    const cardCount = cardsDiv.querySelectorAll('.session-card').length;
+    cardsDiv.dataset.cardCount = Math.min(cardCount, 4);
 }
 
 // Update group statistics without rebuilding
@@ -1840,19 +1964,25 @@ function updateGroupStats(sessions) {
         }
     }
 
-    // Update each group's stats display
-    container.querySelectorAll('.session-group').forEach(group => {
-        const groupNameEl = group.querySelector('.group-name');
-        const statsEl = group.querySelector('.group-stats');
-        if (groupNameEl && statsEl) {
-            const name = groupNameEl.textContent;
+    // Update each row's stats display (session-row structure)
+    container.querySelectorAll('.session-row').forEach(row => {
+        const rowNameEl = row.querySelector('.row-name');
+        const statsEl = row.querySelector('.row-stats');
+        if (rowNameEl && statsEl) {
+            const name = rowNameEl.textContent;
             const stats = groupStats[name];
             if (stats) {
                 statsEl.innerHTML = `
-                    ${stats.total} session${stats.total !== 1 ? 's' : ''}
-                    ${stats.active > 0 ? `(${stats.active} active)` : ''}
+                    ${stats.total}${stats.active > 0 ? ` <span class="row-active">(${stats.active} active)</span>` : ''}
                 `;
             }
+        }
+
+        // Update card count for CSS sizing
+        const cardsDiv = row.querySelector('.session-row-cards');
+        if (cardsDiv) {
+            const cardCount = cardsDiv.querySelectorAll('.session-card').length;
+            cardsDiv.dataset.cardCount = Math.min(cardCount, 4);
         }
     });
 }
