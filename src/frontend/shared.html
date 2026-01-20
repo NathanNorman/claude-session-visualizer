@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shared Session - Claude Session Visualizer</title>
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+        /* Shared view specific styles */
+        .shared-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .shared-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .shared-header h1 {
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .shared-by {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .shared-session-card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+        }
+
+        .session-slug {
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 24px;
+            color: var(--text-primary);
+        }
+
+        .session-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .meta-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .meta-value {
+            font-size: 16px;
+            color: var(--text-primary);
+        }
+
+        .meta-value.mono {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 14px;
+        }
+
+        .section {
+            margin-bottom: 32px;
+        }
+
+        .section h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .activity-list {
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            padding: 16px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 13px;
+            line-height: 1.8;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .activity-list .item {
+            color: var(--text-secondary);
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .activity-list .item:last-child {
+            border-bottom: none;
+            color: var(--text-primary);
+        }
+
+        .shared-footer {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-secondary);
+            font-size: 13px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            margin-top: 32px;
+        }
+
+        .shared-footer a {
+            color: var(--waiting-color);
+            text-decoration: none;
+        }
+
+        .shared-footer a:hover {
+            text-decoration: underline;
+        }
+
+        .error-container {
+            text-align: center;
+            padding: 60px 24px;
+        }
+
+        .error-container h2 {
+            font-size: 24px;
+            margin-bottom: 12px;
+        }
+
+        .error-container p {
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+
+        .error-container a {
+            color: var(--active-color);
+            text-decoration: none;
+        }
+
+        .loading-container {
+            text-align: center;
+            padding: 60px 24px;
+            color: var(--text-secondary);
+        }
+
+        .status-badge-large {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-badge-large.active {
+            background: rgba(74, 222, 128, 0.15);
+            color: var(--active-color);
+        }
+
+        .status-badge-large.waiting {
+            background: rgba(96, 165, 250, 0.15);
+            color: var(--waiting-color);
+        }
+
+        .copy-btn {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: rgba(255,255,255,0.2);
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="shared-container">
+        <div id="content">
+            <div class="loading-container">
+                <p>Loading shared session...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Extract token from URL
+        const pathParts = window.location.pathname.split('/');
+        const token = pathParts[pathParts.length - 1];
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatTokens(tokens) {
+            if (!tokens || tokens === 0) return '--';
+            if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
+            if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`;
+            return `${tokens}`;
+        }
+
+        function formatDate(isoString) {
+            if (!isoString) return '--';
+            try {
+                return new Date(isoString).toLocaleString();
+            } catch {
+                return '--';
+            }
+        }
+
+        async function loadSharedSession() {
+            const contentEl = document.getElementById('content');
+
+            try {
+                const response = await fetch(`/api/shared/${token}`);
+
+                if (response.status === 404) {
+                    contentEl.innerHTML = `
+                        <div class="error-container">
+                            <h2>Session Not Found</h2>
+                            <p>This shared session link is invalid or has been removed.</p>
+                            <a href="/">Back to Dashboard</a>
+                        </div>
+                    `;
+                    return;
+                }
+
+                if (response.status === 410) {
+                    contentEl.innerHTML = `
+                        <div class="error-container">
+                            <h2>Session Expired</h2>
+                            <p>This shared session link has expired.</p>
+                            <a href="/">Back to Dashboard</a>
+                        </div>
+                    `;
+                    return;
+                }
+
+                if (!response.ok) {
+                    throw new Error('Failed to load session');
+                }
+
+                const data = await response.json();
+                const session = data.session;
+
+                // Update page title
+                document.title = `${session.slug} - Shared Session`;
+
+                // Build activity list
+                const activities = session.recentActivity || [];
+                const activityHtml = activities.length > 0
+                    ? activities.map(a => `<div class="item">${escapeHtml(a)}</div>`).join('')
+                    : '<div class="item">No recent activity recorded</div>';
+
+                // Build the shared view
+                contentEl.innerHTML = `
+                    <header class="shared-header">
+                        <h1>
+                            <span>🔗</span>
+                            <span>Shared Session View</span>
+                        </h1>
+                        <span class="shared-by">Shared by @${escapeHtml(data.created_by)}</span>
+                    </header>
+
+                    <div class="shared-session-card">
+                        <div class="session-slug">${escapeHtml(session.slug)}</div>
+
+                        <div class="session-meta-grid">
+                            <div class="meta-item">
+                                <span class="meta-label">📁 Project</span>
+                                <span class="meta-value mono">${escapeHtml(session.cwd || 'Unknown')}</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-label">🌿 Branch</span>
+                                <span class="meta-value mono">${escapeHtml(session.gitBranch || 'Unknown')}</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-label">📊 Context Tokens</span>
+                                <span class="meta-value">${formatTokens(session.contextTokens)}</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-label">⏱️ Status</span>
+                                <span class="status-badge-large ${session.state}">${session.state}</span>
+                            </div>
+                        </div>
+
+                        ${session.aiSummary ? `
+                            <div class="section">
+                                <h3>🤖 AI Summary</h3>
+                                <p style="color: var(--text-primary); line-height: 1.6;">${escapeHtml(session.aiSummary)}</p>
+                            </div>
+                        ` : ''}
+
+                        <div class="section">
+                            <h3>📝 Recent Activity</h3>
+                            <div class="activity-list">
+                                ${activityHtml}
+                            </div>
+                        </div>
+
+                        <div class="actions">
+                            <button class="copy-btn" onclick="copyResumeCommand()">
+                                📋 Copy Resume Command
+                            </button>
+                        </div>
+                    </div>
+
+                    <footer class="shared-footer">
+                        <p>Shared on ${formatDate(data.created_at)} • Expires ${formatDate(data.expires_at)}</p>
+                        <p style="margin-top: 8px;">
+                            <a href="/">Claude Session Visualizer</a>
+                        </p>
+                    </footer>
+                `;
+
+                // Store session ID for copy function
+                window.sharedSessionId = session.sessionId;
+
+            } catch (error) {
+                console.error('Error loading shared session:', error);
+                contentEl.innerHTML = `
+                    <div class="error-container">
+                        <h2>Error Loading Session</h2>
+                        <p>Something went wrong while loading this shared session.</p>
+                        <a href="/">Back to Dashboard</a>
+                    </div>
+                `;
+            }
+        }
+
+        function copyResumeCommand() {
+            if (window.sharedSessionId) {
+                const cmd = `claude --resume ${window.sharedSessionId}`;
+                navigator.clipboard.writeText(cmd).then(() => {
+                    alert('Resume command copied to clipboard!');
+                });
+            }
+        }
+
+        // Load the shared session
+        loadSharedSession();
+    </script>
+</body>
+</html>

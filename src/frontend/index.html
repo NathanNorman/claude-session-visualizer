@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Sessions</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>Claude Code Sessions</h1>
+        <div id="status">
+            <span id="session-count">0 sessions</span>
+            <span id="last-update">--</span>
+            <button id="sound-toggle" class="icon-button" onclick="soundManager.toggle(); soundManager.updateMuteIndicator(); showToast(soundManager.enabled ? '🔊 Sound enabled' : '🔇 Sound muted');" title="Toggle sound (M)">
+                🔊
+            </button>
+            <button id="sound-settings" class="icon-button" onclick="showSoundSettings()" title="Sound settings (Shift+S)">
+                ⚙️
+            </button>
+            <button id="analytics-button" class="icon-button" title="Analytics" onclick="toggleAnalytics()">
+                📊
+            </button>
+            <button id="machines-button" class="icon-button" title="Manage machines" onclick="showMachinesModal()">
+                🖥️
+            </button>
+            <span id="machine-count" class="machine-count"></span>
+            <button id="notification-toggle" class="icon-button" title="Toggle notifications">
+                🔔
+            </button>
+            <button id="help-button" class="icon-button" title="Keyboard shortcuts (?)">
+                ?
+            </button>
+        </div>
+    </header>
+
+    <nav class="view-tabs">
+        <button class="tab-button active" onclick="switchView('sessions')" data-view="sessions">
+            Sessions
+        </button>
+        <button class="tab-button" onclick="switchView('gastown')" data-view="gastown">
+            🏭 Gastown
+        </button>
+        <button class="tab-button" onclick="switchView('timeline')" data-view="timeline">
+            Timeline
+        </button>
+        <button class="tab-button" onclick="switchView('compare')" data-view="compare">
+            Compare
+        </button>
+        <button class="tab-button" onclick="switchView('analytics')" data-view="analytics">
+            Analytics
+        </button>
+    </nav>
+
+    <div id="sessions-view" class="view active">
+        <div id="filters">
+            <input type="text" id="search" placeholder="🔍 Search sessions...">
+            <select id="status-filter">
+                <option value="all">All Sessions</option>
+                <option value="active">Active Only</option>
+                <option value="waiting">Waiting Only</option>
+            </select>
+            <button id="clear-filters">Clear</button>
+            <div class="filter-divider"></div>
+            <button id="view-mode-toggle" class="icon-button" onclick="toggleCardMode()" title="Toggle compact/detailed view (v)">📋</button>
+            <button id="focus-mode-toggle" class="icon-button" onclick="toggleFocusMode()" title="Focus on active sessions (f)">🎯</button>
+            <button id="refresh-all-summaries" class="icon-button" onclick="refreshAllSummaries()" title="Refresh all AI summaries">🤖</button>
+        </div>
+        <main id="sessions-container"></main>
+    </div>
+
+    <div id="gastown-view" class="view">
+        <div class="gastown-view-header">
+            <h2>🏭 Gastown Agents</h2>
+            <span id="gastown-count" class="gastown-stats"></span>
+        </div>
+        <main id="gastown-container"></main>
+    </div>
+
+    <div id="timeline-view" class="view">
+        <div class="timeline-header">
+            <h2>Session Timeline</h2>
+            <div class="timeline-controls">
+                <span class="timeline-range-label">Last 8 hours</span>
+                <button class="refresh-btn" onclick="refreshTimeline()" title="Refresh timeline">🔄</button>
+            </div>
+        </div>
+        <div class="timeline-legend">
+            <span class="legend-item"><span class="legend-dot active"></span> Active</span>
+            <span class="legend-item"><span class="legend-dot waiting"></span> Waiting</span>
+        </div>
+        <div id="timeline-container" class="timeline-container">
+            <div class="timeline-loading">Loading timeline...</div>
+        </div>
+    </div>
+
+    <div id="compare-view" class="view">
+        <div class="compare-header">
+            <h2>Compare Sessions</h2>
+            <button class="exit-compare-btn" onclick="switchView('sessions')">← Back to Sessions</button>
+        </div>
+        <div id="compare-container" class="compare-container"></div>
+    </div>
+
+    <div id="analytics-view" class="view">
+        <div class="analytics-header">
+            <h2>Usage Analytics</h2>
+            <div class="period-selector">
+                <button class="period-btn" data-period="day">Today</button>
+                <button class="period-btn active" data-period="week">Week</button>
+                <button class="period-btn" data-period="month">Month</button>
+                <button class="period-btn" data-period="year">Year</button>
+            </div>
+        </div>
+        <div id="analytics-container"></div>
+    </div>
+
+    <!-- Modal for keyboard shortcuts and other dialogs -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+        <div id="modal-content" class="modal-content"></div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

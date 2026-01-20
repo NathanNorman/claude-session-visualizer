@@ -1,12 +1,28 @@
-const POLL_INTERVAL = 1500;
+// Adaptive polling intervals
+const POLL_INTERVAL_ACTIVE = 3000;    // 3s when sessions are active
+const POLL_INTERVAL_IDLE = 10000;     // 10s when all sessions idle
+let currentPollInterval = POLL_INTERVAL_ACTIVE;
+let pollTimeoutId = null;
+
 const API_URL = '/api/sessions';
+const API_URL_ALL = '/api/sessions/all';
 let previousSessions = new Map();
 const NOTES_KEY = 'session-notes';
+
+// Track if initial render has happened (for differential updates)
+let initialRenderComplete = false;
+// Track current rendered session IDs for diffing
+let renderedSessionIds = new Set();
 
 // Feature 01: Search/Filter state
 let searchQuery = '';
 let statusFilter = 'all';
 let searchDebounceTimer = null;
+
+// Feature 17: Multi-Machine state
+let multiMachineMode = JSON.parse(localStorage.getItem('multiMachineMode') || 'false');
+let machineFilter = 'all'; // 'all' or specific machine name
+let machinesData = { local: null, remote: {} };
 
 // Feature 02: Session grouping state
 let groupCollapsedState = JSON.parse(localStorage.getItem('groupCollapsedState') || '{}');
@@ -54,6 +70,53 @@ let lastSummaryRefresh = 0;
 let comparedSessions = [null, null];
 let compareViewActive = false;
 
+// UX Enhancement: Compact card mode and focus mode
+let cardDisplayMode = localStorage.getItem('cardDisplayMode') || 'compact'; // 'compact' or 'detailed'
+let focusMode = JSON.parse(localStorage.getItem('focusMode') || 'false');
+
+// ============================================================================
+// Session Diffing Helpers (for differential DOM updates)
+// ============================================================================
+
+function hasSessionChanged(oldSession, newSession) {
+    if (!oldSession) return true;
+    // Only check fields that affect visual display
+    return oldSession.state !== newSession.state ||
+           oldSession.contextTokens !== newSession.contextTokens ||
+           oldSession.cpuPercent !== newSession.cpuPercent ||
+           JSON.stringify(oldSession.recentActivity) !== JSON.stringify(newSession.recentActivity) ||
+           oldSession.aiSummary !== newSession.aiSummary ||
+           oldSession.lastActivity !== newSession.lastActivity;
+}
+
+function computeSessionDiff(oldSessions, newSessions) {
+    const oldMap = new Map(oldSessions.map(s => [s.sessionId, s]));
+    const newMap = new Map(newSessions.map(s => [s.sessionId, s]));
+
+    const added = [];
+    const removed = [];
+    const updated = [];
+
+    // Find added and updated
+    for (const [id, session] of newMap) {
+        const old = oldMap.get(id);
+        if (!old) {
+            added.push(session);
+        } else if (hasSessionChanged(old, session)) {
+            updated.push(session);
+        }
+    }
+
+    // Find removed
+    for (const id of oldMap.keys()) {
+        if (!newMap.has(id)) {
+            removed.push(id);
+        }
+    }
+
+    return { added, removed, updated };
+}
+
 // Sound Manager - Feature 14
 class SoundManager {
     constructor() {
@@ -61,11 +124,22 @@ class SoundManager {
         this.enabled = true;
         this.volume = 0.7;
         this.settings = this.loadSettings();
-        this.initAudioContext();
+        this.userHasInteracted = false;
+
+        // Listen for first user interaction to enable audio
+        const enableAudio = () => {
+            this.userHasInteracted = true;
+            this.initAudioContext();
+            document.removeEventListener('click', enableAudio);
+            document.removeEventListener('keydown', enableAudio);
+        };
+        document.addEventListener('click', enableAudio, { once: true });
+        document.addEventListener('keydown', enableAudio, { once: true });
     }
 
     initAudioContext() {
-        // Lazy init on first interaction to avoid autoplay restrictions
+        // Only init if user has interacted with the page
+        if (!this.userHasInteracted) return;
         if (!this.audioContext) {
             try {
                 this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -77,7 +151,10 @@ class SoundManager {
 
     // Generate tones using Web Audio API
     playTone(frequency, duration, type = 'sine') {
-        if (!this.enabled || !this.audioContext) return;
+        if (!this.enabled) return;
+        // Lazy init on first sound play (requires user gesture)
+        this.initAudioContext();
+        if (!this.audioContext) return;
 
         try {
             const oscillator = this.audioContext.createOscillator();
@@ -104,6 +181,7 @@ class SoundManager {
 
     play(soundName) {
         if (!this.enabled) return;
+        if (!this.userHasInteracted) return; // No sound until user clicks/types
         if (!this.settings[soundName]?.enabled) return;
 
         this.initAudioContext();
@@ -463,9 +541,27 @@ async function fetchSessions() {
 
         const activeCount = data.sessions.filter(s => s.state === 'active').length;
         updateStatus(activeCount, data.sessions.length, data.timestamp);
+
+        // Schedule next poll with adaptive interval
+        scheduleNextPoll(activeCount > 0);
     } catch (error) {
         console.error('Failed to fetch sessions:', error);
+        // On error, still schedule next poll
+        scheduleNextPoll(false);
     }
+}
+
+// Adaptive polling: faster when active, slower when idle
+function scheduleNextPoll(hasActiveSessions) {
+    if (pollTimeoutId) {
+        clearTimeout(pollTimeoutId);
+    }
+
+    currentPollInterval = hasActiveSessions ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE;
+
+    pollTimeoutId = setTimeout(() => {
+        fetchSessions();
+    }, currentPollInterval);
 }
 
 // Old renderSessions removed - replaced by renderCurrentSessions with grouping support
@@ -626,7 +722,7 @@ function createCard(session, index = 0) {
         ${summaryHtml}
         ${aiSummaryHtml}
         ${noteHtml}
-        <div class="cwd">${escapeHtml(session.cwd || 'Unknown')}${branchHtml}</div>
+        <div class="cwd" title="${escapeHtml(session.cwd || 'Unknown')}"><span class="cwd-path">${escapeHtml(session.cwd || 'Unknown')}</span>${branchHtml}</div>
         ${gitHtml}
         ${formatTokenBar(session.contextTokens)}
         <div class="activity-log">${activityHtml}</div>
@@ -640,16 +736,17 @@ function createCard(session, index = 0) {
             <span>${formatTime(session.lastActivity)}</span>
         </div>`;
 
-    card.style.opacity = '0';
-    requestAnimationFrame(() => {
-        card.style.transition = 'opacity 0.3s ease';
-        card.style.opacity = '1';
-    });
+    // No fade-in animation - cards appear instantly for visual stability
 
     // Auto-scroll activity log to bottom, but respect manual scroll
     const logEl = card.querySelector('.activity-log');
     if (logEl) {
-        logEl.scrollTop = logEl.scrollHeight;
+        // Defer scroll until after DOM is fully rendered
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                logEl.scrollTop = logEl.scrollHeight;
+            });
+        });
         // Track if user manually scrolls
         logEl.dataset.userScrolled = 'false';
         logEl.addEventListener('scroll', () => {
@@ -663,6 +760,87 @@ function createCard(session, index = 0) {
     card.addEventListener('click', () => focusWarpTab(session));
 
     return card;
+}
+
+// Compact card - shows only essential info
+function createCompactCard(session, index = 0) {
+    const card = document.createElement('div');
+    card.className = `session-card compact ${session.state}`;
+    card.dataset.sessionId = session.sessionId;
+
+    const tokenPct = session.contextTokens
+        ? Math.min(100, (session.contextTokens / MAX_CONTEXT_TOKENS) * 100)
+        : 0;
+    const tokenClass = tokenPct > 80 ? 'critical' : tokenPct > 50 ? 'warning' : 'ok';
+
+    const latestActivity = (session.recentActivity || [])[0] || 'Idle';
+
+    card.innerHTML = `
+        <span class="card-number">${index + 1}</span>
+        <div class="compact-row">
+            <span class="status-dot ${session.state}"></span>
+            <span class="compact-slug">${escapeHtml(session.slug)}</span>
+            <span class="compact-tokens ${tokenClass}">${Math.round(tokenPct)}%</span>
+            <button class="compact-expand" onclick="event.stopPropagation(); expandCard('${session.sessionId}')" title="Show details">▼</button>
+        </div>
+        <div class="compact-activity">${escapeHtml(latestActivity)}</div>
+    `;
+
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', () => focusWarpTab(session));
+
+    return card;
+}
+
+// Toggle between compact and detailed view
+function toggleCardMode() {
+    cardDisplayMode = cardDisplayMode === 'compact' ? 'detailed' : 'compact';
+    localStorage.setItem('cardDisplayMode', cardDisplayMode);
+    updateViewModeButton();
+    renderCurrentSessions(null, true); // Force full render
+    showToast(`Switched to ${cardDisplayMode} view`);
+}
+
+// Expand a single compact card to detailed view
+function expandCard(sessionId) {
+    const session = previousSessions.get(sessionId);
+    if (!session) return;
+
+    const compactCard = document.querySelector(`[data-session-id="${sessionId}"]`);
+    if (compactCard && compactCard.classList.contains('compact')) {
+        const index = Array.from(document.querySelectorAll('[data-session-id]')).indexOf(compactCard);
+        const detailedCard = createCard(session, index);
+        detailedCard.classList.add('expanded');
+        compactCard.replaceWith(detailedCard);
+    }
+}
+
+// Toggle focus mode (show only active sessions)
+function toggleFocusMode() {
+    focusMode = !focusMode;
+    localStorage.setItem('focusMode', JSON.stringify(focusMode));
+    document.body.classList.toggle('focus-mode', focusMode);
+    updateFocusModeButton();
+    renderCurrentSessions(null, true); // Force full render
+    showToast(focusMode ? 'Focus mode: showing active only' : 'Focus mode off');
+}
+
+// Update the view mode button UI
+function updateViewModeButton() {
+    const btn = document.getElementById('view-mode-toggle');
+    if (btn) {
+        btn.textContent = cardDisplayMode === 'compact' ? '📋' : '📊';
+        btn.title = cardDisplayMode === 'compact' ? 'Switch to detailed view' : 'Switch to compact view';
+    }
+}
+
+// Update focus mode button UI
+function updateFocusModeButton() {
+    const btn = document.getElementById('focus-mode-toggle');
+    if (btn) {
+        btn.classList.toggle('active', focusMode);
+        btn.title = focusMode ? 'Show all sessions' : 'Show active only';
+    }
 }
 
 function toggleActionMenu(sessionId) {
@@ -794,6 +972,69 @@ async function refreshSummary(sessionId) {
     } catch (e) {
         console.error('Failed to refresh summary:', e);
         showToast('Failed to refresh summary', 'error');
+    }
+}
+
+// Refresh all AI summaries for non-gastown sessions with new activity
+async function refreshAllSummaries() {
+    const btn = document.getElementById('refresh-all-summaries');
+    if (btn) btn.disabled = true;
+
+    showToast('Refreshing AI summaries...');
+
+    try {
+        const response = await fetch('/api/sessions/refresh-all-summaries', {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            showToast(`Failed: ${error.detail || 'Unknown error'}`, 'error');
+            return;
+        }
+
+        const data = await response.json();
+
+        // Update cards with new summaries
+        for (const item of data.details.refreshed) {
+            const card = document.querySelector(`[data-session-id="${item.sessionId}"]`);
+            if (card) {
+                let summaryEl = card.querySelector('.ai-summary');
+                if (summaryEl) {
+                    summaryEl.textContent = item.summary;
+                } else {
+                    const slugEl = card.querySelector('.slug');
+                    if (slugEl) {
+                        const newSummaryEl = document.createElement('div');
+                        newSummaryEl.className = 'ai-summary';
+                        newSummaryEl.textContent = item.summary;
+                        slugEl.insertAdjacentElement('afterend', newSummaryEl);
+                    }
+                }
+            }
+
+            // Update cache
+            const session = previousSessions.get(item.sessionId);
+            if (session) {
+                session.aiSummary = item.summary;
+                previousSessions.set(item.sessionId, session);
+            }
+        }
+
+        const skippedNoActivity = data.details.skipped.filter(s => s.reason === 'no_new_activity').length;
+        const skippedGastown = data.details.skipped.filter(s => s.reason === 'gastown').length;
+
+        let message = `Updated ${data.refreshed} summaries`;
+        if (skippedNoActivity > 0) {
+            message += `, ${skippedNoActivity} unchanged`;
+        }
+        showToast(message);
+
+    } catch (e) {
+        console.error('Failed to refresh all summaries:', e);
+        showToast('Failed to refresh summaries', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -1120,7 +1361,9 @@ function updateCard(card, session) {
             logEl.innerHTML = formatActivityLog(newActivity);
             // Only auto-scroll if user hasn't manually scrolled up
             if (logEl.dataset.userScrolled !== 'true') {
-                logEl.scrollTop = logEl.scrollHeight;
+                requestAnimationFrame(() => {
+                    logEl.scrollTop = logEl.scrollHeight;
+                });
             }
         }
     }
@@ -1225,13 +1468,13 @@ function initializeFilters() {
         clearTimeout(searchDebounceTimer);
         searchDebounceTimer = setTimeout(() => {
             searchQuery = e.target.value;
-            renderCurrentSessions();
+            renderCurrentSessions(null, true); // Force full render on filter change
         }, 150);
     });
 
     statusSelect.addEventListener('change', (e) => {
         statusFilter = e.target.value;
-        renderCurrentSessions();
+        renderCurrentSessions(null, true); // Force full render on filter change
     });
 
     clearButton.addEventListener('click', () => {
@@ -1239,12 +1482,14 @@ function initializeFilters() {
         statusSelect.value = 'all';
         searchQuery = '';
         statusFilter = 'all';
-        renderCurrentSessions();
+        renderCurrentSessions(null, true); // Force full render on filter change
     });
 }
 
 function filterSessions(sessions) {
     return sessions.filter(s => {
+        // Focus mode: only show active sessions
+        if (focusMode && s.state !== 'active') return false;
         if (statusFilter !== 'all' && s.state !== statusFilter) return false;
         if (searchQuery) {
             const q = searchQuery.toLowerCase();
@@ -1267,7 +1512,7 @@ function filterSessions(sessions) {
 function groupSessionsByProject(sessions) {
     const groups = {};
     for (const session of sessions) {
-        const project = session.cwd?.split('/').pop() || 'Unknown';
+        const project = session.cwd?.split('/').pop() || session.slug || 'Unknown';
         if (!groups[project]) {
             groups[project] = {
                 name: project,
@@ -1281,73 +1526,335 @@ function groupSessionsByProject(sessions) {
             groups[project].activeCount++;
         }
     }
-    return Object.values(groups).sort((a, b) =>
-        b.activeCount - a.activeCount || a.name.localeCompare(b.name)
-    );
+    // Stable sort: alphabetically by name, NOT by active count
+    // This prevents groups from jumping around when session states change
+    return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function toggleGroup(projectName) {
     groupCollapsedState[projectName] = !groupCollapsedState[projectName];
     localStorage.setItem('groupCollapsedState', JSON.stringify(groupCollapsedState));
-    renderCurrentSessions();
+    renderCurrentSessions(null, true); // Force full render on group toggle
 }
 
 function renderGroups(groups) {
     const container = document.getElementById('sessions-container');
     container.innerHTML = '';
     let cardIndex = 0;
+
+    // Choose card creation function based on display mode
+    const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
+
     groups.forEach(group => {
         const groupDiv = document.createElement('div');
-        groupDiv.className = `session-group ${group.collapsed ? 'collapsed' : ''}`;
-        const header = document.createElement('div');
-        header.className = 'group-header';
-        header.onclick = () => toggleGroup(group.name);
-        header.innerHTML = `
-            <span class="collapse-icon">${group.collapsed ? '▶' : '▼'}</span>
-            <span class="group-name">${escapeHtml(group.name)}</span>
-            <span class="group-stats">
-                ${group.sessions.length} session${group.sessions.length !== 1 ? 's' : ''}
-                ${group.activeCount > 0 ? `(${group.activeCount} active)` : ''}
+        groupDiv.className = 'session-row';
+
+        // Left side: repo name
+        const labelDiv = document.createElement('div');
+        labelDiv.className = 'session-row-label';
+        labelDiv.innerHTML = `
+            <span class="row-name">${escapeHtml(group.name)}</span>
+            <span class="row-stats">
+                ${group.sessions.length}${group.activeCount > 0 ? ` <span class="row-active">(${group.activeCount} active)</span>` : ''}
             </span>
         `;
-        groupDiv.appendChild(header);
+        groupDiv.appendChild(labelDiv);
+
+        // Right side: horizontal cards
         const sessionsDiv = document.createElement('div');
-        sessionsDiv.className = 'group-sessions';
+        sessionsDiv.className = 'session-row-cards';
+        sessionsDiv.dataset.cardCount = Math.min(group.sessions.length, 4);
+
         group.sessions.forEach(session => {
-            const card = createCard(session, cardIndex++);
+            const card = createCardFn(session, cardIndex++);
             sessionsDiv.appendChild(card);
         });
+
         groupDiv.appendChild(sessionsDiv);
         container.appendChild(groupDiv);
     });
     allVisibleSessions = groups.flatMap(g => g.sessions);
 }
 
-function renderCurrentSessions(sessions = null) {
+// Gastown dedicated tab view
+let gastownSessions = [];
+
+function renderGastownView(gastown) {
+    gastownSessions = gastown || [];
+    const container = document.getElementById('gastown-container');
+    const countEl = document.getElementById('gastown-count');
+
+    if (!container) return;
+
+    const activeCount = gastownSessions.filter(s => s.state === 'active').length;
+    const totalCount = gastownSessions.length;
+
+    // Update count badge in header
+    if (countEl) {
+        countEl.textContent = `${totalCount} agent${totalCount !== 1 ? 's' : ''}${activeCount > 0 ? ` (${activeCount} active)` : ''}`;
+    }
+
+    // Update tab badge
+    const tabButton = document.querySelector('[data-view="gastown"]');
+    if (tabButton) {
+        // Add/update badge on the tab
+        let badge = tabButton.querySelector('.tab-badge');
+        if (totalCount > 0) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'tab-badge';
+                tabButton.appendChild(badge);
+            }
+            badge.textContent = totalCount;
+            badge.classList.toggle('has-active', activeCount > 0);
+        } else if (badge) {
+            badge.remove();
+        }
+    }
+
+    // Empty state
+    if (gastownSessions.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state gastown-empty">
+                <h2>🏭 No Gastown Agents</h2>
+                <p>No gastown agents are currently running.</p>
+                <p class="hint">Gastown agents appear here when spawned via <code>gt sling</code></p>
+            </div>`;
+        return;
+    }
+
+    // Render gastown sessions as horizontal cards (no grouping)
+    container.innerHTML = '';
+
+    // Set flex sizing class based on count
+    container.className = 'gastown-horizontal';
+    container.dataset.cardCount = Math.min(totalCount, 4); // Cap at 4 for CSS sizing
+
+    const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
+
+    gastownSessions.forEach((session, idx) => {
+        const card = createCardFn(session, idx);
+        card.classList.add('gastown-card');
+        container.appendChild(card);
+    });
+}
+
+function groupGastownByRig(sessions) {
+    const groups = {};
+
+    for (const session of sessions) {
+        // Extract rig name from cwd path (e.g., /polecats/myrig/... -> myrig)
+        let rigName = 'Unknown';
+        const cwd = session.cwd || '';
+
+        // Match patterns like /polecats/rigname/ or /rig/rigname/
+        const rigMatch = cwd.match(/\/(?:polecats|rig)\/([^/]+)/);
+        if (rigMatch) {
+            rigName = rigMatch[1];
+        } else {
+            // Fallback to last directory component
+            rigName = cwd.split('/').filter(Boolean).pop() || session.slug || 'Unknown';
+        }
+
+        if (!groups[rigName]) {
+            groups[rigName] = {
+                name: rigName,
+                sessions: [],
+                activeCount: 0
+            };
+        }
+        groups[rigName].sessions.push(session);
+        if (session.state === 'active') {
+            groups[rigName].activeCount++;
+        }
+    }
+
+    // Sort by name, active groups first
+    return Object.values(groups).sort((a, b) => {
+        if (a.activeCount > 0 && b.activeCount === 0) return -1;
+        if (b.activeCount > 0 && a.activeCount === 0) return 1;
+        return a.name.localeCompare(b.name);
+    });
+}
+
+function renderCurrentSessions(sessions = null, forceFullRender = false) {
     if (!sessions) {
         sessions = Array.from(previousSessions.values());
     }
     const filtered = filterSessions(sessions);
-    const totalCount = sessions.length;
-    const filteredCount = filtered.length;
-    if (filteredCount !== totalCount) {
-        document.getElementById('session-count').textContent = `${filteredCount} of ${totalCount} sessions`;
-    }
+
+    // Separate main sessions from gastown sessions
+    const mainSessions = filtered.filter(s => !s.isGastown);
+    const gastown = filtered.filter(s => s.isGastown);
+
+    const mainCount = mainSessions.length;
+
+    // Update count display (gastown has its own tab badge)
+    const activeCount = mainSessions.filter(s => s.state === 'active').length;
+    let countText = activeCount > 0
+        ? `${activeCount} active, ${mainCount - activeCount} waiting`
+        : `${mainCount} session${mainCount !== 1 ? 's' : ''}`;
+    document.getElementById('session-count').textContent = countText;
+
     const container = document.getElementById('sessions-container');
-    if (filtered.length === 0) {
+
+    // Always update gastown view (separate tab)
+    renderGastownView(gastown);
+
+    // Empty state for main sessions only
+    if (mainSessions.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
-                <h2>${totalCount === 0 ? 'No Claude sessions' : 'No matching sessions'}</h2>
-                <p>${totalCount === 0 ? 'Start a Claude Code session to see it here' : 'Try adjusting your filters'}</p>
+                <h2>No Claude sessions</h2>
+                <p>Start a Claude Code session to see it here</p>
+                ${gastown.length > 0 ? '<p class="hint">Gastown agents are in the 🏭 Gastown tab</p>' : ''}
             </div>`;
         allVisibleSessions = [];
+        renderedSessionIds.clear();
+        initialRenderComplete = false;
         return;
     }
-    const groups = groupSessionsByProject(filtered);
-    renderGroups(groups);
+
+    // First render or forced full render - build everything
+    if (!initialRenderComplete || forceFullRender || container.children.length === 0) {
+        // Render main sessions only (gastown is in separate tab)
+        const mainGroups = groupSessionsByProject(mainSessions);
+        renderGroups(mainGroups);
+
+        renderedSessionIds = new Set(mainSessions.map(s => s.sessionId));
+        initialRenderComplete = true;
+    } else {
+        // Incremental update - update main session cards only
+        updateSessionsInPlace(mainSessions);
+    }
+
     if (selectedIndex >= allVisibleSessions.length) {
         clearSelection();
     }
+}
+
+// Update sessions without full DOM rebuild
+function updateSessionsInPlace(sessions) {
+    const container = document.getElementById('sessions-container');
+    const currentIds = new Set(sessions.map(s => s.sessionId));
+
+    // Update existing cards and track what needs to be added/removed
+    const sessionsToAdd = [];
+
+    for (const session of sessions) {
+        const card = container.querySelector(`[data-session-id="${session.sessionId}"]`);
+        if (card) {
+            // Update existing card
+            updateCard(card, session);
+        } else {
+            // New session - will need to add
+            sessionsToAdd.push(session);
+        }
+    }
+
+    // Remove cards for sessions that no longer exist
+    const cardsToRemove = [];
+    container.querySelectorAll('[data-session-id]').forEach(card => {
+        const sessionId = card.dataset.sessionId;
+        if (!currentIds.has(sessionId)) {
+            cardsToRemove.push(card);
+        }
+    });
+    cardsToRemove.forEach(card => card.remove());
+
+    // Add new sessions - append to appropriate group or create group
+    if (sessionsToAdd.length > 0) {
+        for (const session of sessionsToAdd) {
+            appendNewSession(container, session);
+        }
+    }
+
+    // Update group stats without rebuilding
+    updateGroupStats(sessions);
+
+    // Update allVisibleSessions for keyboard navigation
+    allVisibleSessions = sessions;
+    renderedSessionIds = currentIds;
+}
+
+// Append a new session card to the appropriate group
+function appendNewSession(container, session) {
+    const projectName = session.cwd?.split('/').pop() || session.slug || 'Unknown';
+
+    // Find existing group
+    let groupDiv = null;
+    let sessionsDiv = null;
+
+    container.querySelectorAll('.session-group').forEach(group => {
+        const groupNameEl = group.querySelector('.group-name');
+        if (groupNameEl && groupNameEl.textContent === projectName) {
+            groupDiv = group;
+            sessionsDiv = group.querySelector('.group-sessions');
+        }
+    });
+
+    // If no group exists, create one
+    if (!groupDiv) {
+        groupDiv = document.createElement('div');
+        groupDiv.className = 'session-group';
+        groupDiv.dataset.groupName = projectName;
+
+        const header = document.createElement('div');
+        header.className = 'group-header';
+        header.onclick = () => toggleGroup(projectName);
+        header.innerHTML = `
+            <span class="collapse-icon">▼</span>
+            <span class="group-name">${escapeHtml(projectName)}</span>
+            <span class="group-stats">1 session</span>
+        `;
+        groupDiv.appendChild(header);
+
+        sessionsDiv = document.createElement('div');
+        sessionsDiv.className = 'group-sessions';
+        groupDiv.appendChild(sessionsDiv);
+
+        container.appendChild(groupDiv);
+    }
+
+    // Add the card to the group (respect compact mode)
+    const cardIndex = container.querySelectorAll('[data-session-id]').length;
+    const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
+    const card = createCardFn(session, cardIndex);
+    sessionsDiv.appendChild(card);
+}
+
+// Update group statistics without rebuilding
+function updateGroupStats(sessions) {
+    const container = document.getElementById('sessions-container');
+    const groupStats = {};
+
+    // Calculate stats per group
+    for (const session of sessions) {
+        const projectName = session.cwd?.split('/').pop() || session.slug || 'Unknown';
+        if (!groupStats[projectName]) {
+            groupStats[projectName] = { total: 0, active: 0 };
+        }
+        groupStats[projectName].total++;
+        if (session.state === 'active') {
+            groupStats[projectName].active++;
+        }
+    }
+
+    // Update each group's stats display
+    container.querySelectorAll('.session-group').forEach(group => {
+        const groupNameEl = group.querySelector('.group-name');
+        const statsEl = group.querySelector('.group-stats');
+        if (groupNameEl && statsEl) {
+            const name = groupNameEl.textContent;
+            const stats = groupStats[name];
+            if (stats) {
+                statsEl.innerHTML = `
+                    ${stats.total} session${stats.total !== 1 ? 's' : ''}
+                    ${stats.active > 0 ? `(${stats.active} active)` : ''}
+                `;
+            }
+        }
+    });
 }
 
 // ============================================================================
@@ -1556,6 +2063,8 @@ function checkStateChanges(oldSessions, newSessions) {
     for (const session of newSessions) {
         const old = oldMap.get(session.sessionId);
         if (!old) continue;
+        // Skip notifications for gastown sessions
+        if (session.isGastown) continue;
         if (old.state === 'waiting' && session.state === 'active') {
             if (notificationSettings.onActive) {
                 sendNotification('🟢 Session Active', `${session.slug} is working`,
@@ -1634,6 +2143,8 @@ function handleKeyPress(e) {
         'r': () => fetchSessions(),
         'n': () => showNotificationSettings(),
         'm': () => { soundManager.toggle(); soundManager.updateMuteIndicator(); showToast(soundManager.enabled ? 'Sound enabled' : 'Sound muted'); },
+        'v': () => toggleCardMode(),
+        'f': () => toggleFocusMode(),
         '?': () => showShortcutsHelp(),
         'Escape': () => clearSelection()
     };
@@ -1723,11 +2234,23 @@ function showShortcutsHelp() {
     `);
 }
 
+// Initialize UX enhancements
+function initializeUXEnhancements() {
+    // Apply saved focus mode state
+    if (focusMode) {
+        document.body.classList.add('focus-mode');
+    }
+    // Update button UIs
+    updateViewModeButton();
+    updateFocusModeButton();
+}
+
 // Initialize all features
 document.addEventListener('DOMContentLoaded', () => {
     initializeFilters();
     initializeNotifications();
     initializeKeyboardShortcuts();
+    initializeUXEnhancements();
 });
 
 // ============================================================================
@@ -2138,8 +2661,8 @@ function toggleAnalytics() {
     }
 }
 
+// Initial fetch - scheduleNextPoll() is called inside fetchSessions()
 fetchSessions();
-setInterval(fetchSessions, POLL_INTERVAL);
 
 // Auto-refresh timeline when on that view
 setInterval(() => {
@@ -2488,4 +3011,487 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-console.log('Claude Session Visualizer loaded - All features active');
+// ============================================================================
+// Feature 17: Multi-Machine Support Implementation
+// ============================================================================
+
+async function fetchMachines() {
+    try {
+        const response = await fetch('/api/machines');
+        if (!response.ok) throw new Error('Failed to fetch machines');
+        return await response.json();
+    } catch (error) {
+        console.error('Failed to fetch machines:', error);
+        return { machines: [] };
+    }
+}
+
+async function addMachine(name, host, sshKey = null) {
+    try {
+        const response = await fetch('/api/machines', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                host,
+                ssh_key: sshKey,
+                auto_reconnect: true
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to add machine');
+        }
+
+        return await response.json();
+    } catch (error) {
+        throw error;
+    }
+}
+
+async function removeMachine(name) {
+    try {
+        const response = await fetch(`/api/machines/${encodeURIComponent(name)}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to remove machine');
+        }
+
+        return await response.json();
+    } catch (error) {
+        throw error;
+    }
+}
+
+async function reconnectMachine(name) {
+    try {
+        const response = await fetch(`/api/machines/${encodeURIComponent(name)}/reconnect`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to reconnect');
+        }
+
+        return await response.json();
+    } catch (error) {
+        throw error;
+    }
+}
+
+async function testMachineConnection(host, sshKey = null) {
+    try {
+        const params = new URLSearchParams({ host });
+        if (sshKey) params.append('ssh_key', sshKey);
+
+        const response = await fetch(`/api/machines/test?${params}`, {
+            method: 'POST'
+        });
+
+        return await response.json();
+    } catch (error) {
+        return { status: 'error', message: error.message };
+    }
+}
+
+function toggleMultiMachineMode() {
+    multiMachineMode = !multiMachineMode;
+    localStorage.setItem('multiMachineMode', JSON.stringify(multiMachineMode));
+    updateMultiMachineUI();
+    fetchSessions();
+    showToast(multiMachineMode ? 'Multi-machine mode enabled' : 'Multi-machine mode disabled');
+}
+
+function updateMultiMachineUI() {
+    const machinesBtn = document.getElementById('machines-button');
+    const machineCount = document.getElementById('machine-count');
+
+    if (machinesBtn) {
+        machinesBtn.classList.toggle('active', multiMachineMode);
+    }
+
+    // Update machine count badge
+    if (machineCount && machinesData.remote) {
+        const connectedCount = Object.values(machinesData.remote)
+            .filter(r => !r.error).length;
+        if (multiMachineMode && connectedCount > 0) {
+            machineCount.textContent = `+${connectedCount}`;
+            machineCount.classList.remove('hidden');
+        } else {
+            machineCount.classList.add('hidden');
+        }
+    }
+}
+
+async function showMachinesModal() {
+    const machines = await fetchMachines();
+
+    const machineListHtml = machines.machines.length === 0 ? `
+        <div class="empty-state" style="padding: 20px;">
+            <p>No remote machines configured.</p>
+            <p>Add a machine running the remote agent to monitor sessions across multiple computers.</p>
+        </div>
+    ` : machines.machines.map(m => `
+        <div class="machine-item ${m.connected ? 'connected' : 'disconnected'}">
+            <div class="machine-info">
+                <span class="machine-name">${escapeHtml(m.name)}</span>
+                <span class="machine-host">${escapeHtml(m.host)}</span>
+            </div>
+            <div class="machine-status">
+                <span class="status-dot ${m.connected ? 'connected' : 'disconnected'}"></span>
+                ${m.connected ? 'Connected' : 'Disconnected'}
+                ${m.last_error ? `<span class="machine-error" title="${escapeHtml(m.last_error)}">⚠️</span>` : ''}
+            </div>
+            <div class="machine-actions">
+                ${!m.connected ? `
+                    <button onclick="handleReconnect('${escapeHtml(m.name)}')" class="btn-small">Reconnect</button>
+                ` : ''}
+                <button onclick="handleRemoveMachine('${escapeHtml(m.name)}')" class="btn-small danger">Remove</button>
+            </div>
+        </div>
+    `).join('');
+
+    showModal(`
+        <div class="machines-modal">
+            <div class="modal-header">
+                <h2>🖥️ Multi-Machine Management</h2>
+                <button onclick="closeModal()" class="modal-close">Close</button>
+            </div>
+
+            <div class="setting-group">
+                <label class="setting-toggle">
+                    <input type="checkbox" ${multiMachineMode ? 'checked' : ''}
+                           onchange="toggleMultiMachineMode()">
+                    <span>Enable multi-machine mode</span>
+                </label>
+                <p class="setting-desc">Aggregate sessions from all connected remote machines.</p>
+            </div>
+
+            <div class="machines-section">
+                <h3>Remote Machines</h3>
+                <div class="machines-list">
+                    ${machineListHtml}
+                </div>
+            </div>
+
+            <div class="add-machine-section">
+                <h3>Add New Machine</h3>
+                <div class="add-machine-form">
+                    <div class="form-row">
+                        <label for="machine-name">Display Name</label>
+                        <input type="text" id="machine-name" placeholder="e.g., Work Laptop">
+                    </div>
+                    <div class="form-row">
+                        <label for="machine-host">SSH Host</label>
+                        <input type="text" id="machine-host" placeholder="user@hostname or hostname">
+                    </div>
+                    <div class="form-row">
+                        <label for="machine-key">SSH Key (optional)</label>
+                        <input type="text" id="machine-key" placeholder="~/.ssh/id_rsa">
+                    </div>
+                    <div class="form-actions">
+                        <button onclick="testConnection()" class="btn-secondary">Test Connection</button>
+                        <button onclick="handleAddMachine()" class="btn-primary">Add Machine</button>
+                    </div>
+                    <div id="connection-status" class="connection-status hidden"></div>
+                </div>
+            </div>
+
+            <div class="help-section">
+                <h4>Setup Guide</h4>
+                <ol>
+                    <li>Copy <code>remote_agent.py</code> to the remote machine</li>
+                    <li>Run <code>python3 remote_agent.py</code> on the remote machine</li>
+                    <li>Ensure SSH access is configured</li>
+                    <li>Add the machine above using its SSH hostname</li>
+                </ol>
+            </div>
+        </div>
+    `);
+}
+
+async function testConnection() {
+    const host = document.getElementById('machine-host').value.trim();
+    const sshKey = document.getElementById('machine-key').value.trim() || null;
+    const statusEl = document.getElementById('connection-status');
+
+    if (!host) {
+        statusEl.textContent = 'Please enter a host';
+        statusEl.className = 'connection-status error';
+        statusEl.classList.remove('hidden');
+        return;
+    }
+
+    statusEl.textContent = 'Testing connection...';
+    statusEl.className = 'connection-status';
+    statusEl.classList.remove('hidden');
+
+    const result = await testMachineConnection(host, sshKey);
+
+    if (result.status === 'success') {
+        statusEl.textContent = '✓ Connection successful';
+        statusEl.className = 'connection-status success';
+    } else {
+        statusEl.textContent = `✗ ${result.message}`;
+        statusEl.className = 'connection-status error';
+    }
+}
+
+async function handleAddMachine() {
+    const name = document.getElementById('machine-name').value.trim();
+    const host = document.getElementById('machine-host').value.trim();
+    const sshKey = document.getElementById('machine-key').value.trim() || null;
+    const statusEl = document.getElementById('connection-status');
+
+    if (!name || !host) {
+        statusEl.textContent = 'Please enter both name and host';
+        statusEl.className = 'connection-status error';
+        statusEl.classList.remove('hidden');
+        return;
+    }
+
+    statusEl.textContent = 'Adding machine...';
+    statusEl.className = 'connection-status';
+    statusEl.classList.remove('hidden');
+
+    try {
+        await addMachine(name, host, sshKey);
+        showToast(`Added machine: ${name}`);
+        closeModal();
+        showMachinesModal(); // Refresh the modal
+    } catch (error) {
+        statusEl.textContent = `✗ ${error.message}`;
+        statusEl.className = 'connection-status error';
+    }
+}
+
+async function handleRemoveMachine(name) {
+    if (!confirm(`Remove machine "${name}"?`)) return;
+
+    try {
+        await removeMachine(name);
+        showToast(`Removed machine: ${name}`);
+        closeModal();
+        showMachinesModal(); // Refresh
+    } catch (error) {
+        showToast(`Failed to remove: ${error.message}`, 'error');
+    }
+}
+
+async function handleReconnect(name) {
+    try {
+        showToast(`Reconnecting to ${name}...`);
+        await reconnectMachine(name);
+        showToast(`Connected to ${name}`);
+        closeModal();
+        showMachinesModal(); // Refresh
+    } catch (error) {
+        showToast(`Failed to reconnect: ${error.message}`, 'error');
+    }
+}
+
+// Update fetchSessions to support multi-machine mode
+const originalFetchSessions = fetchSessions;
+fetchSessions = async function() {
+    try {
+        // Feature 15: Periodically fetch AI summaries
+        const now = Date.now();
+        const includeSummaries = (now - lastSummaryRefresh) > summaryRefreshInterval;
+
+        let url, data;
+
+        if (multiMachineMode) {
+            // Fetch from all machines
+            url = includeSummaries ? `${API_URL_ALL}?include_summaries=true` : API_URL_ALL;
+            const response = await fetch(url);
+            if (!response.ok) throw new Error('API error');
+            data = await response.json();
+
+            // Store machine data for UI
+            machinesData = {
+                local: data.local,
+                remote: data.remote
+            };
+
+            // Flatten sessions from all machines
+            const allSessions = [
+                ...(data.local?.sessions || []),
+                ...Object.values(data.remote || {})
+                    .filter(r => !r.error)
+                    .flatMap(r => r.sessions || [])
+            ];
+
+            if (includeSummaries) {
+                lastSummaryRefresh = now;
+            }
+
+            // Feature 07: Check for state changes and send notifications
+            checkStateChanges(previousSessionsForNotifications, allSessions);
+            previousSessionsForNotifications = [...allSessions];
+
+            // Store all sessions
+            allSessions.forEach(s => previousSessions.set(s.sessionId, { ...s }));
+
+            // Render with filters and grouping
+            renderCurrentSessions(allSessions);
+
+            // Refresh compare view if active
+            if (compareViewActive) {
+                renderCompareView();
+            }
+
+            // Update status with machine info
+            const activeCount = allSessions.filter(s => s.state === 'active').length;
+            const localActive = (data.local?.totals?.active || 0);
+            const remoteConnected = Object.values(data.remote || {}).filter(r => !r.error).length;
+
+            let label = `${activeCount} active, ${allSessions.length - activeCount} waiting`;
+            if (remoteConnected > 0) {
+                label += ` (${data.machineCount} machines)`;
+            }
+            document.getElementById('session-count').textContent = label;
+            try {
+                document.getElementById('last-update').textContent = `Updated: ${new Date(data.timestamp).toLocaleTimeString()}`;
+            } catch {}
+
+        } else {
+            // Original single-machine mode
+            url = includeSummaries ? `${API_URL}?include_summaries=true` : API_URL;
+            const response = await fetch(url);
+            if (!response.ok) throw new Error('API error');
+            data = await response.json();
+
+            if (includeSummaries) {
+                lastSummaryRefresh = now;
+            }
+
+            // Feature 07: Check for state changes and send notifications
+            checkStateChanges(previousSessionsForNotifications, data.sessions);
+            previousSessionsForNotifications = [...data.sessions];
+
+            // Store all sessions
+            data.sessions.forEach(s => previousSessions.set(s.sessionId, { ...s }));
+
+            // Render with filters and grouping
+            renderCurrentSessions(data.sessions);
+
+            // Refresh compare view if active
+            if (compareViewActive) {
+                renderCompareView();
+            }
+
+            const activeCount = data.sessions.filter(s => s.state === 'active').length;
+            updateStatus(activeCount, data.sessions.length, data.timestamp);
+        }
+
+        // Update multi-machine UI
+        updateMultiMachineUI();
+
+        // Schedule next poll with adaptive interval
+        const activeCount = multiMachineMode
+            ? [...(data.local?.sessions || []), ...Object.values(data.remote || {}).filter(r => !r.error).flatMap(r => r.sessions || [])].filter(s => s.state === 'active').length
+            : data.sessions.filter(s => s.state === 'active').length;
+        scheduleNextPoll(activeCount > 0);
+
+    } catch (error) {
+        console.error('Failed to fetch sessions:', error);
+        // On error, still schedule next poll
+        scheduleNextPoll(false);
+    }
+};
+
+// Override groupSessionsByProject to support machine grouping in multi-machine mode
+const originalGroupSessionsByProject = groupSessionsByProject;
+groupSessionsByProject = function(sessions) {
+    if (multiMachineMode) {
+        // Group by machine first, then by project
+        const machineGroups = {};
+
+        for (const session of sessions) {
+            const machine = session.machine || 'local';
+            const machineHostname = session.machineHostname || machine;
+
+            if (!machineGroups[machine]) {
+                machineGroups[machine] = {
+                    name: machineHostname,
+                    machineKey: machine,
+                    sessions: [],
+                    activeCount: 0,
+                    collapsed: groupCollapsedState[`machine:${machine}`] || false
+                };
+            }
+            machineGroups[machine].sessions.push(session);
+            if (session.state === 'active') {
+                machineGroups[machine].activeCount++;
+            }
+        }
+
+        // Convert to array and sort (local first, then alphabetically for stability)
+        return Object.values(machineGroups).sort((a, b) => {
+            if (a.machineKey === 'local') return -1;
+            if (b.machineKey === 'local') return 1;
+            return a.name.localeCompare(b.name);
+        });
+    }
+
+    // Original project-based grouping
+    return originalGroupSessionsByProject(sessions);
+};
+
+// Override renderGroups to handle machine groups (horizontal layout)
+const originalRenderGroups = renderGroups;
+renderGroups = function(groups) {
+    const container = document.getElementById('sessions-container');
+    container.innerHTML = '';
+    let cardIndex = 0;
+
+    const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
+
+    groups.forEach(group => {
+        const isMachineGroup = multiMachineMode && group.machineKey;
+        const icon = isMachineGroup
+            ? (group.machineKey === 'local' ? '💻 ' : '🖥️ ')
+            : '';
+
+        const groupDiv = document.createElement('div');
+        groupDiv.className = 'session-row';
+
+        // Left side: repo/machine name
+        const labelDiv = document.createElement('div');
+        labelDiv.className = 'session-row-label';
+        labelDiv.innerHTML = `
+            <span class="row-name">${icon}${escapeHtml(group.name)}</span>
+            <span class="row-stats">
+                ${group.sessions.length}${group.activeCount > 0 ? ` <span class="row-active">(${group.activeCount} active)</span>` : ''}
+            </span>
+        `;
+        groupDiv.appendChild(labelDiv);
+
+        // Right side: horizontal cards
+        const sessionsDiv = document.createElement('div');
+        sessionsDiv.className = 'session-row-cards';
+        sessionsDiv.dataset.cardCount = Math.min(group.sessions.length, 4);
+
+        group.sessions.forEach(session => {
+            const card = createCardFn(session, cardIndex++);
+            sessionsDiv.appendChild(card);
+        });
+
+        groupDiv.appendChild(sessionsDiv);
+        container.appendChild(groupDiv);
+    });
+
+    allVisibleSessions = groups.flatMap(g => g.sessions);
+};
+
+// Initialize multi-machine UI on load
+document.addEventListener('DOMContentLoaded', () => {
+    updateMultiMachineUI();
+});
+
+console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');
