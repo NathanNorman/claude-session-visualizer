@@ -769,6 +769,7 @@ function createCard(session, index = 0) {
         ${agentTreeHtml}
         ${backgroundShellsHtml}
         <div class="activity-log">${activityLogHtml}</div>
+        ${renderConversationPeek(session)}
         <div class="card-footer">
             <div class="meta">
                 <span>PID: ${session.pid || '--'}</span>
@@ -4177,4 +4178,229 @@ document.addEventListener('DOMContentLoaded', () => {
     updateMultiMachineUI();
 });
 
-console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');
+// ============================================================================
+// Feature 09: Conversation Peek Implementation
+// ============================================================================
+
+// Cache for conversation data to avoid repeated API calls
+const conversationCache = new Map();
+const CONVERSATION_CACHE_TTL = 30000; // 30 seconds
+
+async function loadConversation(sessionId, limit = 20) {
+    // Check cache first
+    const cached = conversationCache.get(sessionId);
+    if (cached && Date.now() - cached.timestamp < CONVERSATION_CACHE_TTL) {
+        return cached.messages;
+    }
+
+    try {
+        const resp = await fetch(`/api/session/${sessionId}/conversation?limit=${limit}`);
+        if (!resp.ok) return [];
+        const data = await resp.json();
+        const messages = data.messages || [];
+
+        // Cache the result
+        conversationCache.set(sessionId, {
+            messages,
+            timestamp: Date.now()
+        });
+
+        return messages;
+    } catch (e) {
+        console.warn('Failed to load conversation:', e);
+        return [];
+    }
+}
+
+function truncateText(text, maxLen) {
+    if (!text) return '';
+    if (text.length <= maxLen) return text;
+    return text.substring(0, maxLen - 3) + '...';
+}
+
+function renderConversationPeek(session) {
+    // Show a placeholder that loads conversation on demand
+    return `
+        <div class="conversation-peek" id="conv-peek-${session.sessionId}" onclick="event.stopPropagation();">
+            <div class="peek-loading" onclick="loadConversationPeek('${session.sessionId}')">
+                💬 View last exchange
+            </div>
+        </div>
+    `;
+}
+
+async function loadConversationPeek(sessionId) {
+    const peekEl = document.getElementById(`conv-peek-${sessionId}`);
+    if (!peekEl) return;
+
+    peekEl.innerHTML = '<div class="peek-loading">Loading...</div>';
+
+    const messages = await loadConversation(sessionId, 10);
+
+    if (messages.length < 2) {
+        peekEl.innerHTML = '<div class="peek-empty">No conversation yet</div>';
+        return;
+    }
+
+    // Get last human and assistant messages
+    const lastHuman = [...messages].reverse().find(m => m.role === 'human');
+    const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+
+    if (!lastHuman && !lastAssistant) {
+        peekEl.innerHTML = '<div class="peek-empty">No conversation yet</div>';
+        return;
+    }
+
+    const humanText = lastHuman ? truncateText(lastHuman.content, 80) : '';
+    const assistantText = lastAssistant ? truncateText(lastAssistant.content, 120) : '';
+
+    peekEl.innerHTML = `
+        <div class="peek-exchange">
+            ${humanText ? `
+                <div class="peek-human">
+                    <span class="peek-role">👤 You:</span>
+                    <span class="peek-text">"${escapeHtml(humanText)}"</span>
+                </div>
+            ` : ''}
+            ${assistantText ? `
+                <div class="peek-assistant">
+                    <span class="peek-role">🤖 Claude:</span>
+                    <span class="peek-text">"${escapeHtml(assistantText)}"</span>
+                </div>
+            ` : ''}
+        </div>
+        <button class="peek-more" onclick="event.stopPropagation(); openConversationModal('${sessionId}')">
+            View full conversation →
+        </button>
+    `;
+}
+
+async function openConversationModal(sessionId) {
+    closeAllMenus();
+    const session = previousSessions.get(sessionId);
+    const sessionName = session?.slug || sessionId;
+
+    showModal(`
+        <div class="conversation-modal">
+            <div class="conversation-modal-header">
+                <h3>💬 Conversation History</h3>
+                <span class="modal-session-name">${escapeHtml(sessionName)}</span>
+                <button onclick="closeModal()" class="modal-close">Close</button>
+            </div>
+            <div class="conversation-modal-body" id="conversation-messages">
+                <div class="loading">Loading conversation...</div>
+            </div>
+            <div class="conversation-modal-footer">
+                <button onclick="loadMoreConversation('${sessionId}')" id="load-more-btn" class="btn-secondary">
+                    Load more
+                </button>
+            </div>
+        </div>
+    `);
+
+    // Load initial conversation
+    const messages = await loadConversation(sessionId, 20);
+    renderConversationModal(messages);
+}
+
+let currentConversationLimit = 20;
+
+async function loadMoreConversation(sessionId) {
+    currentConversationLimit += 20;
+    const btn = document.getElementById('load-more-btn');
+    if (btn) btn.textContent = 'Loading...';
+
+    // Clear cache to fetch fresh data
+    conversationCache.delete(sessionId);
+
+    const messages = await loadConversation(sessionId, currentConversationLimit);
+    renderConversationModal(messages);
+
+    if (btn) btn.textContent = 'Load more';
+}
+
+function renderConversationModal(messages) {
+    const container = document.getElementById('conversation-messages');
+    if (!container) return;
+
+    if (!messages || messages.length === 0) {
+        container.innerHTML = `
+            <div class="conversation-empty">
+                <p>No conversation history found.</p>
+                <p>Start chatting with Claude to see messages here.</p>
+            </div>
+        `;
+        return;
+    }
+
+    // Render messages in chronological order (oldest first)
+    const messagesHtml = messages.map(msg => renderConversationMessage(msg)).join('');
+
+    container.innerHTML = messagesHtml;
+
+    // Scroll to bottom to show most recent
+    requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+    });
+}
+
+function renderConversationMessage(msg) {
+    const icon = msg.role === 'human' ? '👤' : '🤖';
+    const roleLabel = msg.role === 'human' ? 'You' : 'Claude';
+    const roleClass = msg.role === 'human' ? 'human' : 'assistant';
+
+    // Format timestamp
+    let timeStr = '';
+    if (msg.timestamp) {
+        try {
+            const date = new Date(msg.timestamp);
+            timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } catch (e) {
+            timeStr = '';
+        }
+    }
+
+    // Render tool badges if present
+    const toolsHtml = msg.tools?.length ? `
+        <div class="message-tools">
+            ${msg.tools.map(t => `<span class="tool-badge">${escapeHtml(t)}</span>`).join('')}
+        </div>
+    ` : '';
+
+    // Format content - handle code blocks and newlines
+    const formattedContent = formatMessageContent(msg.content || '');
+
+    return `
+        <div class="conversation-message ${roleClass}">
+            <div class="message-header">
+                <span class="message-icon">${icon}</span>
+                <span class="message-role">${roleLabel}</span>
+                <span class="message-time">${timeStr}</span>
+            </div>
+            <div class="message-content">${formattedContent}</div>
+            ${toolsHtml}
+        </div>
+    `;
+}
+
+function formatMessageContent(content) {
+    if (!content) return '';
+
+    // Escape HTML first
+    let escaped = escapeHtml(content);
+
+    // Convert code blocks (```...```)
+    escaped = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
+        return `<pre class="code-block"><code>${code.trim()}</code></pre>`;
+    });
+
+    // Convert inline code (`...`)
+    escaped = escaped.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+
+    // Convert newlines to <br>
+    escaped = escaped.replace(/\n/g, '<br>');
+
+    return escaped;
+}
+
+console.log('Claude Session Visualizer loaded - All features active (including Feature 09: Conversation Peek)');
