@@ -66,10 +66,6 @@ let allVisibleSessions = [];
 let summaryRefreshInterval = 300000; // 5 minutes
 let lastSummaryRefresh = 0;
 
-// Feature 08: Session Comparison state
-let comparedSessions = [null, null];
-let compareViewActive = false;
-
 // UX Enhancement: Compact card mode and focus mode
 let cardDisplayMode = localStorage.getItem('cardDisplayMode') || 'compact'; // 'compact' or 'detailed'
 let focusMode = JSON.parse(localStorage.getItem('focusMode') || 'false');
@@ -544,11 +540,6 @@ async function fetchSessions() {
         // Render with filters and grouping
         renderCurrentSessions(data.sessions);
 
-        // Refresh compare view if active
-        if (compareViewActive) {
-            renderCompareView();
-        }
-
         const activeCount = data.sessions.filter(s => s.state === 'active').length;
         updateStatus(activeCount, data.sessions.length, data.timestamp);
 
@@ -639,13 +630,31 @@ function saveNoteAndClose(sessionId) {
     }
 
     closeModal();
-    fetchSessions();
+
+    // Immediately update the note display on the card
+    updateNoteDisplay(sessionId);
 }
 
 function deleteNoteAndClose(sessionId) {
     deleteNote(sessionId);
     closeModal();
-    fetchSessions();
+
+    // Immediately update the note display on the card
+    updateNoteDisplay(sessionId);
+}
+
+function updateNoteDisplay(sessionId) {
+    const card = document.querySelector(`[data-session-id="${sessionId}"]`);
+    if (!card) return;
+
+    const noteEl = card.querySelector('.session-note');
+    if (!noteEl) return;
+
+    const session = previousSessions.get(sessionId) || { sessionId };
+    const noteHtml = renderNote(session);
+    const temp = document.createElement('div');
+    temp.innerHTML = noteHtml;
+    noteEl.replaceWith(temp.firstElementChild);
 }
 
 function addTag() {
@@ -678,10 +687,6 @@ function createCard(session, index = 0) {
         ? `<div class="summary">${escapeHtml(session.summary)}</div>`
         : '';
 
-    // Feature 15: AI Summary display
-    const aiSummaryHtml = session.aiSummary
-        ? `<div class="ai-summary">${escapeHtml(session.aiSummary)}</div>`
-        : '';
 
     // Feature 20: Git Status display
     const gitHtml = session.git ? `
@@ -712,10 +717,21 @@ function createCard(session, index = 0) {
             activityText = activityText.substring(0, 32) + '...';
         }
         if (activityText) {
-            const activityIcon = getActivityIcon(session.currentActivity);
-            currentActivityHtml = `<div class="current-activity ${session.currentActivity.type === 'tool_use' ? 'tool-running' : ''}">${activityIcon} ${escapeHtml(activityText)}</div>`;
+            const animatedIcon = renderAnimatedActivity(session.sessionId, session.currentActivity);
+            currentActivityHtml = `<div class="current-activity ${session.currentActivity.type === 'tool_use' ? 'tool-running' : ''}" title="What Claude is doing right now">${animatedIcon} Running: ${escapeHtml(activityText)}</div>`;
+            // Start animation loop if not running
+            setTimeout(startAnimationLoop, 0);
         }
     }
+
+    // Agent tree display (spawned agents)
+    const agentTreeHtml = renderAgentTree(session.spawnedAgents);
+
+    // Background shells display
+    const backgroundShellsHtml = renderBackgroundShells(session.backgroundShells);
+
+    // Emoji activity trail (hieroglyphic history)
+    const activityTrailHtml = renderEmojiTrail(session.activityLog, session.state === 'active');
 
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
@@ -733,7 +749,7 @@ function createCard(session, index = 0) {
                     <hr class="menu-divider">
                     <button onclick="event.stopPropagation(); showGitDetails('${session.sessionId}')">🌿 Git Details</button>
                     <button onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')">📊 Performance Metrics</button>
-                    <button onclick="event.stopPropagation(); refreshSummary('${session.sessionId}')">🤖 Refresh AI Summary</button>
+                    <button onclick="event.stopPropagation(); refreshSummary('${session.sessionId}')">🤖 Generate AI Summary</button>
                     <button onclick="event.stopPropagation(); shareSession('${session.sessionId}')">📤 Share Session</button>
                     <button onclick="event.stopPropagation(); exportSession('${session.sessionId}')">📄 Export Markdown</button>
                     <button onclick="event.stopPropagation(); saveAsTemplate({sessionId: '${session.sessionId}', cwd: '${escapeHtml(session.cwd)}', slug: '${escapeHtml(session.slug)}'})">💾 Save as Template</button>
@@ -742,25 +758,24 @@ function createCard(session, index = 0) {
                     <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeHtml(session.slug)}')">⚠️ Kill Session</button>
                 </div>
             </div>
-            <span class="context-size">${formatTokens(session.contextTokens)}</span>
         </div>
-        <div class="slug">${escapeHtml(session.slug)}</div>
+        <div class="slug">${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.slug).css}" title="${getGastownAgentType(session.slug).label}">${getGastownAgentType(session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</div>
         ${summaryHtml}
-        ${aiSummaryHtml}
         ${noteHtml}
-        <div class="cwd" title="${escapeHtml(session.cwd || 'Unknown')}"><span class="cwd-path">${escapeHtml(session.cwd || 'Unknown')}</span>${branchHtml}</div>
         ${gitHtml}
         ${formatTokenBar(session.contextTokens)}
         ${currentActivityHtml}
+        ${activityTrailHtml}
+        ${agentTreeHtml}
+        ${backgroundShellsHtml}
         <div class="activity-log">${activityLogHtml}</div>
-        <div class="metrics-preview" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')">
-            <span class="metrics-icon">📊</span>
-            <span class="metrics-label">View Metrics</span>
-        </div>
-        <div class="meta">
-            <span>PID: ${session.pid || '--'}</span>
-            <span>CPU: ${formatCpu(session.cpuPercent)}%</span>
-            <span>${formatTime(session.lastActivity)}</span>
+        <div class="card-footer">
+            <div class="meta">
+                <span>PID: ${session.pid || '--'}</span>
+                <span>CPU: ${formatCpu(session.cpuPercent)}%</span>
+                <span>${formatTime(session.lastActivity)}</span>
+            </div>
+            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')" title="View Metrics">📊</button>
         </div>`;
 
     // No fade-in animation - cards appear instantly for visual stability
@@ -806,7 +821,7 @@ function createCompactCard(session, index = 0) {
         <span class="card-number">${index + 1}</span>
         <div class="compact-row">
             <span class="status-dot ${session.state}"></span>
-            <span class="compact-slug">${escapeHtml(session.slug)}</span>
+            <span class="compact-slug">${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.slug).css}">${getGastownAgentType(session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</span>
             <span class="compact-tokens ${tokenClass}">${Math.round(tokenPct)}%</span>
             <button class="compact-expand" onclick="event.stopPropagation(); expandCard('${session.sessionId}')" title="Show details">▼</button>
         </div>
@@ -969,33 +984,40 @@ async function refreshSummary(sessionId) {
         }
 
         const data = await response.json();
-
-        // Update the card's AI summary display
         const card = document.querySelector(`[data-session-id="${sessionId}"]`);
+
+        // Save AI summary to notes
+        const existingNote = getNote(sessionId);
+        const timestamp = new Date().toLocaleTimeString();
+        const newEntry = `[${timestamp}] AI: ${data.summary}`;
+        const combinedText = existingNote?.text
+            ? `${existingNote.text}\n\n${newEntry}`
+            : newEntry;
+        const combinedTags = existingNote?.tags || [];
+        if (!combinedTags.includes('ai-generated')) {
+            combinedTags.push('ai-generated');
+        }
+        setNote(sessionId, { text: combinedText, tags: combinedTags });
+
+        // Directly update the note display on the card
         if (card) {
-            let summaryEl = card.querySelector('.ai-summary');
-            if (summaryEl) {
-                summaryEl.textContent = data.summary;
-            } else {
-                // Insert AI summary after slug if it doesn't exist
-                const slugEl = card.querySelector('.slug');
-                if (slugEl) {
-                    const newSummaryEl = document.createElement('div');
-                    newSummaryEl.className = 'ai-summary';
-                    newSummaryEl.textContent = data.summary;
-                    slugEl.insertAdjacentElement('afterend', newSummaryEl);
-                }
+            const noteEl = card.querySelector('.session-note');
+            const displayText = combinedText.length > 100
+                ? combinedText.substring(0, 100) + '...'
+                : combinedText;
+            const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
+            if (noteEl) {
+                noteEl.outerHTML = `
+                    <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
+                        <span class="note-icon">📝</span>
+                        <span class="note-text">"${escapeHtml(displayText)}"</span>
+                        <div class="note-tags">${tagsHtml}</div>
+                    </div>
+                `;
             }
         }
 
-        // Update cache in previousSessions
-        const session = previousSessions.get(sessionId);
-        if (session) {
-            session.aiSummary = data.summary;
-            previousSessions.set(sessionId, session);
-        }
-
-        showToast('AI summary updated!');
+        showToast('AI summary added to notes!');
     } catch (e) {
         console.error('Failed to refresh summary:', e);
         showToast('Failed to refresh summary', 'error');
@@ -1022,56 +1044,40 @@ async function refreshAllSummaries() {
 
         const data = await response.json();
 
-        // Update cards with new summaries
+        // Save summaries to notes and update cards
         for (const item of data.details.refreshed) {
-            const card = document.querySelector(`[data-session-id="${item.sessionId}"]`);
+            const sessionId = item.sessionId;
+            const summary = item.summary;
+
+            // Save to notes (persisted to localStorage)
+            const existingNote = getNote(sessionId);
+            const timestamp = new Date().toLocaleTimeString();
+            const newEntry = `[${timestamp}] AI: ${summary}`;
+            const combinedText = existingNote?.text
+                ? `${existingNote.text}\n\n${newEntry}`
+                : newEntry;
+            const combinedTags = existingNote?.tags || [];
+            if (!combinedTags.includes('ai-generated')) {
+                combinedTags.push('ai-generated');
+            }
+            setNote(sessionId, { text: combinedText, tags: combinedTags });
+
+            // Update note display on card
+            const card = document.querySelector(`[data-session-id="${sessionId}"]`);
             if (card) {
-                let summaryEl = card.querySelector('.ai-summary');
-                if (summaryEl) {
-                    summaryEl.textContent = item.summary;
-                } else {
-                    const slugEl = card.querySelector('.slug');
-                    if (slugEl) {
-                        const newSummaryEl = document.createElement('div');
-                        newSummaryEl.className = 'ai-summary';
-                        newSummaryEl.textContent = item.summary;
-                        slugEl.insertAdjacentElement('afterend', newSummaryEl);
-                    }
-                }
-            }
-
-            // Update cache
-            const session = previousSessions.get(item.sessionId);
-            if (session) {
-                session.aiSummary = item.summary;
-                previousSessions.set(item.sessionId, session);
-            }
-        }
-
-        // Also apply cached summaries from skipped sessions (no_new_activity)
-        for (const item of data.details.skipped) {
-            if (item.summary) {
-                const card = document.querySelector(`[data-session-id="${item.sessionId}"]`);
-                if (card) {
-                    const existingSummary = card.querySelector('.ai-summary');
-                    if (existingSummary) {
-                        existingSummary.textContent = item.summary;
-                    } else {
-                        const slugEl = card.querySelector('.slug');
-                        if (slugEl) {
-                            const newSummaryEl = document.createElement('div');
-                            newSummaryEl.className = 'ai-summary';
-                            newSummaryEl.textContent = item.summary;
-                            slugEl.insertAdjacentElement('afterend', newSummaryEl);
-                        }
-                    }
-                }
-
-                // Update cache
-                const session = previousSessions.get(item.sessionId);
-                if (session) {
-                    session.aiSummary = item.summary;
-                    previousSessions.set(item.sessionId, session);
+                const noteEl = card.querySelector('.session-note');
+                if (noteEl) {
+                    const displayText = combinedText.length > 100
+                        ? combinedText.substring(0, 100) + '...'
+                        : combinedText;
+                    const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
+                    noteEl.outerHTML = `
+                        <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
+                            <span class="note-icon">📝</span>
+                            <span class="note-text">"${escapeHtml(displayText)}"</span>
+                            <div class="note-tags">${tagsHtml}</div>
+                        </div>
+                    `;
                 }
             }
         }
@@ -1377,6 +1383,16 @@ function updateCard(card, session) {
         const badge = card.querySelector('.status-badge');
         badge.className = `status-badge ${session.state}`;
         badge.innerHTML = `<span class="status-indicator"></span>${session.state}`;
+
+        // Update activity trail - remove pulse animation when session goes idle
+        const lastTrailEmoji = card.querySelector('.trail-emoji:last-child');
+        if (lastTrailEmoji) {
+            if (session.state === 'active') {
+                lastTrailEmoji.classList.add('current');
+            } else {
+                lastTrailEmoji.classList.remove('current');
+            }
+        }
     }
 
     // Update context size
@@ -1426,6 +1442,15 @@ function updateCard(card, session) {
     // Update current activity display (hooks-based real-time activity)
     updateCurrentActivity(card, session, prev);
 
+    // Update note display (notes are stored in localStorage, not server)
+    const noteEl = card.querySelector('.session-note');
+    if (noteEl) {
+        const noteHtml = renderNote(session);
+        const temp = document.createElement('div');
+        temp.innerHTML = noteHtml;
+        noteEl.replaceWith(temp.firstElementChild);
+    }
+
     card.querySelector('.meta').innerHTML = `
         <span>PID: ${session.pid || '--'}</span>
         <span>CPU: ${formatCpu(session.cpuPercent)}%</span>
@@ -1448,20 +1473,24 @@ function updateCurrentActivity(card, session, prev) {
         }
 
         if (activityText) {
-            const activityIcon = getActivityIcon(session.currentActivity);
+            const animatedIcon = renderAnimatedActivity(session.sessionId, session.currentActivity);
             const isToolRunning = session.currentActivity.type === 'tool_use';
 
             if (currentActivityEl) {
                 // Update existing element
                 currentActivityEl.className = `current-activity ${isToolRunning ? 'tool-running' : ''}`;
-                currentActivityEl.innerHTML = `${activityIcon} ${escapeHtml(activityText)}`;
+                currentActivityEl.title = 'What Claude is doing right now';
+                currentActivityEl.innerHTML = `${animatedIcon} Running: ${escapeHtml(activityText)}`;
             } else if (activityLog) {
                 // Create new element and insert before activity log
                 const newActivityEl = document.createElement('div');
                 newActivityEl.className = `current-activity ${isToolRunning ? 'tool-running' : ''}`;
-                newActivityEl.innerHTML = `${activityIcon} ${escapeHtml(activityText)}`;
+                newActivityEl.title = 'What Claude is doing right now';
+                newActivityEl.innerHTML = `${animatedIcon} Running: ${escapeHtml(activityText)}`;
                 activityLog.parentNode.insertBefore(newActivityEl, activityLog);
             }
+            // Start animation loop
+            setTimeout(startAnimationLoop, 0);
         } else if (currentActivityEl) {
             currentActivityEl.remove();
         }
@@ -1518,6 +1547,7 @@ function formatTokenBar(tokens) {
                 <div class="token-bar ${colorClass}" style="width: ${percentage}%"></div>
             </div>
             <span class="token-percentage">${Math.round(percentage)}%</span>
+            <span class="token-count">${formatTokens(tokens)}</span>
         </div>
     `;
 }
@@ -1536,7 +1566,310 @@ function formatActivityLog(activities) {
     ).join('');
 }
 
-// Get icon for current activity based on activity type/tool
+// ============================================================================
+// ASCII Art Animations for Activity Indicators
+// ============================================================================
+
+const ASCII_ANIMATIONS = {
+    // Reading files - scanning eye
+    read: {
+        frames: ['[▓░░░]', '[░▓░░]', '[░░▓░]', '[░░░▓]', '[░░▓░]', '[░▓░░]'],
+        interval: 150
+    },
+    // Writing/Editing - typing cursor
+    write: {
+        frames: ['█_', '_█', '█_', '_█'],
+        interval: 400
+    },
+    // Searching - magnifying sweep
+    search: {
+        frames: ['◎··', '·◎·', '··◎', '·◎·'],
+        interval: 200
+    },
+    // Bash commands - terminal cursor
+    bash: {
+        frames: ['>_', '>█', '>_', '>█'],
+        interval: 500
+    },
+    // Thinking/Processing - braille spinner
+    thinking: {
+        frames: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+        interval: 80
+    },
+    // Agent spawning - robot assembly
+    agent: {
+        frames: ['[□]', '[▣]', '[■]', '[▣]'],
+        interval: 250
+    },
+    // Waiting - breathing pulse
+    waiting: {
+        frames: ['○', '◎', '●', '◎'],
+        interval: 300
+    },
+    // WebFetch - network waves
+    network: {
+        frames: ['◌─○', '○─◌', '◌─○', '○─◌'],
+        interval: 300
+    },
+    // MCP tools - plugin pulse
+    mcp: {
+        frames: ['⚡', '✦', '⚡', '✦'],
+        interval: 400
+    },
+    // Default - simple spinner
+    default: {
+        frames: ['◐', '◓', '◑', '◒'],
+        interval: 150
+    }
+};
+
+// Track animation state per session
+const animationState = new Map();
+
+// Get animation type from activity
+function getAnimationType(activity) {
+    if (!activity) return 'waiting';
+
+    const toolName = activity.tool_name || '';
+
+    if (toolName === 'Bash') return 'bash';
+    if (toolName === 'Read') return 'read';
+    if (toolName === 'Write' || toolName === 'Edit') return 'write';
+    if (toolName === 'Grep' || toolName === 'Glob') return 'search';
+    if (toolName === 'Task') return 'agent';
+    if (toolName === 'WebFetch') return 'network';
+    if (toolName.startsWith('mcp__')) return 'mcp';
+
+    if (activity.type === 'tool_use') return 'thinking';
+    if (activity.type === 'user_prompt') return 'waiting';
+    if (activity.type === 'idle') return 'waiting';
+
+    return 'default';
+}
+
+// Get current animation frame for a session
+function getAnimationFrame(sessionId, activity) {
+    const animType = getAnimationType(activity);
+    const anim = ASCII_ANIMATIONS[animType];
+
+    // Initialize or get animation state
+    let state = animationState.get(sessionId);
+    if (!state || state.type !== animType) {
+        state = { type: animType, frameIndex: 0, lastUpdate: Date.now() };
+        animationState.set(sessionId, state);
+    }
+
+    // Check if it's time to advance frame
+    const now = Date.now();
+    if (now - state.lastUpdate >= anim.interval) {
+        state.frameIndex = (state.frameIndex + 1) % anim.frames.length;
+        state.lastUpdate = now;
+        animationState.set(sessionId, state);
+    }
+
+    return anim.frames[state.frameIndex];
+}
+
+// Render animated activity indicator
+function renderAnimatedActivity(sessionId, activity) {
+    const frame = getAnimationFrame(sessionId, activity);
+    return `<span class="ascii-animation" data-session="${sessionId}">${frame}</span>`;
+}
+
+// Start animation loop for active sessions
+let animationLoopRunning = false;
+function startAnimationLoop() {
+    if (animationLoopRunning) return;
+    animationLoopRunning = true;
+
+    function tick() {
+        // Update all visible animations
+        document.querySelectorAll('.ascii-animation').forEach(el => {
+            const sessionId = el.dataset.session;
+            const session = previousSessions.get(sessionId);
+            if (session && session.currentActivity && session.state === 'active') {
+                const frame = getAnimationFrame(sessionId, session.currentActivity);
+                if (el.textContent !== frame) {
+                    el.textContent = frame;
+                }
+            }
+        });
+
+        // Continue loop if there are active animations
+        if (document.querySelectorAll('.ascii-animation').length > 0) {
+            requestAnimationFrame(tick);
+        } else {
+            animationLoopRunning = false;
+        }
+    }
+
+    requestAnimationFrame(tick);
+}
+
+// Clean up animation state for removed sessions
+function cleanupAnimationState(activeSessionIds) {
+    for (const sessionId of animationState.keys()) {
+        if (!activeSessionIds.has(sessionId)) {
+            animationState.delete(sessionId);
+        }
+    }
+}
+
+// ============================================================================
+// Emoji Activity Trail - Visual history of what Claude did
+// ============================================================================
+
+const ACTIVITY_EMOJIS = {
+    // Tools
+    'Read': '📖',
+    'Write': '✏️',
+    'Edit': '✏️',
+    'Bash': '⚡',
+    'Grep': '🔍',
+    'Glob': '📁',
+    'Task': '🤖',
+    'WebFetch': '🌐',
+    'TodoWrite': '📋',
+    'NotebookEdit': '📓',
+    // Events
+    'UserPromptSubmit': '💬',
+    'Stop': '🛑',
+    'SessionStart': '🚀',
+    'SessionEnd': '🏁',
+    // MCP tools get plugin emoji
+    'mcp': '🔌',
+    // Fallback
+    'default': '⚙️'
+};
+
+// Get emoji for a tool or event
+function getActivityEmoji(toolOrEvent) {
+    if (!toolOrEvent) return ACTIVITY_EMOJIS.default;
+
+    // Check for MCP tools
+    if (toolOrEvent.startsWith('mcp__')) return ACTIVITY_EMOJIS.mcp;
+
+    return ACTIVITY_EMOJIS[toolOrEvent] || ACTIVITY_EMOJIS.default;
+}
+
+// Convert activity log to emoji trail (deduplicated, only showing completed actions)
+function buildEmojiTrail(activityLog, maxLength = 12) {
+    if (!activityLog || activityLog.length === 0) return [];
+
+    const trail = [];
+    let lastTool = null;
+
+    for (const entry of activityLog) {
+        // Only count PostToolUse (completed tools) and UserPromptSubmit
+        if (entry.event === 'PostToolUse' && entry.tool) {
+            // Skip if same tool repeated consecutively
+            if (entry.tool !== lastTool) {
+                trail.push({
+                    emoji: getActivityEmoji(entry.tool),
+                    tool: entry.tool,
+                    description: entry.description || entry.tool,
+                    timestamp: entry.timestamp
+                });
+                lastTool = entry.tool;
+            }
+        } else if (entry.event === 'UserPromptSubmit') {
+            // User prompt marks a new "chapter" - reset dedup
+            trail.push({
+                emoji: getActivityEmoji('UserPromptSubmit'),
+                tool: 'User prompt',
+                description: 'New user message',
+                timestamp: entry.timestamp,
+                isPrompt: true
+            });
+            lastTool = null;
+        }
+    }
+
+    // Return last N items
+    return trail.slice(-maxLength);
+}
+
+// Format timestamp for display
+function formatActivityTime(timestamp) {
+    if (!timestamp) return '';
+    try {
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    } catch {
+        return '';
+    }
+}
+
+// Render the emoji trail as HTML with clickable popovers
+function renderEmojiTrail(activityLog, isSessionActive = false) {
+    const trail = buildEmojiTrail(activityLog);
+
+    if (trail.length === 0) {
+        return '';
+    }
+
+    const emojisHtml = trail.map((item, idx) => {
+        const isLast = idx === trail.length - 1;
+        const isPrompt = item.isPrompt;
+        // Only pulse the last emoji if the session is actively working
+        const classes = [
+            'trail-emoji',
+            (isLast && isSessionActive) ? 'current' : '',
+            isPrompt ? 'prompt-marker' : ''
+        ].filter(Boolean).join(' ');
+
+        // Encode data for the popover
+        const dataAttrs = `data-tool="${escapeHtml(item.tool)}" data-desc="${escapeHtml(item.description)}" data-time="${escapeHtml(item.timestamp || '')}"`;
+
+        return `<span class="${classes}" ${dataAttrs} onclick="showActivityPopover(event, this)">${item.emoji}</span>`;
+    }).join('');
+
+    return `
+        <div class="activity-trail">
+            <span class="trail-label">Activity:</span>
+            <div class="trail-emojis">${emojisHtml}</div>
+        </div>
+    `;
+}
+
+// Show popover with activity details
+function showActivityPopover(event, element) {
+    event.stopPropagation();
+
+    // Remove any existing popover
+    const existing = document.querySelector('.activity-popover');
+    if (existing) existing.remove();
+
+    const tool = element.dataset.tool;
+    const desc = element.dataset.desc;
+    const time = element.dataset.time;
+    const formattedTime = formatActivityTime(time);
+
+    // Create popover
+    const popover = document.createElement('div');
+    popover.className = 'activity-popover';
+    popover.innerHTML = `
+        <div class="popover-header">${element.textContent} ${escapeHtml(tool)}</div>
+        <div class="popover-desc">${escapeHtml(desc)}</div>
+        ${formattedTime ? `<div class="popover-time">${formattedTime}</div>` : ''}
+    `;
+
+    // Position popover near the clicked element
+    document.body.appendChild(popover);
+    const rect = element.getBoundingClientRect();
+    popover.style.left = `${rect.left + window.scrollX}px`;
+    popover.style.top = `${rect.bottom + window.scrollY + 8}px`;
+
+    // Close on click outside
+    setTimeout(() => {
+        document.addEventListener('click', function closePopover() {
+            popover.remove();
+            document.removeEventListener('click', closePopover);
+        }, { once: true });
+    }, 10);
+}
+
+// Get icon for current activity based on activity type/tool (fallback for non-animated contexts)
 function getActivityIcon(activity) {
     if (!activity) return '▶';
 
@@ -1559,6 +1892,124 @@ function getActivityIcon(activity) {
     if (activity.type === 'idle') return '⏸';
 
     return '▶';
+}
+
+// Get icon for agent type
+function getAgentTypeIcon(subagentType) {
+    if (!subagentType) return '🤖';
+
+    const type = subagentType.toLowerCase();
+    if (type.includes('explore')) return '🔍';
+    if (type.includes('plan')) return '📋';
+    if (type.includes('haiku')) return '⚡';
+    if (type.includes('code')) return '💻';
+    if (type.includes('test')) return '🧪';
+    if (type.includes('review')) return '👁️';
+
+    return '🤖';
+}
+
+// Format duration from ISO timestamp to human-readable
+function formatAgentDuration(startedAt) {
+    if (!startedAt) return '';
+    try {
+        const start = new Date(startedAt);
+        const now = new Date();
+        const diffMs = now - start;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffSecs = Math.floor((diffMs % 60000) / 1000);
+
+        if (diffMins >= 60) {
+            const hours = Math.floor(diffMins / 60);
+            const mins = diffMins % 60;
+            return `${hours}h ${mins}m`;
+        }
+        if (diffMins > 0) {
+            return `${diffMins}m ${diffSecs}s`;
+        }
+        return `${diffSecs}s`;
+    } catch {
+        return '';
+    }
+}
+
+// Render agent tree for session card
+function renderAgentTree(agents) {
+    if (!agents || agents.length === 0) return '';
+
+    // Always start collapsed to keep cards compact - user can expand if needed
+    const collapsed = 'collapsed';
+
+    return `
+        <div class="agent-tree">
+            <div class="tree-header ${collapsed}" onclick="toggleAgentTree(this)">
+                <span class="tree-toggle">▼</span>
+                <span class="tree-label">🤖 ${agents.length} agent${agents.length > 1 ? 's' : ''}</span>
+            </div>
+            <div class="tree-children" ${collapsed ? 'style="display:none"' : ''}>
+                ${agents.map((agent, idx) => `
+                    <div class="tree-node ${agent.status}">
+                        <span class="tree-connector">${idx === agents.length - 1 ? '└─' : '├─'}</span>
+                        <span class="agent-type">${getAgentTypeIcon(agent.subagent_type)}</span>
+                        <span class="agent-desc" title="${escapeHtml(agent.description || '')}">${escapeHtml(agent.description || agent.subagent_type || 'Agent')}</span>
+                        <span class="agent-status ${agent.status}">${agent.status}${agent.background ? ' ⚡' : ''}</span>
+                        <span class="agent-duration">${formatAgentDuration(agent.started_at)}</span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+// Toggle agent tree visibility
+function toggleAgentTree(header) {
+    header.classList.toggle('collapsed');
+    const children = header.nextElementSibling;
+    if (children) {
+        children.style.display = header.classList.contains('collapsed') ? 'none' : 'block';
+    }
+}
+
+// Format duration in seconds to human-readable string
+function formatDurationSeconds(seconds) {
+    if (!seconds || seconds < 0) return '0s';
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}m ${secs}s`;
+    }
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${mins}m`;
+}
+
+// Render background shells for session card
+function renderBackgroundShells(shells) {
+    if (!shells || shells.length === 0) return '';
+
+    // Always start collapsed
+    const collapsed = 'collapsed';
+
+    return `
+        <div class="background-shells">
+            <div class="shells-header ${collapsed}" onclick="toggleAgentTree(this)">
+                <span class="tree-toggle">▼</span>
+                <span class="shells-label">🖥️ ${shells.length} background${shells.length > 1 ? ' tasks' : ' task'}</span>
+            </div>
+            <div class="tree-children" style="display:none">
+                ${shells.map((shell, idx) => `
+                    <div class="tree-node ${shell.computed_status}" title="${escapeHtml(shell.command || '')}">
+                        <span class="tree-connector">${idx === shells.length - 1 ? '└─' : '├─'}</span>
+                        <span class="shell-icon">⚙️</span>
+                        <span class="agent-desc">${escapeHtml(shell.description || 'Background task')}</span>
+                        <span class="agent-status ${shell.computed_status}">${shell.computed_status}</span>
+                        <span class="agent-duration">${formatDurationSeconds(shell.duration_seconds)}</span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
 }
 
 function escapeHtml(text) {
@@ -1745,19 +2196,140 @@ function renderGastownView(gastown) {
         return;
     }
 
-    // Render gastown sessions as horizontal cards (no grouping)
+    // Group gastown sessions by repo/cwd
     container.innerHTML = '';
+    container.className = 'gastown-grouped';
 
-    // Set flex sizing class based on count
-    container.className = 'gastown-horizontal';
-    container.dataset.cardCount = Math.min(totalCount, 4); // Cap at 4 for CSS sizing
-
+    const groups = groupGastownByRepo(gastownSessions);
     const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
 
-    gastownSessions.forEach((session, idx) => {
-        const card = createCardFn(session, idx);
-        card.classList.add('gastown-card');
-        container.appendChild(card);
+    groups.forEach(group => {
+        const groupDiv = document.createElement('div');
+        groupDiv.className = 'gastown-repo-group';
+
+        // Repo header with path and agent count
+        const header = document.createElement('div');
+        header.className = 'gastown-repo-header';
+        const activeText = group.activeCount > 0 ? ` (${group.activeCount} active)` : '';
+        header.innerHTML = `
+            <div class="repo-info">
+                <span class="repo-icon">📁</span>
+                <span class="repo-path">${escapeHtml(group.repoPath)}</span>
+            </div>
+            <span class="agent-count">${group.sessions.length} agent${group.sessions.length !== 1 ? 's' : ''}${activeText}</span>
+        `;
+        groupDiv.appendChild(header);
+
+        // Agent cards container
+        const cardsContainer = document.createElement('div');
+        cardsContainer.className = 'gastown-cards';
+        cardsContainer.dataset.cardCount = Math.min(group.sessions.length, 4);
+
+        group.sessions.forEach((session, idx) => {
+            const card = createCardFn(session, idx);
+            card.classList.add('gastown-card');
+            cardsContainer.appendChild(card);
+        });
+
+        groupDiv.appendChild(cardsContainer);
+        container.appendChild(groupDiv);
+    });
+}
+
+// Pixel-art style icons for gastown agent types
+function getGastownAgentType(slug) {
+    const s = (slug || '').toLowerCase();
+
+    // Supervisors have simple names
+    if (s === 'rig') return { type: 'rig', icon: '⛏', label: 'Rig', css: 'gt-rig' };
+    if (s === 'witness') return { type: 'witness', icon: '◉', label: 'Witness', css: 'gt-witness' };
+    if (s === 'refinery') return { type: 'refinery', icon: '⚙', label: 'Refinery', css: 'gt-refinery' };
+    if (s === 'deacon' || s.includes('deacon')) return { type: 'deacon', icon: '✟', label: 'Deacon', css: 'gt-deacon' };
+    if (s === 'mayor') return { type: 'mayor', icon: '♔', label: 'Mayor', css: 'gt-mayor' };
+    if (s === 'spa' || s === 'bff') return { type: 'service', icon: '◈', label: s.toUpperCase(), css: 'gt-service' };
+
+    // Polecats have adjective-verb-noun names (3 parts with hyphens)
+    const parts = s.split('-');
+    if (parts.length >= 3) {
+        // Generate a consistent "pixel creature" based on name hash
+        const hash = s.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+        const creatures = ['▣', '◆', '●', '■', '▲', '★', '◐', '◧'];
+        const creature = creatures[hash % creatures.length];
+        return { type: 'polecat', icon: creature, label: 'Polecat', css: 'gt-polecat' };
+    }
+
+    // Unknown
+    return { type: 'unknown', icon: '?', label: 'Agent', css: 'gt-unknown' };
+}
+
+function groupGastownByRepo(sessions) {
+    const groups = {};
+
+    // Gas Town HQ-level agents (not working on a specific rig/repo)
+    const GT_HQ_AGENTS = ['deacon', 'mayor'];
+
+    for (const session of sessions) {
+        const cwd = session.cwd || '';
+
+        // Extract repo name from path
+        // Pattern: /Users/nathan.norman/toast-analytics/... → toast-analytics
+        // Gas Town: /Users/nathan.norman/gt/<rig-name>/... → rig-name is the repo
+        // Gas Town HQ: /Users/nathan.norman/gt/deacon/... → "Gas Town HQ" (supervisor)
+        const parts = cwd.split('/').filter(Boolean);
+        let repoName = 'Unknown';
+
+        // Find the repo: skip Users, username, then take the next part
+        if (parts.length >= 3 && parts[0] === 'Users') {
+            repoName = parts[2]; // /Users/username/REPO/...
+
+            // Special case: if in 'gt' (gastown) directory
+            if (repoName === 'gt' && parts.length >= 4) {
+                const rigOrHq = parts[3];
+                // Check if it's an HQ-level agent (deacon, mayor) vs a rig
+                if (GT_HQ_AGENTS.includes(rigOrHq)) {
+                    repoName = 'Gas Town HQ';
+                } else {
+                    repoName = rigOrHq; // It's a rig name = actual repo
+                }
+            }
+        } else if (parts.length >= 3 && parts[0] === 'home') {
+            repoName = parts[2]; // /home/username/REPO/...
+            if (repoName === 'gt' && parts.length >= 4) {
+                const rigOrHq = parts[3];
+                if (GT_HQ_AGENTS.includes(rigOrHq)) {
+                    repoName = 'Gas Town HQ';
+                } else {
+                    repoName = rigOrHq;
+                }
+            }
+        } else if (parts.length > 0) {
+            // Fallback: use first non-hidden directory
+            repoName = parts.find(p => !p.startsWith('.')) || parts[0];
+        }
+
+        if (!groups[repoName]) {
+            groups[repoName] = {
+                repoName: repoName,
+                repoPath: repoName,
+                sessions: [],
+                activeCount: 0
+            };
+        }
+        groups[repoName].sessions.push(session);
+        if (session.state === 'active') {
+            groups[repoName].activeCount++;
+        }
+    }
+
+    // Sort: active groups first, then by session count, then by name
+    // But always put "Gas Town HQ" last
+    return Object.values(groups).sort((a, b) => {
+        if (a.repoName === 'Gas Town HQ') return 1;
+        if (b.repoName === 'Gas Town HQ') return -1;
+        if (a.activeCount > 0 && b.activeCount === 0) return -1;
+        if (b.activeCount > 0 && a.activeCount === 0) return 1;
+        if (b.sessions.length !== a.sessions.length) return b.sessions.length - a.sessions.length;
+        return a.repoName.localeCompare(b.repoName);
     });
 }
 
@@ -2446,18 +3018,45 @@ function renderTimeline(sessions) {
     const hoursBack = TIMELINE_HOURS;
     const startTime = now - (hoursBack * 60 * 60 * 1000);
 
+    // Separate normal and gastown sessions
+    const normalSessions = sessions.filter(s => !s.isGastown);
+    const gastownSessions = sessions.filter(s => s.isGastown);
+
     // Generate time axis
     const timeAxisHtml = generateTimeAxis(startTime, now, hoursBack);
 
-    // Generate timeline rows
-    const rowsHtml = sessions.map(session => {
+    // Generate timeline rows for normal sessions
+    const normalRowsHtml = normalSessions.map(session => {
+        const periods = timelineData.get(session.sessionId) || [];
+        return renderTimelineRow(session, periods, startTime, now);
+    }).join('');
+
+    // Generate timeline rows for gastown sessions
+    const gastownRowsHtml = gastownSessions.map(session => {
         const periods = timelineData.get(session.sessionId) || [];
         return renderTimelineRow(session, periods, startTime, now);
     }).join('');
 
     container.innerHTML = `
         <div class="timeline-axis">${timeAxisHtml}</div>
-        <div class="timeline-rows">${rowsHtml}</div>
+        ${normalSessions.length > 0 ? `
+            <div class="timeline-section">
+                <div class="timeline-section-header">Sessions</div>
+                <div class="timeline-rows">${normalRowsHtml}</div>
+            </div>
+        ` : ''}
+        ${gastownSessions.length > 0 ? `
+            <div class="timeline-section gastown-section">
+                <div class="timeline-section-header">🏭 Gastown Agents</div>
+                <div class="timeline-rows">${gastownRowsHtml}</div>
+            </div>
+        ` : ''}
+        ${sessions.length === 0 ? `
+            <div class="timeline-empty">
+                <p>No active sessions to show on timeline.</p>
+                <p>Start a Claude Code session to see activity here.</p>
+            </div>
+        ` : ''}
     `;
 }
 
@@ -2503,7 +3102,7 @@ function renderTimelineRow(session, periods, startTime, endTime) {
     const isZombie = lastActivityTime && (Date.now() - lastActivityTime) > (60 * 60 * 1000); // 1 hour
 
     // Generate bars for activity periods
-    const barsHtml = periods.map(period => {
+    const barsHtml = periods.map((period, idx) => {
         const periodStart = new Date(period.start).getTime();
         const periodEnd = new Date(period.end).getTime();
 
@@ -2517,15 +3116,24 @@ function renderTimelineRow(session, periods, startTime, endTime) {
         const left = ((visibleStart - startTime) / duration) * 100;
         const width = ((visibleEnd - visibleStart) / duration) * 100;
 
+        // Encode period data for hover popover
+        const periodData = encodeURIComponent(JSON.stringify({
+            start: period.start,
+            end: period.end,
+            state: period.state,
+            activities: period.activities || [],
+            tools: period.tools || {}
+        }));
+
         return `<div class="timeline-bar ${period.state}"
                      style="left: ${left}%; width: ${Math.max(width, 0.5)}%"
-                     title="${formatPeriodTooltip(period)}"></div>`;
+                     data-period="${periodData}"></div>`;
     }).join('');
 
     return `
-        <div class="timeline-row ${isZombie ? 'zombie' : ''}" data-session-id="${session.sessionId}">
+        <div class="timeline-row ${isZombie ? 'zombie' : ''} ${session.isGastown ? 'gastown-row' : ''}" data-session-id="${session.sessionId}">
             <div class="timeline-label" onclick="focusWarpTab(previousSessions.get('${session.sessionId}'))">
-                <span class="session-slug">${escapeHtml(session.slug)}</span>
+                <span class="session-slug">${session.isGastown ? '🤖 ' : ''}${escapeHtml(session.slug)}</span>
                 <span class="session-status ${statusClass}">${session.state}</span>
                 <span class="last-active ${isZombie ? 'zombie-warning' : ''}">
                     ${isZombie ? '⚠️ ' : ''}${lastActiveAgo}
@@ -2562,12 +3170,110 @@ function formatTimeAgo(timestamp) {
     return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
-function formatPeriodTooltip(period) {
+// Timeline popover management
+let timelinePopover = null;
+let popoverHideTimeout = null;
+
+function showTimelinePopover(event, element) {
+    // Clear any pending hide
+    if (popoverHideTimeout) {
+        clearTimeout(popoverHideTimeout);
+        popoverHideTimeout = null;
+    }
+
+    // Remove existing popover
+    if (timelinePopover) {
+        timelinePopover.remove();
+    }
+
+    // Parse period data
+    let period;
+    try {
+        period = JSON.parse(decodeURIComponent(element.dataset.period));
+    } catch (e) {
+        return;
+    }
+
     const start = new Date(period.start);
     const end = new Date(period.end);
     const startStr = start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const endStr = end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    return `${period.state}: ${startStr} - ${endStr}`;
+    const duration = Math.round((end - start) / 60000); // minutes
+
+    // Build tool summary
+    let toolSummary = '';
+    if (period.tools && Object.keys(period.tools).length > 0) {
+        const toolItems = Object.entries(period.tools)
+            .sort((a, b) => b[1] - a[1]) // Sort by count descending
+            .map(([tool, count]) => {
+                const emoji = ACTIVITY_EMOJIS[tool] || '⚙️';
+                return `<span class="tool-count">${emoji} ${escapeHtml(tool)} ×${count}</span>`;
+            })
+            .join('');
+        toolSummary = `<div class="popover-tools">${toolItems}</div>`;
+    }
+
+    // Build activities list
+    let activitiesList = '';
+    if (period.activities && period.activities.length > 0) {
+        const activityItems = period.activities
+            .map(act => `<div class="popover-activity">${escapeHtml(act)}</div>`)
+            .join('');
+        activitiesList = `<div class="popover-activities">${activityItems}</div>`;
+    }
+
+    // Create popover
+    timelinePopover = document.createElement('div');
+    timelinePopover.className = 'timeline-popover';
+    timelinePopover.innerHTML = `
+        <div class="popover-header">
+            <span class="popover-time">${startStr} - ${endStr}</span>
+            <span class="popover-duration">(${duration}m)</span>
+        </div>
+        ${toolSummary}
+        ${activitiesList || '<div class="popover-empty">No detailed activity</div>'}
+    `;
+
+    document.body.appendChild(timelinePopover);
+
+    // Position below the bar
+    const rect = element.getBoundingClientRect();
+    const popoverRect = timelinePopover.getBoundingClientRect();
+
+    // Prefer below, but flip above if not enough space
+    let top = rect.bottom + window.scrollY + 8;
+    if (top + popoverRect.height > window.innerHeight + window.scrollY - 20) {
+        top = rect.top + window.scrollY - popoverRect.height - 8;
+    }
+
+    // Keep within horizontal bounds
+    let left = rect.left + window.scrollX;
+    if (left + popoverRect.width > window.innerWidth - 20) {
+        left = window.innerWidth - popoverRect.width - 20;
+    }
+    if (left < 10) left = 10;
+
+    timelinePopover.style.left = `${left}px`;
+    timelinePopover.style.top = `${top}px`;
+
+    // Allow hovering over the popover itself
+    timelinePopover.addEventListener('mouseenter', () => {
+        if (popoverHideTimeout) {
+            clearTimeout(popoverHideTimeout);
+            popoverHideTimeout = null;
+        }
+    });
+    timelinePopover.addEventListener('mouseleave', hideTimelinePopover);
+}
+
+function hideTimelinePopover() {
+    // Delay hiding to allow moving to popover
+    popoverHideTimeout = setTimeout(() => {
+        if (timelinePopover) {
+            timelinePopover.remove();
+            timelinePopover = null;
+        }
+    }, 150);
 }
 
 // View switching
@@ -2590,196 +3296,22 @@ function switchView(viewName) {
     // Track timeline view state
     timelineViewActive = (viewName === 'timeline');
 
-    // Track compare view state
-    compareViewActive = (viewName === 'compare');
-
     // Refresh timeline when switching to it
     if (viewName === 'timeline') {
         refreshTimeline();
     }
 
-    // Render compare view when switching to it
-    if (viewName === 'compare') {
-        renderCompareView();
+    // Refresh gastown view when switching to it
+    if (viewName === 'gastown') {
+        const sessions = Array.from(previousSessions.values());
+        const gastown = sessions.filter(s => s.isGastown);
+        renderGastownView(gastown);
     }
 
     // Load analytics if switching to analytics view
     if (viewName === 'analytics' && typeof loadAnalytics === 'function') {
         loadAnalytics();
     }
-}
-
-// ============================================================================
-// Feature 08: Session Comparison Implementation
-// ============================================================================
-
-function getSessionById(sessionId) {
-    return previousSessions.get(sessionId) || null;
-}
-
-function selectForComparison(sessionId, slot) {
-    const session = getSessionById(sessionId);
-    comparedSessions[slot] = session;
-
-    // Save to localStorage for persistence
-    const savedComparison = comparedSessions.map(s => s?.sessionId || null);
-    localStorage.setItem('comparedSessions', JSON.stringify(savedComparison));
-
-    renderCompareView();
-}
-
-function clearComparison(slot) {
-    comparedSessions[slot] = null;
-    const savedComparison = comparedSessions.map(s => s?.sessionId || null);
-    localStorage.setItem('comparedSessions', JSON.stringify(savedComparison));
-    renderCompareView();
-}
-
-function swapComparison() {
-    comparedSessions = [comparedSessions[1], comparedSessions[0]];
-    const savedComparison = comparedSessions.map(s => s?.sessionId || null);
-    localStorage.setItem('comparedSessions', JSON.stringify(savedComparison));
-    renderCompareView();
-}
-
-function loadSavedComparison() {
-    try {
-        const saved = localStorage.getItem('comparedSessions');
-        if (saved) {
-            const sessionIds = JSON.parse(saved);
-            comparedSessions = sessionIds.map(id => id ? getSessionById(id) : null);
-        }
-    } catch (e) {
-        console.warn('Failed to load saved comparison:', e);
-    }
-}
-
-function renderCompareView() {
-    const container = document.getElementById('compare-container');
-    if (!container) return;
-
-    const allSessions = Array.from(previousSessions.values());
-
-    // Restore saved comparison if sessions exist
-    if (comparedSessions[0] === null && comparedSessions[1] === null) {
-        loadSavedComparison();
-    }
-
-    // Update session data if sessions are still running
-    comparedSessions = comparedSessions.map(s => {
-        if (s && previousSessions.has(s.sessionId)) {
-            return previousSessions.get(s.sessionId);
-        }
-        return s;
-    });
-
-    container.innerHTML = `
-        <div class="comparison-panels">
-            ${renderComparisonPanel(comparedSessions[0], 0, allSessions)}
-            <div class="comparison-divider">
-                <button class="swap-btn" onclick="swapComparison()" title="Swap sessions">
-                    ⇄
-                </button>
-            </div>
-            ${renderComparisonPanel(comparedSessions[1], 1, allSessions)}
-        </div>
-    `;
-}
-
-function renderComparisonPanel(session, slot, allSessions) {
-    const otherSlot = slot === 0 ? 1 : 0;
-    const otherSessionId = comparedSessions[otherSlot]?.sessionId;
-
-    // Filter out the session in the other slot from options
-    const availableSessions = allSessions.filter(s => s.sessionId !== otherSessionId);
-
-    if (!session) {
-        return `
-            <div class="comparison-panel empty">
-                <div class="empty-panel-content">
-                    <span class="empty-icon">📊</span>
-                    <p>Select a session to compare</p>
-                    <select class="session-select" onchange="selectForComparison(this.value, ${slot})">
-                        <option value="">Choose session...</option>
-                        ${availableSessions.map(s => `
-                            <option value="${s.sessionId}">${escapeHtml(s.slug)}</option>
-                        `).join('')}
-                    </select>
-                </div>
-            </div>
-        `;
-    }
-
-    const activityHtml = (session.recentActivity || []).slice(0, 10).map(a =>
-        `<li>${escapeHtml(a)}</li>`
-    ).join('') || '<li class="no-activity">No recent activity</li>';
-
-    const tokenPercentage = session.contextTokens
-        ? Math.min(100, (session.contextTokens / MAX_CONTEXT_TOKENS) * 100)
-        : 0;
-
-    let tokenColorClass = 'token-green';
-    if (tokenPercentage > 80) tokenColorClass = 'token-red';
-    else if (tokenPercentage > 50) tokenColorClass = 'token-yellow';
-
-    return `
-        <div class="comparison-panel">
-            <div class="panel-header">
-                <span class="status-badge ${session.state}">
-                    <span class="status-indicator"></span>
-                    ${session.state}
-                </span>
-                <div class="panel-actions">
-                    <select class="session-select small" onchange="selectForComparison(this.value, ${slot})">
-                        <option value="${session.sessionId}">${escapeHtml(session.slug)}</option>
-                        ${availableSessions.filter(s => s.sessionId !== session.sessionId).map(s => `
-                            <option value="${s.sessionId}">${escapeHtml(s.slug)}</option>
-                        `).join('')}
-                    </select>
-                    <button class="clear-btn" onclick="clearComparison(${slot})" title="Clear selection">×</button>
-                </div>
-            </div>
-
-            <h3 class="panel-slug" onclick="focusWarpTab(previousSessions.get('${session.sessionId}'))">${escapeHtml(session.slug)}</h3>
-            <p class="panel-cwd">${escapeHtml(session.cwd || 'Unknown')}</p>
-
-            <div class="panel-tokens">
-                <div class="token-usage-compare" title="${(session.contextTokens || 0).toLocaleString()} / ${MAX_CONTEXT_TOKENS.toLocaleString()} tokens">
-                    <span class="token-label">Context:</span>
-                    <div class="token-bar-container">
-                        <div class="token-bar ${tokenColorClass}" style="width: ${tokenPercentage}%"></div>
-                    </div>
-                    <span class="token-value">${formatTokens(session.contextTokens)}</span>
-                </div>
-            </div>
-
-            <div class="panel-section">
-                <h4>Recent Activity</h4>
-                <ul class="activity-list">
-                    ${activityHtml}
-                </ul>
-            </div>
-
-            <div class="panel-section">
-                <h4>Metrics</h4>
-                <dl class="metrics-list">
-                    <dt>PID</dt><dd>${session.pid || '--'}</dd>
-                    <dt>CPU</dt><dd>${formatCpu(session.cpuPercent)}%</dd>
-                    <dt>Tokens</dt><dd>${(session.contextTokens || 0).toLocaleString()}</dd>
-                    <dt>Last Active</dt><dd>${formatTime(session.lastActivity)}</dd>
-                </dl>
-            </div>
-
-            <div class="panel-actions-footer">
-                <button class="action-btn" onclick="focusWarpTab(previousSessions.get('${session.sessionId}'))">
-                    🖥️ Focus Terminal
-                </button>
-                <button class="action-btn" onclick="showMetricsModal('${session.sessionId}')">
-                    📊 Full Metrics
-                </button>
-            </div>
-        </div>
-    `;
 }
 
 function toggleAnalytics() {
@@ -2800,6 +3332,21 @@ setInterval(() => {
         refreshTimeline();
     }
 }, 30000); // Refresh every 30 seconds when viewing timeline
+
+// Timeline bar hover event delegation
+document.addEventListener('mouseover', (e) => {
+    const bar = e.target.closest('.timeline-bar');
+    if (bar && bar.dataset.period) {
+        showTimelinePopover(e, bar);
+    }
+});
+
+document.addEventListener('mouseout', (e) => {
+    const bar = e.target.closest('.timeline-bar');
+    if (bar) {
+        hideTimelinePopover();
+    }
+});
 
 // ============================================================================
 // Feature 19: Historical Analytics Implementation
@@ -3464,16 +4011,19 @@ fetchSessions = async function() {
             checkStateChanges(previousSessionsForNotifications, allSessions);
             previousSessionsForNotifications = [...allSessions];
 
+            // Clean up sessions that no longer exist in API response
+            const currentSessionIds = new Set(allSessions.map(s => s.sessionId));
+            for (const sessionId of previousSessions.keys()) {
+                if (!currentSessionIds.has(sessionId)) {
+                    previousSessions.delete(sessionId);
+                }
+            }
+
             // Store all sessions
             allSessions.forEach(s => previousSessions.set(s.sessionId, { ...s }));
 
             // Render with filters and grouping
             renderCurrentSessions(allSessions);
-
-            // Refresh compare view if active
-            if (compareViewActive) {
-                renderCompareView();
-            }
 
             // Update status with machine info
             const activeCount = allSessions.filter(s => s.state === 'active').length;
@@ -3504,16 +4054,19 @@ fetchSessions = async function() {
             checkStateChanges(previousSessionsForNotifications, data.sessions);
             previousSessionsForNotifications = [...data.sessions];
 
+            // Clean up sessions that no longer exist in API response
+            const currentSessionIds = new Set(data.sessions.map(s => s.sessionId));
+            for (const sessionId of previousSessions.keys()) {
+                if (!currentSessionIds.has(sessionId)) {
+                    previousSessions.delete(sessionId);
+                }
+            }
+
             // Store all sessions
             data.sessions.forEach(s => previousSessions.set(s.sessionId, { ...s }));
 
             // Render with filters and grouping
             renderCurrentSessions(data.sessions);
-
-            // Refresh compare view if active
-            if (compareViewActive) {
-                renderCompareView();
-            }
 
             const activeCount = data.sessions.filter(s => s.state === 'active').length;
             updateStatus(activeCount, data.sessions.length, data.timestamp);

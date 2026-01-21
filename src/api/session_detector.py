@@ -60,6 +60,73 @@ def calculate_cost(usage: dict) -> float:
     return round(cost, 2)
 
 
+def check_background_shell_status(shells: list[dict], cwd: str) -> list[dict]:
+    """Check status of background shells and compute durations.
+
+    For each shell:
+    - If running: check if process still exists
+    - Compute duration (running time or total time if completed)
+
+    Returns updated shell list with computed status.
+    """
+    if not shells:
+        return []
+
+    now = time.time()
+    result = []
+
+    # Get list of running processes to check against
+    try:
+        ps_result = subprocess.run(
+            ['ps', 'aux'],
+            capture_output=True, text=True, timeout=5
+        )
+        running_processes = ps_result.stdout
+    except Exception:
+        running_processes = ""
+
+    for shell in shells:
+        shell_copy = dict(shell)
+        started_at = shell.get('started_at', '')
+        command = shell.get('command', '')
+
+        # Calculate duration
+        try:
+            start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00')).timestamp()
+        except (ValueError, AttributeError):
+            start_time = now
+
+        if shell.get('status') == 'running':
+            # Check if process is still running by looking for command in ps output
+            # Use first 30 chars of command as identifier
+            cmd_snippet = command[:30] if command else ''
+            is_still_running = cmd_snippet and cmd_snippet in running_processes
+
+            if is_still_running:
+                shell_copy['computed_status'] = 'running'
+                shell_copy['duration_seconds'] = int(now - start_time)
+            else:
+                # Process died - mark as completed
+                shell_copy['computed_status'] = 'completed'
+                shell_copy['completed_at'] = datetime.now(timezone.utc).isoformat()
+                shell_copy['duration_seconds'] = int(now - start_time)
+        else:
+            # Already completed
+            shell_copy['computed_status'] = 'completed'
+            if shell.get('completed_at'):
+                try:
+                    end_time = datetime.fromisoformat(shell['completed_at'].replace('Z', '+00:00')).timestamp()
+                    shell_copy['duration_seconds'] = int(end_time - start_time)
+                except (ValueError, AttributeError):
+                    shell_copy['duration_seconds'] = 0
+            else:
+                shell_copy['duration_seconds'] = 0
+
+        result.append(shell_copy)
+
+    return result
+
+
 def read_session_state(session_id: str) -> dict | None:
     """Read hook-generated state file for a session.
 
@@ -99,6 +166,45 @@ def read_session_state(session_id: str) -> dict | None:
 
     except (json.JSONDecodeError, OSError, KeyError):
         return None
+
+
+def get_all_active_state_files() -> dict[str, dict]:
+    """Scan all state files and return valid (non-stale) ones.
+
+    Returns:
+        Dict mapping session_id -> state dict (includes cwd, transcript_path)
+    """
+    if not STATE_DIR.exists():
+        return {}
+
+    now = time.time()
+    active_states = {}
+
+    for state_file in STATE_DIR.glob("*.json"):
+        try:
+            mtime = state_file.stat().st_mtime
+            age = now - mtime
+
+            if age > STATE_FILE_MAX_AGE_SECONDS:
+                continue
+
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+
+            # Validate required fields
+            if 'state' not in state or 'session_id' not in state:
+                continue
+
+            if state['state'] not in ('active', 'waiting'):
+                continue
+
+            state['_state_file_age'] = age
+            active_states[state['session_id']] = state
+
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+
+    return active_states
 
 
 def get_process_cwd(pid: int) -> str | None:
@@ -454,10 +560,10 @@ def cwd_to_project_slug(cwd: str) -> str:
 
 
 def extract_session_timeline(jsonl_file: Path) -> list[dict]:
-    """Extract activity periods from JSONL file.
+    """Extract activity periods from JSONL file with tool details.
 
     Returns:
-        List of events with timestamps and activity type
+        List of events with timestamps, activity type, and tool details
     """
     events = []
 
@@ -467,16 +573,68 @@ def extract_session_timeline(jsonl_file: Path) -> list[dict]:
                 try:
                     data = json.loads(line.strip())
 
-                    if 'timestamp' in data:
-                        event_type = data.get('type', 'unknown')
-                        # Consider assistant and tool_use as active states
-                        is_active = event_type in ['assistant', 'tool_use', 'tool_result']
+                    if 'timestamp' not in data:
+                        continue
 
-                        events.append({
-                            'timestamp': data['timestamp'],
-                            'type': event_type,
-                            'active': is_active
-                        })
+                    event_type = data.get('type', 'unknown')
+                    # Consider assistant and tool_use as active states
+                    is_active = event_type in ['assistant', 'tool_use', 'tool_result']
+
+                    event = {
+                        'timestamp': data['timestamp'],
+                        'type': event_type,
+                        'active': is_active
+                    }
+
+                    # Extract tool details from assistant messages
+                    if event_type == 'assistant' and isinstance(data.get('message'), dict):
+                        content = data['message'].get('content', [])
+                        for item in content:
+                            if isinstance(item, dict) and item.get('type') == 'tool_use':
+                                tool_name = item.get('name', '')
+                                tool_input = item.get('input', {})
+                                activity = extract_activity(item)
+                                events.append({
+                                    'timestamp': data['timestamp'],
+                                    'type': 'tool_use',
+                                    'active': True,
+                                    'tool': tool_name,
+                                    'activity': activity or tool_name
+                                })
+                        # Also add text activity if present
+                        for item in content:
+                            if isinstance(item, dict) and item.get('type') == 'text':
+                                text = item.get('text', '').strip()
+                                if text:
+                                    # Get first line/sentence as summary
+                                    first_line = text.split('\n')[0][:80]
+                                    events.append({
+                                        'timestamp': data['timestamp'],
+                                        'type': 'text',
+                                        'active': True,
+                                        'activity': first_line
+                                    })
+                                    break  # Only one text summary per message
+
+                    # Add human prompts as markers
+                    elif event_type == 'user':
+                        msg = data.get('message', {})
+                        if isinstance(msg, dict):
+                            text = ''
+                            content = msg.get('content', [])
+                            if isinstance(content, str):
+                                text = content[:60]
+                            elif isinstance(content, list):
+                                for item in content:
+                                    if isinstance(item, dict) and item.get('type') == 'text':
+                                        text = item.get('text', '')[:60]
+                                        break
+                            event['activity'] = f"User: {text}" if text else "User prompt"
+                            event['tool'] = 'human'
+                        events.append(event)
+                    else:
+                        events.append(event)
+
                 except (json.JSONDecodeError, KeyError):
                     continue
     except Exception:
@@ -486,14 +644,14 @@ def extract_session_timeline(jsonl_file: Path) -> list[dict]:
 
 
 def get_activity_periods(events: list[dict], bucket_minutes: int = 5) -> list[dict]:
-    """Bucket events into activity periods.
+    """Bucket events into activity periods with activity summaries.
 
     Args:
-        events: List of events with timestamp, type, and active flag
+        events: List of events with timestamp, type, active flag, and optional tool/activity
         bucket_minutes: Size of time buckets in minutes
 
     Returns:
-        List of activity periods: [{'start': ISO, 'end': ISO, 'state': 'active'|'waiting'}]
+        List of activity periods: [{'start': ISO, 'end': ISO, 'state': str, 'activities': list, 'tools': dict}]
     """
     if not events:
         return []
@@ -508,6 +666,30 @@ def get_activity_periods(events: list[dict], bucket_minutes: int = 5) -> list[di
     current_bucket_start = None
     current_bucket_end = None
     bucket_has_activity = False
+    bucket_activities = []  # List of activity descriptions
+    bucket_tools = {}  # tool_name -> count
+
+    def save_bucket():
+        """Save the current bucket to periods."""
+        nonlocal bucket_activities, bucket_tools
+        if bucket_has_activity:
+            # Dedupe consecutive same activities
+            deduped = []
+            prev = None
+            for act in bucket_activities:
+                if act != prev:
+                    deduped.append(act)
+                    prev = act
+
+            periods.append({
+                'start': datetime.fromtimestamp(current_bucket_start, tz=timezone.utc).isoformat(),
+                'end': datetime.fromtimestamp(current_bucket_end, tz=timezone.utc).isoformat(),
+                'state': 'active',
+                'activities': deduped[-10:],  # Keep last 10 for the bucket
+                'tools': dict(bucket_tools)
+            })
+        bucket_activities = []
+        bucket_tools = {}
 
     for event in sorted_events:
         try:
@@ -521,33 +703,38 @@ def get_activity_periods(events: list[dict], bucket_minutes: int = 5) -> list[di
             current_bucket_start = event_timestamp
             current_bucket_end = current_bucket_start + bucket_seconds
             bucket_has_activity = event['active']
+            if event.get('activity'):
+                bucket_activities.append(event['activity'])
+            if event.get('tool'):
+                bucket_tools[event['tool']] = bucket_tools.get(event['tool'], 0) + 1
             continue
 
         # Check if event is in current bucket
         if event_timestamp < current_bucket_end:
             # Update activity state (if any event is active, bucket is active)
             bucket_has_activity = bucket_has_activity or event['active']
+            if event.get('activity'):
+                bucket_activities.append(event['activity'])
+            if event.get('tool'):
+                bucket_tools[event['tool']] = bucket_tools.get(event['tool'], 0) + 1
         else:
             # Save current bucket
-            if bucket_has_activity:
-                periods.append({
-                    'start': datetime.fromtimestamp(current_bucket_start, tz=timezone.utc).isoformat(),
-                    'end': datetime.fromtimestamp(current_bucket_end, tz=timezone.utc).isoformat(),
-                    'state': 'active'
-                })
+            save_bucket()
 
             # Start new bucket
             current_bucket_start = event_timestamp
             current_bucket_end = current_bucket_start + bucket_seconds
             bucket_has_activity = event['active']
+            bucket_activities = []
+            bucket_tools = {}
+            if event.get('activity'):
+                bucket_activities.append(event['activity'])
+            if event.get('tool'):
+                bucket_tools[event['tool']] = bucket_tools.get(event['tool'], 0) + 1
 
     # Add final bucket if it had activity
-    if current_bucket_start is not None and bucket_has_activity:
-        periods.append({
-            'start': datetime.fromtimestamp(current_bucket_start, tz=timezone.utc).isoformat(),
-            'end': datetime.fromtimestamp(current_bucket_end, tz=timezone.utc).isoformat(),
-            'state': 'active'
-        })
+    if current_bucket_start is not None:
+        save_bucket()
 
     return periods
 
@@ -676,17 +863,22 @@ def get_sessions() -> list[dict]:
 
     Matches processes to sessions by:
     1. --resume sessionId in command line (definitive)
-    2. Process start time matched to JSONL session start time
+    2. State file CWD matching (handles sessions that cd'd to different dirs)
+    3. Process CWD + start time matching (fallback)
     """
     processes = get_claude_processes()
     result = []
     now = time.time()
 
-    # Two-pass matching to ensure each process gets its own session
-    # Pass 1: Match processes with explicit --resume session IDs
+    # Get all active state files upfront for state-based matching
+    active_states = get_all_active_state_files()
+
+    # Multi-pass matching to ensure each process gets its own session
     claimed_session_ids = set()
     matched_processes = {}  # pid -> metadata
+    claimed_pids = set()
 
+    # Pass 1: Match processes with explicit --resume session IDs
     for proc in processes:
         if proc['session_id']:
             metadata = get_session_metadata(proc['session_id'])
@@ -694,12 +886,36 @@ def get_sessions() -> list[dict]:
                 metadata['recency'] = now - metadata.get('file_mtime', 0)
                 matched_processes[proc['pid']] = metadata
                 claimed_session_ids.add(proc['session_id'])
+                claimed_pids.add(proc['pid'])
 
-    # Pass 2: Match remaining processes by cwd + start time
+    # Pass 2: Match using state files (handles sessions that changed directories)
+    # State files have current CWD which may differ from original project CWD
+    for session_id, state in active_states.items():
+        if session_id in claimed_session_ids:
+            continue
+
+        state_cwd = state.get('cwd', '')
+        transcript_path = state.get('transcript_path', '')
+
+        # Find a process with matching CWD that isn't already matched
+        for proc in processes:
+            if proc['pid'] in claimed_pids:
+                continue
+            if proc.get('cwd') == state_cwd:
+                # Found matching process - get metadata from transcript path
+                if transcript_path and Path(transcript_path).exists():
+                    metadata = extract_jsonl_metadata(Path(transcript_path))
+                    metadata['recency'] = now - metadata.get('file_mtime', 0)
+                    matched_processes[proc['pid']] = metadata
+                    claimed_session_ids.add(session_id)
+                    claimed_pids.add(proc['pid'])
+                    break
+
+    # Pass 3: Match remaining processes by original cwd + start time (fallback)
     # Group processes by cwd to handle multiple sessions in same directory
     procs_by_cwd = {}
     for proc in processes:
-        if proc['pid'] not in matched_processes and proc.get('cwd'):
+        if proc['pid'] not in claimed_pids and proc.get('cwd'):
             procs_by_cwd.setdefault(proc['cwd'], []).append(proc)
 
     for cwd, cwd_procs in procs_by_cwd.items():
@@ -722,6 +938,7 @@ def get_sessions() -> list[dict]:
                     if s['sessionId'] != metadata['sessionId']
                 ]
                 claimed_session_ids.add(metadata['sessionId'])
+                claimed_pids.add(proc['pid'])
 
     # Build result from matched processes
     for proc in processes:
@@ -770,6 +987,13 @@ def get_sessions() -> list[dict]:
             # Hooks-based state info
             'stateSource': state_source,
             'currentActivity': current_activity,
+            'spawnedAgents': hook_state.get('spawned_agents', []) if hook_state else [],
+            'backgroundShells': check_background_shell_status(
+                hook_state.get('background_shells', []) if hook_state else [],
+                metadata.get('cwd', '')
+            ),
+            # Activity log for emoji trail (last 20 entries)
+            'activityLog': hook_state.get('activity_log', [])[-20:] if hook_state else [],
         })
 
     # Add basic git info to each session
@@ -808,9 +1032,9 @@ def extract_conversation(jsonl_file: Path, limit: int = 10) -> list[dict]:
                 try:
                     data = json.loads(line.decode('utf-8'))
 
-                    if data.get('type') == 'human':
+                    if data.get('type') == 'user':
                         messages.append({
-                            'role': 'human',
+                            'role': 'user',
                             'content': extract_text_content(data.get('message', {})),
                             'timestamp': data.get('timestamp')
                         })
@@ -878,22 +1102,24 @@ def extract_metrics(jsonl_file: Path) -> dict:
                             first_timestamp = ts
                         last_timestamp = ts
 
-                    # Calculate response time (human -> assistant)
-                    if data.get('type') == 'human':
+                    # Calculate response time (user -> assistant)
+                    if data.get('type') == 'user':
                         prev_timestamp = ts
 
-                    elif data.get('type') == 'assistant' and prev_timestamp:
-                        try:
-                            t1 = datetime.fromisoformat(prev_timestamp.replace('Z', '+00:00'))
-                            t2 = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                            response_time = (t2 - t1).total_seconds()
-                            if 0 < response_time < 300:  # Sanity check
-                                response_times.append(response_time)
-                        except:
-                            pass
-                        prev_timestamp = None
+                    elif data.get('type') == 'assistant':
+                        # Response time only for first assistant after user
+                        if prev_timestamp:
+                            try:
+                                t1 = datetime.fromisoformat(prev_timestamp.replace('Z', '+00:00'))
+                                t2 = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                                response_time = (t2 - t1).total_seconds()
+                                if 0 < response_time < 300:  # Sanity check
+                                    response_times.append(response_time)
+                            except:
+                                pass
+                            prev_timestamp = None
 
-                        # Token usage
+                        # Token usage (all assistant messages)
                         usage = data.get('message', {}).get('usage', {})
                         if usage:
                             turn_tokens.append(
@@ -901,7 +1127,7 @@ def extract_metrics(jsonl_file: Path) -> dict:
                                 usage.get('output_tokens', 0)
                             )
 
-                        # Tool calls
+                        # Tool calls (all assistant messages)
                         content = data.get('message', {}).get('content', [])
                         for item in content:
                             if isinstance(item, dict) and item.get('type') == 'tool_use':
