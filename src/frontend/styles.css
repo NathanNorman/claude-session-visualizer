@@ -213,6 +213,7 @@ header h1 { font-size: 24px; font-weight: 600; }
     align-items: center;
     gap: 8px;
     margin-top: 8px;
+    margin-bottom: 8px;
     padding: 6px 10px;
     background: rgba(0, 0, 0, 0.25);
     border-radius: 6px;
@@ -232,6 +233,7 @@ header h1 { font-size: 24px; font-weight: 600; }
     flex-wrap: wrap;
     gap: 2px;
     align-items: center;
+    min-height: 1.2rem;
 }
 
 .trail-emoji {
@@ -329,6 +331,51 @@ header h1 { font-size: 24px; font-weight: 600; }
     opacity: 0.7;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     padding-top: 6px;
+    margin-top: 4px;
+}
+
+/* Activity Tooltip - hover details */
+.activity-tooltip {
+    position: absolute;
+    z-index: 10000;
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 8px 12px;
+    min-width: 150px;
+    max-width: 300px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    animation: tooltip-fade-in 0.1s ease;
+    pointer-events: none;
+}
+
+@keyframes tooltip-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.tooltip-header {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tooltip-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.3;
+    word-break: break-word;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+}
+
+.tooltip-time {
+    font-size: 10px;
+    color: var(--text-secondary);
+    opacity: 0.7;
     margin-top: 4px;
 }
 
@@ -567,6 +614,18 @@ header h1 { font-size: 24px; font-weight: 600; }
 
 .session-card.active .activity-item:last-child {
     color: var(--active-color);
+}
+
+.activity-time {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    opacity: 0.7;
+    margin-right: 8px;
+    font-family: monospace;
+}
+
+.activity-text {
+    flex: 1;
 }
 
 /* ============================================================================
@@ -1035,6 +1094,39 @@ body.keyboard-mode .session-card .card-number {
 .note-text {
     font-style: italic;
     color: var(--text-primary);
+}
+
+.note-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.note-header .note-tags {
+    margin-top: 0;
+}
+
+.note-content {
+    max-height: 80px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    line-height: 1.4;
+}
+
+.note-content::-webkit-scrollbar {
+    width: 4px;
+}
+
+.note-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.note-content::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
 }
 
 .note-tags {
@@ -2266,9 +2358,28 @@ body.keyboard-mode .session-card .card-number {
     gap: 12px;
 }
 
-.timeline-range-label {
+#timeline-range-select {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: var(--text-primary);
     font-size: 13px;
-    color: var(--text-secondary);
+    cursor: pointer;
+    outline: none;
+}
+
+#timeline-range-select:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+#timeline-range-select:focus {
+    border-color: var(--active-color);
+}
+
+#timeline-range-select option {
+    background: var(--card-bg);
+    color: var(--text-primary);
 }
 
 .refresh-btn {
@@ -2528,6 +2639,17 @@ body.keyboard-mode .session-card .card-number {
     padding: 8px 0 8px 180px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.timeline-section-count {
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 500;
 }
 
 .timeline-section.gastown-section {
