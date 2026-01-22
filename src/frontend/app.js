@@ -579,13 +579,15 @@ function renderNote(session) {
 
     return `
         <div class="session-note" onclick="event.stopPropagation(); editNote('${session.sessionId}')">
-            <span class="note-icon">📝</span>
-            <span class="note-text">"${escapeHtml(note.text)}"</span>
-            ${note.tags?.length ? `
-                <div class="note-tags">
-                    ${note.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
-                </div>
-            ` : ''}
+            <div class="note-header">
+                <span class="note-icon">📝</span>
+                ${note.tags?.length ? `
+                    <div class="note-tags">
+                        ${note.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
+                    </div>
+                ` : ''}
+            </div>
+            <div class="note-content">${escapeHtml(note.text)}</div>
         </div>
     `;
 }
@@ -747,13 +749,9 @@ function createCard(session, index = 0) {
                     <button onclick="event.stopPropagation(); openJsonl('${session.sessionId}')">📂 Open JSONL File</button>
                     <button onclick="event.stopPropagation(); copyResumeCmd('${session.sessionId}')">🔗 Copy Resume Command</button>
                     <hr class="menu-divider">
-                    <button onclick="event.stopPropagation(); showGitDetails('${session.sessionId}')">🌿 Git Details</button>
-                    <button onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')">📊 Performance Metrics</button>
                     <button onclick="event.stopPropagation(); refreshSummary('${session.sessionId}')">🤖 Generate AI Summary</button>
                     <button onclick="event.stopPropagation(); shareSession('${session.sessionId}')">📤 Share Session</button>
                     <button onclick="event.stopPropagation(); exportSession('${session.sessionId}')">📄 Export Markdown</button>
-                    <button onclick="event.stopPropagation(); saveAsTemplate({sessionId: '${session.sessionId}', cwd: '${escapeHtml(session.cwd)}', slug: '${escapeHtml(session.slug)}'})">💾 Save as Template</button>
-                    <button onclick="event.stopPropagation(); editNote('${session.sessionId}')">📝 Edit Note</button>
                     <hr class="menu-divider">
                     <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeHtml(session.slug)}')">⚠️ Kill Session</button>
                 </div>
@@ -769,7 +767,6 @@ function createCard(session, index = 0) {
         ${agentTreeHtml}
         ${backgroundShellsHtml}
         <div class="activity-log">${activityLogHtml}</div>
-        ${renderConversationPeek(session)}
         <div class="card-footer">
             <div class="meta">
                 <span>PID: ${session.pid || '--'}</span>
@@ -987,12 +984,12 @@ async function refreshSummary(sessionId) {
         const data = await response.json();
         const card = document.querySelector(`[data-session-id="${sessionId}"]`);
 
-        // Save AI summary to notes
+        // Save AI summary to notes - PREPEND to top of existing notes
         const existingNote = getNote(sessionId);
         const timestamp = new Date().toLocaleTimeString();
-        const newEntry = `[${timestamp}] AI: ${data.summary}`;
+        const newEntry = `[${timestamp}] AI:\n${data.summary}`;
         const combinedText = existingNote?.text
-            ? `${existingNote.text}\n\n${newEntry}`
+            ? `${newEntry}\n\n${existingNote.text}`
             : newEntry;
         const combinedTags = existingNote?.tags || [];
         if (!combinedTags.includes('ai-generated')) {
@@ -1000,19 +997,18 @@ async function refreshSummary(sessionId) {
         }
         setNote(sessionId, { text: combinedText, tags: combinedTags });
 
-        // Directly update the note display on the card
+        // Update the note display on the card
         if (card) {
             const noteEl = card.querySelector('.session-note');
-            const displayText = combinedText.length > 100
-                ? combinedText.substring(0, 100) + '...'
-                : combinedText;
             const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
             if (noteEl) {
                 noteEl.outerHTML = `
                     <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
-                        <span class="note-icon">📝</span>
-                        <span class="note-text">"${escapeHtml(displayText)}"</span>
-                        <div class="note-tags">${tagsHtml}</div>
+                        <div class="note-header">
+                            <span class="note-icon">📝</span>
+                            <div class="note-tags">${tagsHtml}</div>
+                        </div>
+                        <div class="note-content">${escapeHtml(combinedText)}</div>
                     </div>
                 `;
             }
@@ -1050,12 +1046,12 @@ async function refreshAllSummaries() {
             const sessionId = item.sessionId;
             const summary = item.summary;
 
-            // Save to notes (persisted to localStorage)
+            // Save to notes - PREPEND to top of existing notes
             const existingNote = getNote(sessionId);
             const timestamp = new Date().toLocaleTimeString();
-            const newEntry = `[${timestamp}] AI: ${summary}`;
+            const newEntry = `[${timestamp}] AI:\n${summary}`;
             const combinedText = existingNote?.text
-                ? `${existingNote.text}\n\n${newEntry}`
+                ? `${newEntry}\n\n${existingNote.text}`
                 : newEntry;
             const combinedTags = existingNote?.tags || [];
             if (!combinedTags.includes('ai-generated')) {
@@ -1068,15 +1064,14 @@ async function refreshAllSummaries() {
             if (card) {
                 const noteEl = card.querySelector('.session-note');
                 if (noteEl) {
-                    const displayText = combinedText.length > 100
-                        ? combinedText.substring(0, 100) + '...'
-                        : combinedText;
                     const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
                     noteEl.outerHTML = `
                         <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
-                            <span class="note-icon">📝</span>
-                            <span class="note-text">"${escapeHtml(displayText)}"</span>
-                            <div class="note-tags">${tagsHtml}</div>
+                            <div class="note-header">
+                                <span class="note-icon">📝</span>
+                                <div class="note-tags">${tagsHtml}</div>
+                            </div>
+                            <div class="note-content">${escapeHtml(combinedText)}</div>
                         </div>
                     `;
                 }
@@ -1562,9 +1557,26 @@ function formatActivityLog(activities) {
     if (!activities || activities.length === 0) {
         return '<div class="activity-item empty">No recent activity</div>';
     }
-    return activities.map(a =>
-        `<div class="activity-item">${escapeHtml(a)}</div>`
-    ).join('');
+    return activities.map(a => {
+        // Support both old format (string) and new format ({text, timestamp})
+        const text = typeof a === 'string' ? a : a.text;
+        const timestamp = typeof a === 'string' ? '' : a.timestamp;
+        const timeStr = timestamp ? formatActivityTime(timestamp) : '';
+        return `<div class="activity-item">
+            ${timeStr ? `<span class="activity-time">${timeStr}</span>` : ''}
+            <span class="activity-text">${escapeHtml(text)}</span>
+        </div>`;
+    }).join('');
+}
+
+function formatActivityTime(isoTimestamp) {
+    if (!isoTimestamp) return '';
+    try {
+        const date = new Date(isoTimestamp);
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+        return '';
+    }
 }
 
 // ============================================================================
@@ -1754,7 +1766,7 @@ function getActivityEmoji(toolOrEvent) {
 }
 
 // Convert activity log to emoji trail (deduplicated, only showing completed actions)
-function buildEmojiTrail(activityLog, maxLength = 12) {
+function buildEmojiTrail(activityLog, maxLength = 30) {
     if (!activityLog || activityLog.length === 0) return [];
 
     const trail = [];
@@ -1806,7 +1818,12 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
     const trail = buildEmojiTrail(activityLog);
 
     if (trail.length === 0) {
-        return '';
+        return `
+            <div class="activity-trail">
+                <span class="trail-label">Activity:</span>
+                <div class="trail-emojis empty"></div>
+            </div>
+        `;
     }
 
     const emojisHtml = trail.map((item, idx) => {
@@ -1819,10 +1836,10 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
             isPrompt ? 'prompt-marker' : ''
         ].filter(Boolean).join(' ');
 
-        // Encode data for the popover
+        // Encode data for the tooltip
         const dataAttrs = `data-tool="${escapeHtml(item.tool)}" data-desc="${escapeHtml(item.description)}" data-time="${escapeHtml(item.timestamp || '')}"`;
 
-        return `<span class="${classes}" ${dataAttrs} onclick="showActivityPopover(event, this)">${item.emoji}</span>`;
+        return `<span class="${classes}" ${dataAttrs} onmouseenter="showActivityTooltip(event, this)" onmouseleave="hideActivityTooltip()">${item.emoji}</span>`;
     }).join('');
 
     return `
@@ -1833,41 +1850,46 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
     `;
 }
 
-// Show popover with activity details
-function showActivityPopover(event, element) {
-    event.stopPropagation();
-
-    // Remove any existing popover
-    const existing = document.querySelector('.activity-popover');
-    if (existing) existing.remove();
+// Show tooltip with activity details on hover
+function showActivityTooltip(event, element) {
+    // Remove any existing tooltip
+    hideActivityTooltip();
 
     const tool = element.dataset.tool;
     const desc = element.dataset.desc;
     const time = element.dataset.time;
     const formattedTime = formatActivityTime(time);
 
-    // Create popover
-    const popover = document.createElement('div');
-    popover.className = 'activity-popover';
-    popover.innerHTML = `
-        <div class="popover-header">${element.textContent} ${escapeHtml(tool)}</div>
-        <div class="popover-desc">${escapeHtml(desc)}</div>
-        ${formattedTime ? `<div class="popover-time">${formattedTime}</div>` : ''}
+    // Create tooltip
+    const tooltip = document.createElement('div');
+    tooltip.className = 'activity-tooltip';
+    tooltip.id = 'activity-tooltip';
+    tooltip.innerHTML = `
+        <div class="tooltip-header">${element.textContent} ${escapeHtml(tool)}</div>
+        <div class="tooltip-desc">${escapeHtml(desc)}</div>
+        ${formattedTime ? `<div class="tooltip-time">${formattedTime}</div>` : ''}
     `;
 
-    // Position popover near the clicked element
-    document.body.appendChild(popover);
+    // Position tooltip near the element
+    document.body.appendChild(tooltip);
     const rect = element.getBoundingClientRect();
-    popover.style.left = `${rect.left + window.scrollX}px`;
-    popover.style.top = `${rect.bottom + window.scrollY + 8}px`;
 
-    // Close on click outside
-    setTimeout(() => {
-        document.addEventListener('click', function closePopover() {
-            popover.remove();
-            document.removeEventListener('click', closePopover);
-        }, { once: true });
-    }, 10);
+    // Position above the element by default, below if not enough space
+    const tooltipHeight = tooltip.offsetHeight;
+    const spaceAbove = rect.top;
+
+    if (spaceAbove > tooltipHeight + 10) {
+        tooltip.style.left = `${rect.left + window.scrollX}px`;
+        tooltip.style.top = `${rect.top + window.scrollY - tooltipHeight - 6}px`;
+    } else {
+        tooltip.style.left = `${rect.left + window.scrollX}px`;
+        tooltip.style.top = `${rect.bottom + window.scrollY + 6}px`;
+    }
+}
+
+function hideActivityTooltip() {
+    const tooltip = document.getElementById('activity-tooltip');
+    if (tooltip) tooltip.remove();
 }
 
 // Get icon for current activity based on activity type/tool (fallback for non-animated contexts)
@@ -2960,9 +2982,14 @@ document.addEventListener('DOMContentLoaded', () => {
 // Feature 05: Session Timeline Implementation
 // ============================================================================
 
-const TIMELINE_HOURS = 8; // Show last 8 hours
+let timelineHours = 8; // Show last 8 hours (configurable)
 let timelineData = new Map(); // sessionId -> activityPeriods
 let timelineViewActive = false;
+
+function changeTimelineRange(hours) {
+    timelineHours = parseInt(hours, 10);
+    refreshTimeline();
+}
 
 async function fetchSessionTimeline(sessionId) {
     try {
@@ -3016,20 +3043,52 @@ async function refreshTimeline() {
 function renderTimeline(sessions) {
     const container = document.getElementById('timeline-container');
     const now = Date.now();
-    const hoursBack = TIMELINE_HOURS;
+    const hoursBack = timelineHours;
     const startTime = now - (hoursBack * 60 * 60 * 1000);
 
-    // Separate normal and gastown sessions
-    const normalSessions = sessions.filter(s => !s.isGastown);
-    const gastownSessions = sessions.filter(s => s.isGastown);
+    // Group sessions by repo (cwd)
+    const sessionsByRepo = new Map();
+    const gastownSessions = [];
+
+    for (const session of sessions) {
+        if (session.isGastown) {
+            gastownSessions.push(session);
+        } else {
+            const cwd = session.cwd || 'Unknown';
+            const repoName = cwd.split('/').filter(Boolean).pop() || 'Unknown';
+            if (!sessionsByRepo.has(repoName)) {
+                sessionsByRepo.set(repoName, { cwd, sessions: [] });
+            }
+            sessionsByRepo.get(repoName).sessions.push(session);
+        }
+    }
+
+    // Sort repos by most recent activity
+    const sortedRepos = [...sessionsByRepo.entries()].sort((a, b) => {
+        const aLatest = Math.max(...a[1].sessions.map(s => new Date(s.lastActivity || 0).getTime()));
+        const bLatest = Math.max(...b[1].sessions.map(s => new Date(s.lastActivity || 0).getTime()));
+        return bLatest - aLatest;
+    });
 
     // Generate time axis
     const timeAxisHtml = generateTimeAxis(startTime, now, hoursBack);
 
-    // Generate timeline rows for normal sessions
-    const normalRowsHtml = normalSessions.map(session => {
-        const periods = timelineData.get(session.sessionId) || [];
-        return renderTimelineRow(session, periods, startTime, now);
+    // Generate timeline sections for each repo
+    const repoSectionsHtml = sortedRepos.map(([repoName, { cwd, sessions: repoSessions }]) => {
+        const rowsHtml = repoSessions.map(session => {
+            const periods = timelineData.get(session.sessionId) || [];
+            return renderTimelineRow(session, periods, startTime, now);
+        }).join('');
+
+        return `
+            <div class="timeline-section">
+                <div class="timeline-section-header" title="${escapeHtml(cwd)}">
+                    📁 ${escapeHtml(repoName)}
+                    <span class="timeline-section-count">${repoSessions.length}</span>
+                </div>
+                <div class="timeline-rows">${rowsHtml}</div>
+            </div>
+        `;
     }).join('');
 
     // Generate timeline rows for gastown sessions
@@ -3040,12 +3099,7 @@ function renderTimeline(sessions) {
 
     container.innerHTML = `
         <div class="timeline-axis">${timeAxisHtml}</div>
-        ${normalSessions.length > 0 ? `
-            <div class="timeline-section">
-                <div class="timeline-section-header">Sessions</div>
-                <div class="timeline-rows">${normalRowsHtml}</div>
-            </div>
-        ` : ''}
+        ${repoSectionsHtml}
         ${gastownSessions.length > 0 ? `
             <div class="timeline-section gastown-section">
                 <div class="timeline-section-header">🏭 Gastown Agents</div>
@@ -3141,7 +3195,7 @@ function renderTimelineRow(session, periods, startTime, endTime) {
                 </span>
             </div>
             <div class="timeline-track">
-                ${barsHtml || '<span class="no-activity">No activity in last ' + TIMELINE_HOURS + ' hours</span>'}
+                ${barsHtml || '<span class="no-activity">No activity in last ' + timelineHours + ' hours</span>'}
             </div>
         </div>
     `;
@@ -4178,229 +4232,4 @@ document.addEventListener('DOMContentLoaded', () => {
     updateMultiMachineUI();
 });
 
-// ============================================================================
-// Feature 09: Conversation Peek Implementation
-// ============================================================================
-
-// Cache for conversation data to avoid repeated API calls
-const conversationCache = new Map();
-const CONVERSATION_CACHE_TTL = 30000; // 30 seconds
-
-async function loadConversation(sessionId, limit = 20) {
-    // Check cache first
-    const cached = conversationCache.get(sessionId);
-    if (cached && Date.now() - cached.timestamp < CONVERSATION_CACHE_TTL) {
-        return cached.messages;
-    }
-
-    try {
-        const resp = await fetch(`/api/session/${sessionId}/conversation?limit=${limit}`);
-        if (!resp.ok) return [];
-        const data = await resp.json();
-        const messages = data.messages || [];
-
-        // Cache the result
-        conversationCache.set(sessionId, {
-            messages,
-            timestamp: Date.now()
-        });
-
-        return messages;
-    } catch (e) {
-        console.warn('Failed to load conversation:', e);
-        return [];
-    }
-}
-
-function truncateText(text, maxLen) {
-    if (!text) return '';
-    if (text.length <= maxLen) return text;
-    return text.substring(0, maxLen - 3) + '...';
-}
-
-function renderConversationPeek(session) {
-    // Show a placeholder that loads conversation on demand
-    return `
-        <div class="conversation-peek" id="conv-peek-${session.sessionId}" onclick="event.stopPropagation();">
-            <div class="peek-loading" onclick="loadConversationPeek('${session.sessionId}')">
-                💬 View last exchange
-            </div>
-        </div>
-    `;
-}
-
-async function loadConversationPeek(sessionId) {
-    const peekEl = document.getElementById(`conv-peek-${sessionId}`);
-    if (!peekEl) return;
-
-    peekEl.innerHTML = '<div class="peek-loading">Loading...</div>';
-
-    const messages = await loadConversation(sessionId, 10);
-
-    if (messages.length < 2) {
-        peekEl.innerHTML = '<div class="peek-empty">No conversation yet</div>';
-        return;
-    }
-
-    // Get last human and assistant messages
-    const lastHuman = [...messages].reverse().find(m => m.role === 'human');
-    const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
-
-    if (!lastHuman && !lastAssistant) {
-        peekEl.innerHTML = '<div class="peek-empty">No conversation yet</div>';
-        return;
-    }
-
-    const humanText = lastHuman ? truncateText(lastHuman.content, 80) : '';
-    const assistantText = lastAssistant ? truncateText(lastAssistant.content, 120) : '';
-
-    peekEl.innerHTML = `
-        <div class="peek-exchange">
-            ${humanText ? `
-                <div class="peek-human">
-                    <span class="peek-role">👤 You:</span>
-                    <span class="peek-text">"${escapeHtml(humanText)}"</span>
-                </div>
-            ` : ''}
-            ${assistantText ? `
-                <div class="peek-assistant">
-                    <span class="peek-role">🤖 Claude:</span>
-                    <span class="peek-text">"${escapeHtml(assistantText)}"</span>
-                </div>
-            ` : ''}
-        </div>
-        <button class="peek-more" onclick="event.stopPropagation(); openConversationModal('${sessionId}')">
-            View full conversation →
-        </button>
-    `;
-}
-
-async function openConversationModal(sessionId) {
-    closeAllMenus();
-    const session = previousSessions.get(sessionId);
-    const sessionName = session?.slug || sessionId;
-
-    showModal(`
-        <div class="conversation-modal">
-            <div class="conversation-modal-header">
-                <h3>💬 Conversation History</h3>
-                <span class="modal-session-name">${escapeHtml(sessionName)}</span>
-                <button onclick="closeModal()" class="modal-close">Close</button>
-            </div>
-            <div class="conversation-modal-body" id="conversation-messages">
-                <div class="loading">Loading conversation...</div>
-            </div>
-            <div class="conversation-modal-footer">
-                <button onclick="loadMoreConversation('${sessionId}')" id="load-more-btn" class="btn-secondary">
-                    Load more
-                </button>
-            </div>
-        </div>
-    `);
-
-    // Load initial conversation
-    const messages = await loadConversation(sessionId, 20);
-    renderConversationModal(messages);
-}
-
-let currentConversationLimit = 20;
-
-async function loadMoreConversation(sessionId) {
-    currentConversationLimit += 20;
-    const btn = document.getElementById('load-more-btn');
-    if (btn) btn.textContent = 'Loading...';
-
-    // Clear cache to fetch fresh data
-    conversationCache.delete(sessionId);
-
-    const messages = await loadConversation(sessionId, currentConversationLimit);
-    renderConversationModal(messages);
-
-    if (btn) btn.textContent = 'Load more';
-}
-
-function renderConversationModal(messages) {
-    const container = document.getElementById('conversation-messages');
-    if (!container) return;
-
-    if (!messages || messages.length === 0) {
-        container.innerHTML = `
-            <div class="conversation-empty">
-                <p>No conversation history found.</p>
-                <p>Start chatting with Claude to see messages here.</p>
-            </div>
-        `;
-        return;
-    }
-
-    // Render messages in chronological order (oldest first)
-    const messagesHtml = messages.map(msg => renderConversationMessage(msg)).join('');
-
-    container.innerHTML = messagesHtml;
-
-    // Scroll to bottom to show most recent
-    requestAnimationFrame(() => {
-        container.scrollTop = container.scrollHeight;
-    });
-}
-
-function renderConversationMessage(msg) {
-    const icon = msg.role === 'human' ? '👤' : '🤖';
-    const roleLabel = msg.role === 'human' ? 'You' : 'Claude';
-    const roleClass = msg.role === 'human' ? 'human' : 'assistant';
-
-    // Format timestamp
-    let timeStr = '';
-    if (msg.timestamp) {
-        try {
-            const date = new Date(msg.timestamp);
-            timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        } catch (e) {
-            timeStr = '';
-        }
-    }
-
-    // Render tool badges if present
-    const toolsHtml = msg.tools?.length ? `
-        <div class="message-tools">
-            ${msg.tools.map(t => `<span class="tool-badge">${escapeHtml(t)}</span>`).join('')}
-        </div>
-    ` : '';
-
-    // Format content - handle code blocks and newlines
-    const formattedContent = formatMessageContent(msg.content || '');
-
-    return `
-        <div class="conversation-message ${roleClass}">
-            <div class="message-header">
-                <span class="message-icon">${icon}</span>
-                <span class="message-role">${roleLabel}</span>
-                <span class="message-time">${timeStr}</span>
-            </div>
-            <div class="message-content">${formattedContent}</div>
-            ${toolsHtml}
-        </div>
-    `;
-}
-
-function formatMessageContent(content) {
-    if (!content) return '';
-
-    // Escape HTML first
-    let escaped = escapeHtml(content);
-
-    // Convert code blocks (```...```)
-    escaped = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
-        return `<pre class="code-block"><code>${code.trim()}</code></pre>`;
-    });
-
-    // Convert inline code (`...`)
-    escaped = escaped.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-
-    // Convert newlines to <br>
-    escaped = escaped.replace(/\n/g, '<br>');
-
-    return escaped;
-}
-
-console.log('Claude Session Visualizer loaded - All features active (including Feature 09: Conversation Peek)');
+console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');

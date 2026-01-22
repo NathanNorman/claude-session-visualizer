@@ -213,6 +213,7 @@ header h1 { font-size: 24px; font-weight: 600; }
     align-items: center;
     gap: 8px;
     margin-top: 8px;
+    margin-bottom: 8px;
     padding: 6px 10px;
     background: rgba(0, 0, 0, 0.25);
     border-radius: 6px;
@@ -232,6 +233,7 @@ header h1 { font-size: 24px; font-weight: 600; }
     flex-wrap: wrap;
     gap: 2px;
     align-items: center;
+    min-height: 1.2rem;
 }
 
 .trail-emoji {
@@ -329,6 +331,51 @@ header h1 { font-size: 24px; font-weight: 600; }
     opacity: 0.7;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     padding-top: 6px;
+    margin-top: 4px;
+}
+
+/* Activity Tooltip - hover details */
+.activity-tooltip {
+    position: absolute;
+    z-index: 10000;
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 8px 12px;
+    min-width: 150px;
+    max-width: 300px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    animation: tooltip-fade-in 0.1s ease;
+    pointer-events: none;
+}
+
+@keyframes tooltip-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.tooltip-header {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tooltip-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.3;
+    word-break: break-word;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+}
+
+.tooltip-time {
+    font-size: 10px;
+    color: var(--text-secondary);
+    opacity: 0.7;
     margin-top: 4px;
 }
 
@@ -567,6 +614,18 @@ header h1 { font-size: 24px; font-weight: 600; }
 
 .session-card.active .activity-item:last-child {
     color: var(--active-color);
+}
+
+.activity-time {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    opacity: 0.7;
+    margin-right: 8px;
+    font-family: monospace;
+}
+
+.activity-text {
+    flex: 1;
 }
 
 /* ============================================================================
@@ -1035,6 +1094,39 @@ body.keyboard-mode .session-card .card-number {
 .note-text {
     font-style: italic;
     color: var(--text-primary);
+}
+
+.note-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.note-header .note-tags {
+    margin-top: 0;
+}
+
+.note-content {
+    max-height: 80px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    line-height: 1.4;
+}
+
+.note-content::-webkit-scrollbar {
+    width: 4px;
+}
+
+.note-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.note-content::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
 }
 
 .note-tags {
@@ -2266,9 +2358,28 @@ body.keyboard-mode .session-card .card-number {
     gap: 12px;
 }
 
-.timeline-range-label {
+#timeline-range-select {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: var(--text-primary);
     font-size: 13px;
-    color: var(--text-secondary);
+    cursor: pointer;
+    outline: none;
+}
+
+#timeline-range-select:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+#timeline-range-select:focus {
+    border-color: var(--active-color);
+}
+
+#timeline-range-select option {
+    background: var(--card-bg);
+    color: var(--text-primary);
 }
 
 .refresh-btn {
@@ -2528,6 +2639,17 @@ body.keyboard-mode .session-card .card-number {
     padding: 8px 0 8px 180px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.timeline-section-count {
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 500;
 }
 
 .timeline-section.gastown-section {
@@ -3694,263 +3816,4 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 #filters .icon-button:hover {
     background: rgba(255,255,255,0.15);
-}
-
-/* ============================================================================
-   Feature 09: Conversation Peek
-   ============================================================================ */
-
-/* Conversation peek on session cards */
-.conversation-peek {
-    margin: 12px 0;
-    padding: 10px 12px;
-    background: rgba(0,0,0,0.2);
-    border-radius: 6px;
-    border-left: 3px solid rgba(139, 92, 246, 0.5);
-    font-size: 13px;
-}
-
-.peek-loading {
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: color 0.2s;
-}
-
-.peek-loading:hover {
-    color: var(--text-primary);
-}
-
-.peek-empty {
-    color: var(--text-secondary);
-    font-style: italic;
-}
-
-.peek-exchange {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.peek-human,
-.peek-assistant {
-    display: flex;
-    gap: 8px;
-    align-items: flex-start;
-}
-
-.peek-role {
-    font-weight: 600;
-    flex-shrink: 0;
-    font-size: 12px;
-}
-
-.peek-human .peek-role {
-    color: var(--waiting-color);
-}
-
-.peek-assistant .peek-role {
-    color: var(--active-color);
-}
-
-.peek-text {
-    color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.4;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.peek-more {
-    margin-top: 8px;
-    padding: 4px 10px;
-    background: rgba(139, 92, 246, 0.2);
-    border: none;
-    border-radius: 4px;
-    color: #a78bfa;
-    font-size: 11px;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-
-.peek-more:hover {
-    background: rgba(139, 92, 246, 0.3);
-}
-
-/* Conversation modal */
-.conversation-modal {
-    min-width: 600px;
-    max-width: 800px;
-}
-
-.conversation-modal-header {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding-bottom: 16px;
-    margin-bottom: 16px;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
-}
-
-.conversation-modal-header h3 {
-    font-size: 20px;
-    margin: 0;
-}
-
-.modal-session-name {
-    color: var(--text-secondary);
-    font-size: 14px;
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.conversation-modal-body {
-    max-height: 60vh;
-    overflow-y: auto;
-    padding: 16px;
-    background: rgba(0,0,0,0.2);
-    border-radius: 8px;
-}
-
-.conversation-modal-footer {
-    display: flex;
-    justify-content: center;
-    padding-top: 16px;
-    margin-top: 16px;
-    border-top: 1px solid rgba(255,255,255,0.1);
-}
-
-.conversation-empty {
-    text-align: center;
-    padding: 40px;
-    color: var(--text-secondary);
-}
-
-.conversation-empty p {
-    margin: 8px 0;
-}
-
-/* Individual conversation messages */
-.conversation-message {
-    margin-bottom: 16px;
-    padding: 12px 16px;
-    border-radius: 8px;
-    background: rgba(0,0,0,0.2);
-}
-
-.conversation-message.human {
-    background: rgba(96, 165, 250, 0.1);
-    border-left: 3px solid var(--waiting-color);
-}
-
-.conversation-message.assistant {
-    background: rgba(74, 222, 128, 0.1);
-    border-left: 3px solid var(--active-color);
-}
-
-.message-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-}
-
-.message-icon {
-    font-size: 14px;
-}
-
-.message-role {
-    font-weight: 600;
-    font-size: 13px;
-}
-
-.conversation-message.human .message-role {
-    color: var(--waiting-color);
-}
-
-.conversation-message.assistant .message-role {
-    color: var(--active-color);
-}
-
-.message-time {
-    font-size: 11px;
-    color: var(--text-secondary);
-    margin-left: auto;
-}
-
-.message-content {
-    font-size: 14px;
-    line-height: 1.6;
-    color: var(--text-primary);
-    word-wrap: break-word;
-}
-
-.message-content .code-block {
-    background: rgba(0,0,0,0.3);
-    padding: 12px;
-    border-radius: 6px;
-    margin: 8px 0;
-    overflow-x: auto;
-    font-family: 'SF Mono', Monaco, monospace;
-    font-size: 12px;
-}
-
-.message-content .inline-code {
-    background: rgba(0,0,0,0.3);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: 'SF Mono', Monaco, monospace;
-    font-size: 12px;
-}
-
-.message-tools {
-    margin-top: 12px;
-    padding-top: 8px;
-    border-top: 1px solid rgba(255,255,255,0.05);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.tool-badge {
-    display: inline-block;
-    padding: 2px 8px;
-    background: rgba(139, 92, 246, 0.2);
-    color: #a78bfa;
-    border-radius: 4px;
-    font-size: 11px;
-    font-family: 'SF Mono', Monaco, monospace;
-}
-
-/* Scrollbar for conversation modal body */
-.conversation-modal-body::-webkit-scrollbar {
-    width: 8px;
-}
-
-.conversation-modal-body::-webkit-scrollbar-track {
-    background: rgba(0,0,0,0.2);
-    border-radius: 4px;
-}
-
-.conversation-modal-body::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,0.2);
-    border-radius: 4px;
-}
-
-.conversation-modal-body::-webkit-scrollbar-thumb:hover {
-    background: rgba(255,255,255,0.3);
-}
-
-/* Responsive adjustments for conversation modal */
-@media (max-width: 700px) {
-    .conversation-modal {
-        min-width: auto;
-        width: 100%;
-    }
-
-    .conversation-modal-body {
-        max-height: 50vh;
-    }
 }

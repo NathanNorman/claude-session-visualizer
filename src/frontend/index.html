@@ -78,7 +78,13 @@
         <div class="timeline-header">
             <h2>Session Timeline</h2>
             <div class="timeline-controls">
-                <span class="timeline-range-label">Last 8 hours</span>
+                <select id="timeline-range-select" onchange="changeTimelineRange(this.value)">
+                    <option value="4">Last 4 hours</option>
+                    <option value="8" selected>Last 8 hours</option>
+                    <option value="24">Last 24 hours</option>
+                    <option value="48">Last 48 hours</option>
+                    <option value="168">Last 7 days</option>
+                </select>
                 <button class="refresh-btn" onclick="refreshTimeline()" title="Refresh timeline">🔄</button>
             </div>
         </div>

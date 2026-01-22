@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -13,7 +13,6 @@ import uuid
 import hashlib
 from typing import Optional
 import asyncio
-from dataclasses import dataclass, field
 from .session_detector import (
     get_sessions,
     extract_conversation,
@@ -78,110 +77,6 @@ SUMMARY_TTL = 300  # 5 minutes
 # Feature 16: Shared sessions store
 _shared_sessions: dict[str, dict] = {}  # token -> {session, created_at, expires_at, created_by}
 
-
-# WebSocket Connection Manager
-@dataclass
-class ConnectionManager:
-    """Manages WebSocket connections and broadcasts session updates."""
-    active_connections: list[WebSocket] = field(default_factory=list)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    async def connect(self, websocket: WebSocket):
-        """Accept a new WebSocket connection."""
-        await websocket.accept()
-        async with self._lock:
-            self.active_connections.append(websocket)
-        print(f"[WS] Client connected. Total: {len(self.active_connections)}")
-
-    async def disconnect(self, websocket: WebSocket):
-        """Remove a WebSocket connection."""
-        async with self._lock:
-            if websocket in self.active_connections:
-                self.active_connections.remove(websocket)
-        print(f"[WS] Client disconnected. Total: {len(self.active_connections)}")
-
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients."""
-        if not self.active_connections:
-            return
-
-        data = json.dumps(message)
-        disconnected = []
-
-        async with self._lock:
-            for connection in self.active_connections:
-                try:
-                    await connection.send_text(data)
-                except Exception:
-                    disconnected.append(connection)
-
-        # Clean up disconnected clients
-        for conn in disconnected:
-            await self.disconnect(conn)
-
-    @property
-    def connection_count(self) -> int:
-        return len(self.active_connections)
-
-
-# Global connection manager instance
-ws_manager = ConnectionManager()
-
-# File watcher state
-_file_watcher_task: asyncio.Task | None = None
-_last_sessions_hash: str = ""
-
-
-def compute_sessions_hash(sessions: list[dict]) -> str:
-    """Compute a hash of session states for change detection."""
-    # Focus on fields that indicate meaningful changes
-    key_data = []
-    for s in sessions:
-        key_data.append({
-            'sessionId': s.get('sessionId'),
-            'state': s.get('state'),
-            'currentActivity': s.get('currentActivity'),
-            'contextTokens': s.get('contextTokens'),
-            'lastActivity': s.get('lastActivity'),
-            'activityLog': s.get('activityLog', [])[-5:],  # Last 5 activities
-        })
-    return hashlib.md5(json.dumps(key_data, sort_keys=True).encode()).hexdigest()
-
-
-async def watch_sessions_loop(interval: float = 2.0):
-    """Background task that watches for session changes and broadcasts updates.
-
-    Args:
-        interval: Seconds between checks (default 2.0 for responsive updates)
-    """
-    global _last_sessions_hash
-
-    print(f"[WS] Starting session watcher (interval={interval}s)")
-
-    while True:
-        try:
-            # Only check if there are connected clients
-            if ws_manager.connection_count > 0:
-                sessions = get_sessions()
-                current_hash = compute_sessions_hash(sessions)
-
-                if current_hash != _last_sessions_hash:
-                    _last_sessions_hash = current_hash
-                    await ws_manager.broadcast({
-                        'type': 'sessions_update',
-                        'sessions': sessions,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    })
-                    print(f"[WS] Broadcast update to {ws_manager.connection_count} clients")
-
-            await asyncio.sleep(interval)
-
-        except asyncio.CancelledError:
-            print("[WS] Session watcher cancelled")
-            break
-        except Exception as e:
-            print(f"[WS] Error in session watcher: {e}")
-            await asyncio.sleep(interval)
 
 
 class FocusRequest(BaseModel):
@@ -856,71 +751,6 @@ def get_history(page: int = 1, per_page: int = 20, repo: str = None):
     return get_session_history(page, per_page, repo)
 
 
-# WebSocket endpoint for real-time session updates
-@app.websocket("/ws/sessions")
-async def websocket_sessions(websocket: WebSocket):
-    """WebSocket endpoint for real-time session updates.
-
-    Clients receive:
-    - Initial sessions list on connect
-    - sessions_update messages when sessions change
-
-    Message format:
-    {
-        "type": "sessions_update",
-        "sessions": [...],
-        "timestamp": "ISO8601"
-    }
-    """
-    await ws_manager.connect(websocket)
-
-    try:
-        # Send initial session state
-        sessions = get_sessions()
-        await websocket.send_json({
-            'type': 'sessions_update',
-            'sessions': sessions,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        })
-
-        # Keep connection alive and handle incoming messages
-        while True:
-            try:
-                # Wait for messages (ping/pong or commands)
-                data = await websocket.receive_text()
-                msg = json.loads(data)
-
-                # Handle ping
-                if msg.get('type') == 'ping':
-                    await websocket.send_json({'type': 'pong'})
-
-                # Handle force refresh request
-                elif msg.get('type') == 'refresh':
-                    sessions = get_sessions()
-                    await websocket.send_json({
-                        'type': 'sessions_update',
-                        'sessions': sessions,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    })
-
-            except json.JSONDecodeError:
-                pass  # Ignore malformed messages
-
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await ws_manager.disconnect(websocket)
-
-
-@app.get("/api/ws/status")
-def get_ws_status():
-    """Get WebSocket connection status."""
-    return {
-        'connected_clients': ws_manager.connection_count,
-        'watcher_running': _file_watcher_task is not None and not _file_watcher_task.done()
-    }
-
-
 # Background task to record snapshots
 _recording_task = None
 
@@ -938,14 +768,9 @@ async def record_snapshots_background():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background tasks on app startup."""
-    global _recording_task, _file_watcher_task
-
-    # Start session snapshot recording
+    """Start background recording task on app startup."""
+    global _recording_task
     _recording_task = asyncio.create_task(record_snapshots_background())
-
-    # Start WebSocket session watcher
-    _file_watcher_task = asyncio.create_task(watch_sessions_loop(interval=2.0))
 
     # Feature 17: Start tunnel manager and connect to saved machines
     manager = get_tunnel_manager()
@@ -955,14 +780,10 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cancel background tasks on shutdown."""
-    global _recording_task, _file_watcher_task
-
+    """Cancel background task on shutdown."""
+    global _recording_task
     if _recording_task:
         _recording_task.cancel()
-
-    if _file_watcher_task:
-        _file_watcher_task.cancel()
 
     # Feature 17: Cleanup tunnel manager
     manager = get_tunnel_manager()
