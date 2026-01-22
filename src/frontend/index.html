@@ -48,7 +48,7 @@
             Analytics
         </button>
         <button class="tab-button" onclick="switchView('mission-control')" data-view="mission-control">
-            🎯 Mission Control
+            🎛️ Mission Control
         </button>
     </nav>
 
@@ -115,22 +115,29 @@
 
     <div id="mission-control-view" class="view">
         <div class="mission-control-header">
-            <h2>🎯 Mission Control</h2>
-            <div class="mission-control-stats">
-                <span id="mc-active-count">0 active</span>
-                <span id="mc-waiting-count">0 waiting</span>
+            <h2>🎛️ Mission Control</h2>
+            <div class="mission-control-status">
+                <span id="mc-connection-status" class="mc-status-indicator">● Disconnected</span>
+                <button id="mc-refresh" class="icon-button" title="Refresh">🔄</button>
             </div>
         </div>
-        <div id="mission-control-container">
-            <div class="mc-session-panel">
-                <h3>Sessions</h3>
-                <div id="mc-session-list" class="mc-session-list">
-                    <p class="mc-placeholder">Select a session to monitor</p>
+        <div class="mission-control-grid">
+            <div class="mc-panel mc-sessions-panel">
+                <div class="mc-panel-header">
+                    <h3>Active Sessions</h3>
+                    <span id="mc-active-count" class="mc-count">0</span>
+                </div>
+                <div id="mc-sessions-list" class="mc-panel-content">
+                    <div class="mc-empty">No active sessions</div>
                 </div>
             </div>
-            <div class="mc-main-panel">
-                <div id="mc-conversation-stream" class="mc-conversation-stream">
-                    <p class="mc-placeholder">Real-time conversation will appear here</p>
+            <div class="mc-panel mc-conversation-panel">
+                <div class="mc-panel-header">
+                    <h3>Live Conversation</h3>
+                    <span id="mc-selected-session" class="mc-selected-label">Select a session</span>
+                </div>
+                <div id="mc-conversation-stream" class="mc-panel-content mc-conversation-stream">
+                    <div class="mc-empty">Select a session to view conversation</div>
                 </div>
             </div>
         </div>
