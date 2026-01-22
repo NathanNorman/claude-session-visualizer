@@ -7,7 +7,6 @@ import time
 from collections import Counter
 from statistics import mean, median
 from .git_tracker import get_cached_git_status
-from .analytics import record_activity_log, get_activity_log
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 ACTIVE_CPU_THRESHOLD = 0.5  # CPU% above this = active (Claude uses little CPU when waiting for API)
@@ -449,14 +448,10 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
 
                         # Extract activity from tool calls and text
                         content = msg.get('content', [])
-                        msg_timestamp = data.get('timestamp', '')
                         for item in content:
                             activity = extract_activity(item)
                             if activity:
-                                activities.append({
-                                    'text': activity,
-                                    'timestamp': msg_timestamp
-                                })
+                                activities.append(activity)
 
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
@@ -858,35 +853,6 @@ def match_process_to_session(proc: dict, available_sessions: list[dict]) -> dict
     return best_match
 
 
-def _get_merged_activity_log(session_id: str, current_activities: list, max_entries: int = 50) -> list:
-    """Get merged activity log from persisted DB + current hook state.
-
-    Args:
-        session_id: The session ID
-        current_activities: Current activities from hook state
-        max_entries: Maximum entries to return
-
-    Returns:
-        Merged and deduplicated activity log
-    """
-    if not session_id:
-        return current_activities[-max_entries:] if current_activities else []
-
-    # Persist current activities to database
-    if current_activities:
-        record_activity_log(session_id, current_activities)
-
-    # Load persisted activities
-    persisted = get_activity_log(session_id, limit=max_entries)
-
-    # If we have persisted data, use it (it already includes current activities)
-    if persisted:
-        return persisted[-max_entries:]
-
-    # Fallback to current activities only
-    return current_activities[-max_entries:] if current_activities else []
-
-
 def get_sessions() -> list[dict]:
     """Get all running Claude sessions with metadata and activity state.
 
@@ -987,23 +953,15 @@ def get_sessions() -> list[dict]:
         # Try hooks-based state first (instant, accurate)
         hook_state = read_session_state(metadata.get('sessionId'))
 
-        # Also check CPU/recency heuristics
-        file_recently_modified = recency < ACTIVE_RECENCY_SECONDS
-        high_cpu = proc['cpu'] > ACTIVE_CPU_THRESHOLD
-        heuristic_active = file_recently_modified or high_cpu
-
         if hook_state:
-            # Hooks say the state, but override to 'active' if CPU/recency disagrees
-            # This handles the case where hooks says 'waiting' but Claude is still processing
-            if hook_state['state'] == 'waiting' and heuristic_active:
-                state = 'active'
-            else:
-                state = hook_state['state']
+            state = hook_state['state']
             state_source = 'hooks'
             current_activity = hook_state.get('current_activity')
         else:
             # Fallback to CPU/recency heuristics
-            state = 'active' if heuristic_active else 'waiting'
+            file_recently_modified = recency < ACTIVE_RECENCY_SECONDS
+            high_cpu = proc['cpu'] > ACTIVE_CPU_THRESHOLD
+            state = 'active' if (file_recently_modified or high_cpu) else 'waiting'
             state_source = 'polling'
             current_activity = None
 
@@ -1034,11 +992,8 @@ def get_sessions() -> list[dict]:
                 hook_state.get('background_shells', []) if hook_state else [],
                 metadata.get('cwd', '')
             ),
-            # Activity log for emoji trail - merge persisted + current
-            'activityLog': _get_merged_activity_log(
-                metadata.get('sessionId'),
-                hook_state.get('activity_log', []) if hook_state else []
-            ),
+            # Activity log for emoji trail (last 20 entries)
+            'activityLog': hook_state.get('activity_log', [])[-20:] if hook_state else [],
         })
 
     # Add basic git info to each session
@@ -1050,7 +1005,7 @@ def get_sessions() -> list[dict]:
                 session['git'] = {
                     'branch': git_status.branch,
                     'uncommitted': git_status.has_uncommitted,
-                    'modified_count': len(git_status.modified) + len(git_status.added) + len(git_status.deleted),
+                    'modified_count': len(git_status.modified) + len(git_status.added),
                     'ahead': git_status.ahead
                 }
 

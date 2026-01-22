@@ -252,14 +252,10 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
                             cumulative_usage['cache_creation_input_tokens'] += usage.get('cache_creation_input_tokens', 0)
 
                         content = msg.get('content', [])
-                        msg_timestamp = data.get('timestamp', '')
                         for item in content:
                             activity = extract_activity(item)
                             if activity:
-                                activities.append({
-                                    'text': activity,
-                                    'timestamp': msg_timestamp
-                                })
+                                activities.append(activity)
 
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue

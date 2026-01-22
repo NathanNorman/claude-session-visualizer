@@ -41,19 +41,6 @@ def init_database():
         )
     ''')
 
-    # Activity log table for persisting tool usage
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS activity_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            event_type TEXT,
-            tool_name TEXT,
-            description TEXT,
-            FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )
-    ''')
-
     # Indexes for query performance
     c.execute('''
         CREATE INDEX IF NOT EXISTS idx_sessions_start_time
@@ -73,16 +60,6 @@ def init_database():
     c.execute('''
         CREATE INDEX IF NOT EXISTS idx_snapshots_session
         ON session_snapshots(session_id)
-    ''')
-
-    c.execute('''
-        CREATE INDEX IF NOT EXISTS idx_activity_session
-        ON activity_log(session_id)
-    ''')
-
-    c.execute('''
-        CREATE INDEX IF NOT EXISTS idx_activity_timestamp
-        ON activity_log(timestamp)
     ''')
 
     conn.commit()
@@ -139,86 +116,6 @@ def record_session_snapshot(session: dict):
 
     conn.commit()
     conn.close()
-
-
-def record_activity_log(session_id: str, activities: list):
-    """Record activity log entries for a session.
-
-    Args:
-        session_id: The session ID
-        activities: List of activity entries from hooks (with event, tool, timestamp, description)
-    """
-    if not session_id or not activities:
-        return
-
-    init_database()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    # Get existing activity timestamps to avoid duplicates
-    c.execute('''
-        SELECT timestamp, tool_name FROM activity_log
-        WHERE session_id = ?
-        ORDER BY timestamp DESC
-        LIMIT 100
-    ''', (session_id,))
-    existing = {(row[0], row[1]) for row in c.fetchall()}
-
-    # Insert new activities
-    for activity in activities:
-        timestamp = activity.get('timestamp', '')
-        tool_name = activity.get('tool', '')
-        event_type = activity.get('event', '')
-        description = activity.get('description', tool_name)
-
-        # Skip if we already have this entry
-        if (timestamp, tool_name) in existing:
-            continue
-
-        c.execute('''
-            INSERT INTO activity_log (session_id, timestamp, event_type, tool_name, description)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (session_id, timestamp, event_type, tool_name, description))
-
-    conn.commit()
-    conn.close()
-
-
-def get_activity_log(session_id: str, limit: int = 50) -> list:
-    """Get activity log for a session.
-
-    Args:
-        session_id: The session ID
-        limit: Maximum number of entries to return
-
-    Returns:
-        List of activity entries sorted by timestamp (newest first)
-    """
-    init_database()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute('''
-        SELECT timestamp, event_type, tool_name, description
-        FROM activity_log
-        WHERE session_id = ?
-        ORDER BY timestamp DESC
-        LIMIT ?
-    ''', (session_id, limit))
-
-    activities = []
-    for row in c.fetchall():
-        activities.append({
-            'timestamp': row[0],
-            'event': row[1],
-            'tool': row[2],
-            'description': row[3]
-        })
-
-    conn.close()
-
-    # Return in chronological order (oldest first)
-    return list(reversed(activities))
 
 
 def get_analytics(period: str = 'week') -> dict:
