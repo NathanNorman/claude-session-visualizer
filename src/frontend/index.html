@@ -47,6 +47,9 @@
         <button class="tab-button" onclick="switchView('analytics')" data-view="analytics">
             Analytics
         </button>
+        <button class="tab-button" onclick="switchView('mission-control')" data-view="mission-control">
+            🎯 Mission Control
+        </button>
     </nav>
 
     <div id="sessions-view" class="view active">
@@ -108,6 +111,29 @@
             </div>
         </div>
         <div id="analytics-container"></div>
+    </div>
+
+    <div id="mission-control-view" class="view">
+        <div class="mission-control-header">
+            <h2>🎯 Mission Control</h2>
+            <div class="mission-control-stats">
+                <span id="mc-active-count">0 active</span>
+                <span id="mc-waiting-count">0 waiting</span>
+            </div>
+        </div>
+        <div id="mission-control-container">
+            <div class="mc-session-panel">
+                <h3>Sessions</h3>
+                <div id="mc-session-list" class="mc-session-list">
+                    <p class="mc-placeholder">Select a session to monitor</p>
+                </div>
+            </div>
+            <div class="mc-main-panel">
+                <div id="mc-conversation-stream" class="mc-conversation-stream">
+                    <p class="mc-placeholder">Real-time conversation will appear here</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Modal for keyboard shortcuts and other dialogs -->
