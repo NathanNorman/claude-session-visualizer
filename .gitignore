@@ -19,6 +19,8 @@ daemon/
 # Local tooling state
 .beads/
 .claude-flow/
+.claude/
+.logs/
 plans/
 plugins/
 visualizer/
