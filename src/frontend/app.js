@@ -305,6 +305,57 @@ class SoundManager {
 
 const soundManager = new SoundManager();
 
+// MissionControlManager - centralized view state and navigation
+class MissionControlManager {
+    constructor() {
+        this.views = ['sessions', 'gastown', 'timeline', 'analytics', 'mission-control'];
+        this.currentView = localStorage.getItem('missionControlView') || 'sessions';
+        this.viewShortcuts = {
+            's': 'sessions',
+            'g': 'gastown',
+            't': 'timeline',
+            'a': 'analytics',
+            'c': 'mission-control'
+        };
+    }
+
+    getCurrentView() {
+        return this.currentView;
+    }
+
+    setView(viewName) {
+        if (this.views.includes(viewName)) {
+            this.currentView = viewName;
+            localStorage.setItem('missionControlView', viewName);
+            return true;
+        }
+        return false;
+    }
+
+    getViewForShortcut(key) {
+        return this.viewShortcuts[key] || null;
+    }
+
+    cycleView(direction = 1) {
+        const currentIndex = this.views.indexOf(this.currentView);
+        const nextIndex = (currentIndex + direction + this.views.length) % this.views.length;
+        return this.views[nextIndex];
+    }
+
+    getViewDisplayName(viewName) {
+        const names = {
+            'sessions': 'Sessions',
+            'gastown': 'Gastown',
+            'timeline': 'Timeline',
+            'analytics': 'Analytics',
+            'mission-control': 'Mission Control'
+        };
+        return names[viewName] || viewName;
+    }
+}
+
+const missionControl = new MissionControlManager();
+
 // Feature 12: Session Notes - localStorage management
 function getNotes() {
     const stored = localStorage.getItem(NOTES_KEY);
@@ -543,6 +594,11 @@ async function fetchSessions() {
         const activeCount = data.sessions.filter(s => s.state === 'active').length;
         updateStatus(activeCount, data.sessions.length, data.timestamp);
 
+        // Refresh Mission Control if active
+        if (missionControl.getCurrentView() === 'mission-control') {
+            refreshMissionControl();
+        }
+
         // Schedule next poll with adaptive interval
         scheduleNextPoll(activeCount > 0);
     } catch (error) {
@@ -579,13 +635,15 @@ function renderNote(session) {
 
     return `
         <div class="session-note" onclick="event.stopPropagation(); editNote('${session.sessionId}')">
-            <span class="note-icon">📝</span>
-            <span class="note-text">"${escapeHtml(note.text)}"</span>
-            ${note.tags?.length ? `
-                <div class="note-tags">
-                    ${note.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
-                </div>
-            ` : ''}
+            <div class="note-header">
+                <span class="note-icon">📝</span>
+                ${note.tags?.length ? `
+                    <div class="note-tags">
+                        ${note.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
+                    </div>
+                ` : ''}
+            </div>
+            <div class="note-content">${escapeHtml(note.text)}</div>
         </div>
     `;
 }
@@ -747,13 +805,9 @@ function createCard(session, index = 0) {
                     <button onclick="event.stopPropagation(); openJsonl('${session.sessionId}')">📂 Open JSONL File</button>
                     <button onclick="event.stopPropagation(); copyResumeCmd('${session.sessionId}')">🔗 Copy Resume Command</button>
                     <hr class="menu-divider">
-                    <button onclick="event.stopPropagation(); showGitDetails('${session.sessionId}')">🌿 Git Details</button>
-                    <button onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')">📊 Performance Metrics</button>
                     <button onclick="event.stopPropagation(); refreshSummary('${session.sessionId}')">🤖 Generate AI Summary</button>
                     <button onclick="event.stopPropagation(); shareSession('${session.sessionId}')">📤 Share Session</button>
                     <button onclick="event.stopPropagation(); exportSession('${session.sessionId}')">📄 Export Markdown</button>
-                    <button onclick="event.stopPropagation(); saveAsTemplate({sessionId: '${session.sessionId}', cwd: '${escapeHtml(session.cwd)}', slug: '${escapeHtml(session.slug)}'})">💾 Save as Template</button>
-                    <button onclick="event.stopPropagation(); editNote('${session.sessionId}')">📝 Edit Note</button>
                     <hr class="menu-divider">
                     <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeHtml(session.slug)}')">⚠️ Kill Session</button>
                 </div>
@@ -769,7 +823,6 @@ function createCard(session, index = 0) {
         ${agentTreeHtml}
         ${backgroundShellsHtml}
         <div class="activity-log">${activityLogHtml}</div>
-        ${renderConversationPeek(session)}
         <div class="card-footer">
             <div class="meta">
                 <span>PID: ${session.pid || '--'}</span>
@@ -987,12 +1040,12 @@ async function refreshSummary(sessionId) {
         const data = await response.json();
         const card = document.querySelector(`[data-session-id="${sessionId}"]`);
 
-        // Save AI summary to notes
+        // Save AI summary to notes - PREPEND to top of existing notes
         const existingNote = getNote(sessionId);
         const timestamp = new Date().toLocaleTimeString();
-        const newEntry = `[${timestamp}] AI: ${data.summary}`;
+        const newEntry = `[${timestamp}] AI:\n${data.summary}`;
         const combinedText = existingNote?.text
-            ? `${existingNote.text}\n\n${newEntry}`
+            ? `${newEntry}\n\n${existingNote.text}`
             : newEntry;
         const combinedTags = existingNote?.tags || [];
         if (!combinedTags.includes('ai-generated')) {
@@ -1000,19 +1053,18 @@ async function refreshSummary(sessionId) {
         }
         setNote(sessionId, { text: combinedText, tags: combinedTags });
 
-        // Directly update the note display on the card
+        // Update the note display on the card
         if (card) {
             const noteEl = card.querySelector('.session-note');
-            const displayText = combinedText.length > 100
-                ? combinedText.substring(0, 100) + '...'
-                : combinedText;
             const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
             if (noteEl) {
                 noteEl.outerHTML = `
                     <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
-                        <span class="note-icon">📝</span>
-                        <span class="note-text">"${escapeHtml(displayText)}"</span>
-                        <div class="note-tags">${tagsHtml}</div>
+                        <div class="note-header">
+                            <span class="note-icon">📝</span>
+                            <div class="note-tags">${tagsHtml}</div>
+                        </div>
+                        <div class="note-content">${escapeHtml(combinedText)}</div>
                     </div>
                 `;
             }
@@ -1050,12 +1102,12 @@ async function refreshAllSummaries() {
             const sessionId = item.sessionId;
             const summary = item.summary;
 
-            // Save to notes (persisted to localStorage)
+            // Save to notes - PREPEND to top of existing notes
             const existingNote = getNote(sessionId);
             const timestamp = new Date().toLocaleTimeString();
-            const newEntry = `[${timestamp}] AI: ${summary}`;
+            const newEntry = `[${timestamp}] AI:\n${summary}`;
             const combinedText = existingNote?.text
-                ? `${existingNote.text}\n\n${newEntry}`
+                ? `${newEntry}\n\n${existingNote.text}`
                 : newEntry;
             const combinedTags = existingNote?.tags || [];
             if (!combinedTags.includes('ai-generated')) {
@@ -1068,15 +1120,14 @@ async function refreshAllSummaries() {
             if (card) {
                 const noteEl = card.querySelector('.session-note');
                 if (noteEl) {
-                    const displayText = combinedText.length > 100
-                        ? combinedText.substring(0, 100) + '...'
-                        : combinedText;
                     const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
                     noteEl.outerHTML = `
                         <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
-                            <span class="note-icon">📝</span>
-                            <span class="note-text">"${escapeHtml(displayText)}"</span>
-                            <div class="note-tags">${tagsHtml}</div>
+                            <div class="note-header">
+                                <span class="note-icon">📝</span>
+                                <div class="note-tags">${tagsHtml}</div>
+                            </div>
+                            <div class="note-content">${escapeHtml(combinedText)}</div>
                         </div>
                     `;
                 }
@@ -1562,9 +1613,26 @@ function formatActivityLog(activities) {
     if (!activities || activities.length === 0) {
         return '<div class="activity-item empty">No recent activity</div>';
     }
-    return activities.map(a =>
-        `<div class="activity-item">${escapeHtml(a)}</div>`
-    ).join('');
+    return activities.map(a => {
+        // Support both old format (string) and new format ({text, timestamp})
+        const text = typeof a === 'string' ? a : a.text;
+        const timestamp = typeof a === 'string' ? '' : a.timestamp;
+        const timeStr = timestamp ? formatActivityTime(timestamp) : '';
+        return `<div class="activity-item">
+            ${timeStr ? `<span class="activity-time">${timeStr}</span>` : ''}
+            <span class="activity-text">${escapeHtml(text)}</span>
+        </div>`;
+    }).join('');
+}
+
+function formatActivityTime(isoTimestamp) {
+    if (!isoTimestamp) return '';
+    try {
+        const date = new Date(isoTimestamp);
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+        return '';
+    }
 }
 
 // ============================================================================
@@ -1754,7 +1822,7 @@ function getActivityEmoji(toolOrEvent) {
 }
 
 // Convert activity log to emoji trail (deduplicated, only showing completed actions)
-function buildEmojiTrail(activityLog, maxLength = 12) {
+function buildEmojiTrail(activityLog, maxLength = 30) {
     if (!activityLog || activityLog.length === 0) return [];
 
     const trail = [];
@@ -1806,7 +1874,12 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
     const trail = buildEmojiTrail(activityLog);
 
     if (trail.length === 0) {
-        return '';
+        return `
+            <div class="activity-trail">
+                <span class="trail-label">Activity:</span>
+                <div class="trail-emojis empty"></div>
+            </div>
+        `;
     }
 
     const emojisHtml = trail.map((item, idx) => {
@@ -1819,10 +1892,10 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
             isPrompt ? 'prompt-marker' : ''
         ].filter(Boolean).join(' ');
 
-        // Encode data for the popover
+        // Encode data for the tooltip
         const dataAttrs = `data-tool="${escapeHtml(item.tool)}" data-desc="${escapeHtml(item.description)}" data-time="${escapeHtml(item.timestamp || '')}"`;
 
-        return `<span class="${classes}" ${dataAttrs} onclick="showActivityPopover(event, this)">${item.emoji}</span>`;
+        return `<span class="${classes}" ${dataAttrs} onmouseenter="showActivityTooltip(event, this)" onmouseleave="hideActivityTooltip()">${item.emoji}</span>`;
     }).join('');
 
     return `
@@ -1833,41 +1906,46 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
     `;
 }
 
-// Show popover with activity details
-function showActivityPopover(event, element) {
-    event.stopPropagation();
-
-    // Remove any existing popover
-    const existing = document.querySelector('.activity-popover');
-    if (existing) existing.remove();
+// Show tooltip with activity details on hover
+function showActivityTooltip(event, element) {
+    // Remove any existing tooltip
+    hideActivityTooltip();
 
     const tool = element.dataset.tool;
     const desc = element.dataset.desc;
     const time = element.dataset.time;
     const formattedTime = formatActivityTime(time);
 
-    // Create popover
-    const popover = document.createElement('div');
-    popover.className = 'activity-popover';
-    popover.innerHTML = `
-        <div class="popover-header">${element.textContent} ${escapeHtml(tool)}</div>
-        <div class="popover-desc">${escapeHtml(desc)}</div>
-        ${formattedTime ? `<div class="popover-time">${formattedTime}</div>` : ''}
+    // Create tooltip
+    const tooltip = document.createElement('div');
+    tooltip.className = 'activity-tooltip';
+    tooltip.id = 'activity-tooltip';
+    tooltip.innerHTML = `
+        <div class="tooltip-header">${element.textContent} ${escapeHtml(tool)}</div>
+        <div class="tooltip-desc">${escapeHtml(desc)}</div>
+        ${formattedTime ? `<div class="tooltip-time">${formattedTime}</div>` : ''}
     `;
 
-    // Position popover near the clicked element
-    document.body.appendChild(popover);
+    // Position tooltip near the element
+    document.body.appendChild(tooltip);
     const rect = element.getBoundingClientRect();
-    popover.style.left = `${rect.left + window.scrollX}px`;
-    popover.style.top = `${rect.bottom + window.scrollY + 8}px`;
 
-    // Close on click outside
-    setTimeout(() => {
-        document.addEventListener('click', function closePopover() {
-            popover.remove();
-            document.removeEventListener('click', closePopover);
-        }, { once: true });
-    }, 10);
+    // Position above the element by default, below if not enough space
+    const tooltipHeight = tooltip.offsetHeight;
+    const spaceAbove = rect.top;
+
+    if (spaceAbove > tooltipHeight + 10) {
+        tooltip.style.left = `${rect.left + window.scrollX}px`;
+        tooltip.style.top = `${rect.top + window.scrollY - tooltipHeight - 6}px`;
+    } else {
+        tooltip.style.left = `${rect.left + window.scrollX}px`;
+        tooltip.style.top = `${rect.bottom + window.scrollY + 6}px`;
+    }
+}
+
+function hideActivityTooltip() {
+    const tooltip = document.getElementById('activity-tooltip');
+    if (tooltip) tooltip.remove();
 }
 
 // Get icon for current activity based on activity type/tool (fallback for non-animated contexts)
@@ -2849,7 +2927,14 @@ function handleKeyPress(e) {
         'v': () => toggleCardMode(),
         'f': () => toggleFocusMode(),
         '?': () => showShortcutsHelp(),
-        'Escape': () => clearSelection()
+        'Escape': () => clearSelection(),
+        // View navigation shortcuts (Mission Control)
+        's': () => { switchView('sessions'); showToast('Sessions view'); },
+        'g': () => { switchView('gastown'); showToast('Gastown view'); },
+        't': () => { switchView('timeline'); showToast('Timeline view'); },
+        'a': () => { switchView('analytics'); showToast('Analytics view'); },
+        'c': () => { switchView('mission-control'); showToast('Mission Control'); },
+        'Tab': () => { const next = missionControl.cycleView(1); switchView(next); showToast(`${missionControl.getViewDisplayName(next)} view`); }
     };
     const handler = shortcuts[e.key];
     if (handler) {
@@ -2908,6 +2993,16 @@ function showShortcutsHelp() {
         <h2>Keyboard Shortcuts</h2>
         <div class="shortcuts-grid">
             <div class="shortcut-section">
+                <h4>Views</h4>
+                <dl>
+                    <dt>s</dt><dd>Sessions view</dd>
+                    <dt>g</dt><dd>Gastown view</dd>
+                    <dt>t</dt><dd>Timeline view</dd>
+                    <dt>a</dt><dd>Analytics view</dd>
+                    <dt>Tab</dt><dd>Cycle views</dd>
+                </dl>
+            </div>
+            <div class="shortcut-section">
                 <h4>Navigation</h4>
                 <dl>
                     <dt>↑/↓</dt><dd>Select session</dd>
@@ -2960,9 +3055,14 @@ document.addEventListener('DOMContentLoaded', () => {
 // Feature 05: Session Timeline Implementation
 // ============================================================================
 
-const TIMELINE_HOURS = 8; // Show last 8 hours
+let timelineHours = 8; // Show last 8 hours (configurable)
 let timelineData = new Map(); // sessionId -> activityPeriods
 let timelineViewActive = false;
+
+function changeTimelineRange(hours) {
+    timelineHours = parseInt(hours, 10);
+    refreshTimeline();
+}
 
 async function fetchSessionTimeline(sessionId) {
     try {
@@ -3016,20 +3116,52 @@ async function refreshTimeline() {
 function renderTimeline(sessions) {
     const container = document.getElementById('timeline-container');
     const now = Date.now();
-    const hoursBack = TIMELINE_HOURS;
+    const hoursBack = timelineHours;
     const startTime = now - (hoursBack * 60 * 60 * 1000);
 
-    // Separate normal and gastown sessions
-    const normalSessions = sessions.filter(s => !s.isGastown);
-    const gastownSessions = sessions.filter(s => s.isGastown);
+    // Group sessions by repo (cwd)
+    const sessionsByRepo = new Map();
+    const gastownSessions = [];
+
+    for (const session of sessions) {
+        if (session.isGastown) {
+            gastownSessions.push(session);
+        } else {
+            const cwd = session.cwd || 'Unknown';
+            const repoName = cwd.split('/').filter(Boolean).pop() || 'Unknown';
+            if (!sessionsByRepo.has(repoName)) {
+                sessionsByRepo.set(repoName, { cwd, sessions: [] });
+            }
+            sessionsByRepo.get(repoName).sessions.push(session);
+        }
+    }
+
+    // Sort repos by most recent activity
+    const sortedRepos = [...sessionsByRepo.entries()].sort((a, b) => {
+        const aLatest = Math.max(...a[1].sessions.map(s => new Date(s.lastActivity || 0).getTime()));
+        const bLatest = Math.max(...b[1].sessions.map(s => new Date(s.lastActivity || 0).getTime()));
+        return bLatest - aLatest;
+    });
 
     // Generate time axis
     const timeAxisHtml = generateTimeAxis(startTime, now, hoursBack);
 
-    // Generate timeline rows for normal sessions
-    const normalRowsHtml = normalSessions.map(session => {
-        const periods = timelineData.get(session.sessionId) || [];
-        return renderTimelineRow(session, periods, startTime, now);
+    // Generate timeline sections for each repo
+    const repoSectionsHtml = sortedRepos.map(([repoName, { cwd, sessions: repoSessions }]) => {
+        const rowsHtml = repoSessions.map(session => {
+            const periods = timelineData.get(session.sessionId) || [];
+            return renderTimelineRow(session, periods, startTime, now);
+        }).join('');
+
+        return `
+            <div class="timeline-section">
+                <div class="timeline-section-header" title="${escapeHtml(cwd)}">
+                    📁 ${escapeHtml(repoName)}
+                    <span class="timeline-section-count">${repoSessions.length}</span>
+                </div>
+                <div class="timeline-rows">${rowsHtml}</div>
+            </div>
+        `;
     }).join('');
 
     // Generate timeline rows for gastown sessions
@@ -3040,12 +3172,7 @@ function renderTimeline(sessions) {
 
     container.innerHTML = `
         <div class="timeline-axis">${timeAxisHtml}</div>
-        ${normalSessions.length > 0 ? `
-            <div class="timeline-section">
-                <div class="timeline-section-header">Sessions</div>
-                <div class="timeline-rows">${normalRowsHtml}</div>
-            </div>
-        ` : ''}
+        ${repoSectionsHtml}
         ${gastownSessions.length > 0 ? `
             <div class="timeline-section gastown-section">
                 <div class="timeline-section-header">🏭 Gastown Agents</div>
@@ -3141,7 +3268,7 @@ function renderTimelineRow(session, periods, startTime, endTime) {
                 </span>
             </div>
             <div class="timeline-track">
-                ${barsHtml || '<span class="no-activity">No activity in last ' + TIMELINE_HOURS + ' hours</span>'}
+                ${barsHtml || '<span class="no-activity">No activity in last ' + timelineHours + ' hours</span>'}
             </div>
         </div>
     `;
@@ -3279,6 +3406,9 @@ function hideTimelinePopover() {
 
 // View switching
 function switchView(viewName) {
+    // Track view in MissionControlManager
+    missionControl.setView(viewName);
+
     // Update tab buttons
     document.querySelectorAll('.tab-button').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.view === viewName);
@@ -3312,6 +3442,11 @@ function switchView(viewName) {
     // Load analytics if switching to analytics view
     if (viewName === 'analytics' && typeof loadAnalytics === 'function') {
         loadAnalytics();
+    }
+
+    // Refresh Mission Control when switching to it
+    if (viewName === 'mission-control') {
+        refreshMissionControl();
     }
 }
 
@@ -4071,6 +4206,11 @@ fetchSessions = async function() {
 
             const activeCount = data.sessions.filter(s => s.state === 'active').length;
             updateStatus(activeCount, data.sessions.length, data.timestamp);
+
+            // Refresh Mission Control if active
+            if (missionControl.getCurrentView() === 'mission-control') {
+                refreshMissionControl();
+            }
         }
 
         // Update multi-machine UI
@@ -4179,228 +4319,272 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ============================================================================
-// Feature 09: Conversation Peek Implementation
+// Feature: Mission Control - Live Session Monitoring
 // ============================================================================
 
-// Cache for conversation data to avoid repeated API calls
-const conversationCache = new Map();
-const CONVERSATION_CACHE_TTL = 30000; // 30 seconds
+// Mission Control state
+let mcSelectedSessionId = null;
+let mcConversationCache = new Map();
+let mcAutoScroll = true;
+let mcLastMessageCount = 0;
 
-async function loadConversation(sessionId, limit = 20) {
-    // Check cache first
-    const cached = conversationCache.get(sessionId);
-    if (cached && Date.now() - cached.timestamp < CONVERSATION_CACHE_TTL) {
-        return cached.messages;
+/**
+ * Initialize Mission Control event listeners
+ */
+function initMissionControl() {
+    // Refresh button
+    const refreshBtn = document.getElementById('mc-refresh');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => {
+            refreshMissionControl();
+            showToast('Mission Control refreshed');
+        });
+    }
+
+    // Track scroll position to disable auto-scroll when user scrolls up
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (streamEl) {
+        streamEl.addEventListener('scroll', () => {
+            const isAtBottom = streamEl.scrollHeight - streamEl.scrollTop <= streamEl.clientHeight + 50;
+            mcAutoScroll = isAtBottom;
+        });
+    }
+}
+
+/**
+ * Refresh Mission Control with current session data
+ */
+function refreshMissionControl() {
+    const sessions = Array.from(previousSessions.values());
+    const activeSessions = sessions.filter(s => s.state === 'active' || s.state === 'waiting');
+
+    renderMissionControlSessions(activeSessions);
+    updateMissionControlStatus(activeSessions.length > 0);
+
+    // Reload conversation if session still exists (skip loading state for background refresh)
+    if (mcSelectedSessionId) {
+        const sessionStillExists = sessions.some(s => s.sessionId === mcSelectedSessionId);
+        if (sessionStillExists) {
+            loadConversationHistory(mcSelectedSessionId, true);
+        } else {
+            // Session ended, clear selection and play notification
+            mcSelectedSessionId = null;
+            clearMissionControlConversation();
+            soundManager.playNotification('waiting');
+        }
+    }
+}
+
+/**
+ * Update Mission Control connection status indicator
+ */
+function updateMissionControlStatus(hasActiveSessions) {
+    const statusEl = document.getElementById('mc-connection-status');
+    if (!statusEl) return;
+
+    if (hasActiveSessions) {
+        statusEl.textContent = '● Connected';
+        statusEl.classList.remove('disconnected');
+        statusEl.classList.add('connected');
+    } else {
+        statusEl.textContent = '● No Active Sessions';
+        statusEl.classList.remove('connected');
+        statusEl.classList.add('disconnected');
+    }
+}
+
+/**
+ * Render the list of sessions in Mission Control
+ */
+function renderMissionControlSessions(sessions) {
+    const container = document.getElementById('mc-sessions-list');
+    const countEl = document.getElementById('mc-active-count');
+
+    if (!container) return;
+
+    // Update count
+    if (countEl) {
+        countEl.textContent = sessions.length;
+    }
+
+    // Handle empty state
+    if (sessions.length === 0) {
+        container.innerHTML = '<div class="mc-empty">No active sessions</div>';
+        return;
+    }
+
+    // Sort: active first, then waiting, then by most recent activity
+    const sorted = [...sessions].sort((a, b) => {
+        const stateOrder = { active: 0, waiting: 1, idle: 2 };
+        const aOrder = stateOrder[a.state] ?? 3;
+        const bOrder = stateOrder[b.state] ?? 3;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+
+        // Then by most recent activity
+        const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+        const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+        return bTime - aTime;
+    });
+
+    container.innerHTML = sorted.map(session => {
+        const isSelected = session.sessionId === mcSelectedSessionId;
+        const stateClass = session.state === 'active' ? 'active' : '';
+        const selectedClass = isSelected ? 'selected' : '';
+        const displayName = session.cwd ? session.cwd.split('/').pop() : session.sessionId.slice(0, 8);
+        const duration = session.duration || '0m';
+        const stateEmoji = session.state === 'active' ? '🟢' : session.state === 'waiting' ? '🟡' : '⚪';
+
+        return `
+            <div class="mc-session-item ${stateClass} ${selectedClass}"
+                 data-session-id="${session.sessionId}"
+                 onclick="selectMissionControlSession('${session.sessionId}')">
+                <div class="mc-session-name">${stateEmoji} ${escapeHtml(displayName)}</div>
+                <div class="mc-session-meta">
+                    <span>${duration}</span>
+                    <span>${session.contextPercent || 0}% ctx</span>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Select a session in Mission Control
+ */
+function selectMissionControlSession(sessionId) {
+    mcSelectedSessionId = sessionId;
+    mcAutoScroll = true;
+
+    // Update session list UI
+    document.querySelectorAll('.mc-session-item').forEach(el => {
+        el.classList.toggle('selected', el.dataset.sessionId === sessionId);
+    });
+
+    // Update selected label
+    const session = previousSessions.get(sessionId);
+    const labelEl = document.getElementById('mc-selected-session');
+    if (labelEl && session) {
+        const displayName = session.cwd ? session.cwd.split('/').pop() : sessionId.slice(0, 8);
+        labelEl.textContent = displayName;
+    }
+
+    // Load conversation
+    loadConversationHistory(sessionId);
+
+    // Play sound on selection
+    soundManager.playNotification('active');
+}
+
+/**
+ * Load conversation history from API
+ */
+async function loadConversationHistory(sessionId, skipLoadingState = false) {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
+
+    // Show loading state only on initial load
+    if (!skipLoadingState) {
+        streamEl.innerHTML = '<div class="mc-empty">Loading conversation...</div>';
     }
 
     try {
-        const resp = await fetch(`/api/session/${sessionId}/conversation?limit=${limit}`);
-        if (!resp.ok) return [];
-        const data = await resp.json();
+        const response = await fetch(`/api/session/${sessionId}/conversation?limit=50`);
+        if (!response.ok) {
+            throw new Error('Failed to load conversation');
+        }
+
+        const data = await response.json();
         const messages = data.messages || [];
 
-        // Cache the result
-        conversationCache.set(sessionId, {
-            messages,
-            timestamp: Date.now()
-        });
+        // Check for new messages and play sound
+        const previousMessages = mcConversationCache.get(sessionId) || [];
+        const hasNewMessages = messages.length > previousMessages.length;
 
-        return messages;
-    } catch (e) {
-        console.warn('Failed to load conversation:', e);
-        return [];
+        if (hasNewMessages && previousMessages.length > 0) {
+            // New message arrived - play notification sound
+            soundManager.playNotification('active');
+        }
+
+        // Cache the messages
+        mcConversationCache.set(sessionId, messages);
+        mcLastMessageCount = messages.length;
+
+        renderConversation(messages);
+
+    } catch (error) {
+        console.error('Failed to load conversation:', error);
+        streamEl.innerHTML = `<div class="mc-empty">Failed to load conversation</div>`;
     }
 }
 
-function truncateText(text, maxLen) {
-    if (!text) return '';
-    if (text.length <= maxLen) return text;
-    return text.substring(0, maxLen - 3) + '...';
-}
-
-function renderConversationPeek(session) {
-    // Show a placeholder that loads conversation on demand
-    return `
-        <div class="conversation-peek" id="conv-peek-${session.sessionId}" onclick="event.stopPropagation();">
-            <div class="peek-loading" onclick="loadConversationPeek('${session.sessionId}')">
-                💬 View last exchange
-            </div>
-        </div>
-    `;
-}
-
-async function loadConversationPeek(sessionId) {
-    const peekEl = document.getElementById(`conv-peek-${sessionId}`);
-    if (!peekEl) return;
-
-    peekEl.innerHTML = '<div class="peek-loading">Loading...</div>';
-
-    const messages = await loadConversation(sessionId, 10);
-
-    if (messages.length < 2) {
-        peekEl.innerHTML = '<div class="peek-empty">No conversation yet</div>';
-        return;
-    }
-
-    // Get last human and assistant messages
-    const lastHuman = [...messages].reverse().find(m => m.role === 'human');
-    const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
-
-    if (!lastHuman && !lastAssistant) {
-        peekEl.innerHTML = '<div class="peek-empty">No conversation yet</div>';
-        return;
-    }
-
-    const humanText = lastHuman ? truncateText(lastHuman.content, 80) : '';
-    const assistantText = lastAssistant ? truncateText(lastAssistant.content, 120) : '';
-
-    peekEl.innerHTML = `
-        <div class="peek-exchange">
-            ${humanText ? `
-                <div class="peek-human">
-                    <span class="peek-role">👤 You:</span>
-                    <span class="peek-text">"${escapeHtml(humanText)}"</span>
-                </div>
-            ` : ''}
-            ${assistantText ? `
-                <div class="peek-assistant">
-                    <span class="peek-role">🤖 Claude:</span>
-                    <span class="peek-text">"${escapeHtml(assistantText)}"</span>
-                </div>
-            ` : ''}
-        </div>
-        <button class="peek-more" onclick="event.stopPropagation(); openConversationModal('${sessionId}')">
-            View full conversation →
-        </button>
-    `;
-}
-
-async function openConversationModal(sessionId) {
-    closeAllMenus();
-    const session = previousSessions.get(sessionId);
-    const sessionName = session?.slug || sessionId;
-
-    showModal(`
-        <div class="conversation-modal">
-            <div class="conversation-modal-header">
-                <h3>💬 Conversation History</h3>
-                <span class="modal-session-name">${escapeHtml(sessionName)}</span>
-                <button onclick="closeModal()" class="modal-close">Close</button>
-            </div>
-            <div class="conversation-modal-body" id="conversation-messages">
-                <div class="loading">Loading conversation...</div>
-            </div>
-            <div class="conversation-modal-footer">
-                <button onclick="loadMoreConversation('${sessionId}')" id="load-more-btn" class="btn-secondary">
-                    Load more
-                </button>
-            </div>
-        </div>
-    `);
-
-    // Load initial conversation
-    const messages = await loadConversation(sessionId, 20);
-    renderConversationModal(messages);
-}
-
-let currentConversationLimit = 20;
-
-async function loadMoreConversation(sessionId) {
-    currentConversationLimit += 20;
-    const btn = document.getElementById('load-more-btn');
-    if (btn) btn.textContent = 'Loading...';
-
-    // Clear cache to fetch fresh data
-    conversationCache.delete(sessionId);
-
-    const messages = await loadConversation(sessionId, currentConversationLimit);
-    renderConversationModal(messages);
-
-    if (btn) btn.textContent = 'Load more';
-}
-
-function renderConversationModal(messages) {
-    const container = document.getElementById('conversation-messages');
-    if (!container) return;
+/**
+ * Render conversation messages
+ */
+function renderConversation(messages) {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
 
     if (!messages || messages.length === 0) {
-        container.innerHTML = `
-            <div class="conversation-empty">
-                <p>No conversation history found.</p>
-                <p>Start chatting with Claude to see messages here.</p>
-            </div>
-        `;
+        streamEl.innerHTML = '<div class="mc-empty">No conversation yet</div>';
         return;
     }
 
-    // Render messages in chronological order (oldest first)
-    const messagesHtml = messages.map(msg => renderConversationMessage(msg)).join('');
+    streamEl.innerHTML = messages.map(msg => {
+        const role = msg.role || 'unknown';
+        const roleClass = role === 'human' ? 'human' : 'assistant';
+        const roleLabel = role === 'human' ? '👤 Human' : '🤖 Assistant';
+        const timestamp = msg.timestamp ? formatTimeAgo(new Date(msg.timestamp)) : '';
+        const content = escapeHtml(msg.content || '').slice(0, 500);
+        const truncated = (msg.content || '').length > 500 ? '...' : '';
 
-    container.innerHTML = messagesHtml;
-
-    // Scroll to bottom to show most recent
-    requestAnimationFrame(() => {
-        container.scrollTop = container.scrollHeight;
-    });
-}
-
-function renderConversationMessage(msg) {
-    const icon = msg.role === 'human' ? '👤' : '🤖';
-    const roleLabel = msg.role === 'human' ? 'You' : 'Claude';
-    const roleClass = msg.role === 'human' ? 'human' : 'assistant';
-
-    // Format timestamp
-    let timeStr = '';
-    if (msg.timestamp) {
-        try {
-            const date = new Date(msg.timestamp);
-            timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        } catch (e) {
-            timeStr = '';
-        }
-    }
-
-    // Render tool badges if present
-    const toolsHtml = msg.tools?.length ? `
-        <div class="message-tools">
-            ${msg.tools.map(t => `<span class="tool-badge">${escapeHtml(t)}</span>`).join('')}
-        </div>
-    ` : '';
-
-    // Format content - handle code blocks and newlines
-    const formattedContent = formatMessageContent(msg.content || '');
-
-    return `
-        <div class="conversation-message ${roleClass}">
-            <div class="message-header">
-                <span class="message-icon">${icon}</span>
-                <span class="message-role">${roleLabel}</span>
-                <span class="message-time">${timeStr}</span>
+        return `
+            <div class="mc-message ${roleClass}">
+                <div class="mc-message-header">
+                    <span class="mc-message-role">${roleLabel}</span>
+                    <span class="mc-message-time">${timestamp}</span>
+                </div>
+                <div class="mc-message-content">${content}${truncated}</div>
             </div>
-            <div class="message-content">${formattedContent}</div>
-            ${toolsHtml}
-        </div>
-    `;
+        `;
+    }).join('');
+
+    // Auto-scroll to bottom
+    if (mcAutoScroll) {
+        streamEl.scrollTop = streamEl.scrollHeight;
+    }
 }
 
-function formatMessageContent(content) {
-    if (!content) return '';
+/**
+ * Clear Mission Control conversation view
+ */
+function clearMissionControlConversation() {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    const labelEl = document.getElementById('mc-selected-session');
 
-    // Escape HTML first
-    let escaped = escapeHtml(content);
-
-    // Convert code blocks (```...```)
-    escaped = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
-        return `<pre class="code-block"><code>${code.trim()}</code></pre>`;
-    });
-
-    // Convert inline code (`...`)
-    escaped = escaped.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-
-    // Convert newlines to <br>
-    escaped = escaped.replace(/\n/g, '<br>');
-
-    return escaped;
+    if (streamEl) {
+        streamEl.innerHTML = '<div class="mc-empty">Select a session to view conversation</div>';
+    }
+    if (labelEl) {
+        labelEl.textContent = 'Select a session';
+    }
 }
 
-console.log('Claude Session Visualizer loaded - All features active (including Feature 09: Conversation Peek)');
+/**
+ * Format time ago helper
+ */
+function formatTimeAgo(date) {
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return date.toLocaleDateString();
+}
+
+// Initialize Mission Control on DOM ready
+document.addEventListener('DOMContentLoaded', initMissionControl);
+
+console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');
