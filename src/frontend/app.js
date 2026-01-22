@@ -308,13 +308,14 @@ const soundManager = new SoundManager();
 // MissionControlManager - centralized view state and navigation
 class MissionControlManager {
     constructor() {
-        this.views = ['sessions', 'gastown', 'timeline', 'analytics'];
+        this.views = ['sessions', 'gastown', 'timeline', 'analytics', 'mission-control'];
         this.currentView = localStorage.getItem('missionControlView') || 'sessions';
         this.viewShortcuts = {
             's': 'sessions',
             'g': 'gastown',
             't': 'timeline',
-            'a': 'analytics'
+            'a': 'analytics',
+            'c': 'mission-control'
         };
     }
 
@@ -346,7 +347,8 @@ class MissionControlManager {
             'sessions': 'Sessions',
             'gastown': 'Gastown',
             'timeline': 'Timeline',
-            'analytics': 'Analytics'
+            'analytics': 'Analytics',
+            'mission-control': 'Mission Control'
         };
         return names[viewName] || viewName;
     }
@@ -591,6 +593,11 @@ async function fetchSessions() {
 
         const activeCount = data.sessions.filter(s => s.state === 'active').length;
         updateStatus(activeCount, data.sessions.length, data.timestamp);
+
+        // Refresh Mission Control if active
+        if (missionControl.getCurrentView() === 'mission-control') {
+            refreshMissionControl();
+        }
 
         // Schedule next poll with adaptive interval
         scheduleNextPoll(activeCount > 0);
@@ -2926,6 +2933,7 @@ function handleKeyPress(e) {
         'g': () => { switchView('gastown'); showToast('Gastown view'); },
         't': () => { switchView('timeline'); showToast('Timeline view'); },
         'a': () => { switchView('analytics'); showToast('Analytics view'); },
+        'c': () => { switchView('mission-control'); showToast('Mission Control'); },
         'Tab': () => { const next = missionControl.cycleView(1); switchView(next); showToast(`${missionControl.getViewDisplayName(next)} view`); }
     };
     const handler = shortcuts[e.key];
@@ -3434,6 +3442,11 @@ function switchView(viewName) {
     // Load analytics if switching to analytics view
     if (viewName === 'analytics' && typeof loadAnalytics === 'function') {
         loadAnalytics();
+    }
+
+    // Refresh Mission Control when switching to it
+    if (viewName === 'mission-control') {
+        refreshMissionControl();
     }
 }
 
@@ -4193,6 +4206,11 @@ fetchSessions = async function() {
 
             const activeCount = data.sessions.filter(s => s.state === 'active').length;
             updateStatus(activeCount, data.sessions.length, data.timestamp);
+
+            // Refresh Mission Control if active
+            if (missionControl.getCurrentView() === 'mission-control') {
+                refreshMissionControl();
+            }
         }
 
         // Update multi-machine UI
@@ -4299,5 +4317,274 @@ renderGroups = function(groups) {
 document.addEventListener('DOMContentLoaded', () => {
     updateMultiMachineUI();
 });
+
+// ============================================================================
+// Feature: Mission Control - Live Session Monitoring
+// ============================================================================
+
+// Mission Control state
+let mcSelectedSessionId = null;
+let mcConversationCache = new Map();
+let mcAutoScroll = true;
+let mcLastMessageCount = 0;
+
+/**
+ * Initialize Mission Control event listeners
+ */
+function initMissionControl() {
+    // Refresh button
+    const refreshBtn = document.getElementById('mc-refresh');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => {
+            refreshMissionControl();
+            showToast('Mission Control refreshed');
+        });
+    }
+
+    // Track scroll position to disable auto-scroll when user scrolls up
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (streamEl) {
+        streamEl.addEventListener('scroll', () => {
+            const isAtBottom = streamEl.scrollHeight - streamEl.scrollTop <= streamEl.clientHeight + 50;
+            mcAutoScroll = isAtBottom;
+        });
+    }
+}
+
+/**
+ * Refresh Mission Control with current session data
+ */
+function refreshMissionControl() {
+    const sessions = Array.from(previousSessions.values());
+    const activeSessions = sessions.filter(s => s.state === 'active' || s.state === 'waiting');
+
+    renderMissionControlSessions(activeSessions);
+    updateMissionControlStatus(activeSessions.length > 0);
+
+    // Reload conversation if session still exists (skip loading state for background refresh)
+    if (mcSelectedSessionId) {
+        const sessionStillExists = sessions.some(s => s.sessionId === mcSelectedSessionId);
+        if (sessionStillExists) {
+            loadConversationHistory(mcSelectedSessionId, true);
+        } else {
+            // Session ended, clear selection and play notification
+            mcSelectedSessionId = null;
+            clearMissionControlConversation();
+            soundManager.playNotification('waiting');
+        }
+    }
+}
+
+/**
+ * Update Mission Control connection status indicator
+ */
+function updateMissionControlStatus(hasActiveSessions) {
+    const statusEl = document.getElementById('mc-connection-status');
+    if (!statusEl) return;
+
+    if (hasActiveSessions) {
+        statusEl.textContent = '● Connected';
+        statusEl.classList.remove('disconnected');
+        statusEl.classList.add('connected');
+    } else {
+        statusEl.textContent = '● No Active Sessions';
+        statusEl.classList.remove('connected');
+        statusEl.classList.add('disconnected');
+    }
+}
+
+/**
+ * Render the list of sessions in Mission Control
+ */
+function renderMissionControlSessions(sessions) {
+    const container = document.getElementById('mc-sessions-list');
+    const countEl = document.getElementById('mc-active-count');
+
+    if (!container) return;
+
+    // Update count
+    if (countEl) {
+        countEl.textContent = sessions.length;
+    }
+
+    // Handle empty state
+    if (sessions.length === 0) {
+        container.innerHTML = '<div class="mc-empty">No active sessions</div>';
+        return;
+    }
+
+    // Sort: active first, then waiting, then by most recent activity
+    const sorted = [...sessions].sort((a, b) => {
+        const stateOrder = { active: 0, waiting: 1, idle: 2 };
+        const aOrder = stateOrder[a.state] ?? 3;
+        const bOrder = stateOrder[b.state] ?? 3;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+
+        // Then by most recent activity
+        const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+        const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+        return bTime - aTime;
+    });
+
+    container.innerHTML = sorted.map(session => {
+        const isSelected = session.sessionId === mcSelectedSessionId;
+        const stateClass = session.state === 'active' ? 'active' : '';
+        const selectedClass = isSelected ? 'selected' : '';
+        const displayName = session.cwd ? session.cwd.split('/').pop() : session.sessionId.slice(0, 8);
+        const duration = session.duration || '0m';
+        const stateEmoji = session.state === 'active' ? '🟢' : session.state === 'waiting' ? '🟡' : '⚪';
+
+        return `
+            <div class="mc-session-item ${stateClass} ${selectedClass}"
+                 data-session-id="${session.sessionId}"
+                 onclick="selectMissionControlSession('${session.sessionId}')">
+                <div class="mc-session-name">${stateEmoji} ${escapeHtml(displayName)}</div>
+                <div class="mc-session-meta">
+                    <span>${duration}</span>
+                    <span>${session.contextPercent || 0}% ctx</span>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Select a session in Mission Control
+ */
+function selectMissionControlSession(sessionId) {
+    mcSelectedSessionId = sessionId;
+    mcAutoScroll = true;
+
+    // Update session list UI
+    document.querySelectorAll('.mc-session-item').forEach(el => {
+        el.classList.toggle('selected', el.dataset.sessionId === sessionId);
+    });
+
+    // Update selected label
+    const session = previousSessions.get(sessionId);
+    const labelEl = document.getElementById('mc-selected-session');
+    if (labelEl && session) {
+        const displayName = session.cwd ? session.cwd.split('/').pop() : sessionId.slice(0, 8);
+        labelEl.textContent = displayName;
+    }
+
+    // Load conversation
+    loadConversationHistory(sessionId);
+
+    // Play sound on selection
+    soundManager.playNotification('active');
+}
+
+/**
+ * Load conversation history from API
+ */
+async function loadConversationHistory(sessionId, skipLoadingState = false) {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
+
+    // Show loading state only on initial load
+    if (!skipLoadingState) {
+        streamEl.innerHTML = '<div class="mc-empty">Loading conversation...</div>';
+    }
+
+    try {
+        const response = await fetch(`/api/session/${sessionId}/conversation?limit=50`);
+        if (!response.ok) {
+            throw new Error('Failed to load conversation');
+        }
+
+        const data = await response.json();
+        const messages = data.messages || [];
+
+        // Check for new messages and play sound
+        const previousMessages = mcConversationCache.get(sessionId) || [];
+        const hasNewMessages = messages.length > previousMessages.length;
+
+        if (hasNewMessages && previousMessages.length > 0) {
+            // New message arrived - play notification sound
+            soundManager.playNotification('active');
+        }
+
+        // Cache the messages
+        mcConversationCache.set(sessionId, messages);
+        mcLastMessageCount = messages.length;
+
+        renderConversation(messages);
+
+    } catch (error) {
+        console.error('Failed to load conversation:', error);
+        streamEl.innerHTML = `<div class="mc-empty">Failed to load conversation</div>`;
+    }
+}
+
+/**
+ * Render conversation messages
+ */
+function renderConversation(messages) {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
+
+    if (!messages || messages.length === 0) {
+        streamEl.innerHTML = '<div class="mc-empty">No conversation yet</div>';
+        return;
+    }
+
+    streamEl.innerHTML = messages.map(msg => {
+        const role = msg.role || 'unknown';
+        const roleClass = role === 'human' ? 'human' : 'assistant';
+        const roleLabel = role === 'human' ? '👤 Human' : '🤖 Assistant';
+        const timestamp = msg.timestamp ? formatTimeAgo(new Date(msg.timestamp)) : '';
+        const content = escapeHtml(msg.content || '').slice(0, 500);
+        const truncated = (msg.content || '').length > 500 ? '...' : '';
+
+        return `
+            <div class="mc-message ${roleClass}">
+                <div class="mc-message-header">
+                    <span class="mc-message-role">${roleLabel}</span>
+                    <span class="mc-message-time">${timestamp}</span>
+                </div>
+                <div class="mc-message-content">${content}${truncated}</div>
+            </div>
+        `;
+    }).join('');
+
+    // Auto-scroll to bottom
+    if (mcAutoScroll) {
+        streamEl.scrollTop = streamEl.scrollHeight;
+    }
+}
+
+/**
+ * Clear Mission Control conversation view
+ */
+function clearMissionControlConversation() {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    const labelEl = document.getElementById('mc-selected-session');
+
+    if (streamEl) {
+        streamEl.innerHTML = '<div class="mc-empty">Select a session to view conversation</div>';
+    }
+    if (labelEl) {
+        labelEl.textContent = 'Select a session';
+    }
+}
+
+/**
+ * Format time ago helper
+ */
+function formatTimeAgo(date) {
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return date.toLocaleDateString();
+}
+
+// Initialize Mission Control on DOM ready
+document.addEventListener('DOMContentLoaded', initMissionControl);
 
 console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');

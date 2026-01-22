@@ -4044,3 +4044,38 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
         max-height: 200px;
     }
 }
+
+@media (max-width: 600px) {
+    .mission-control-header {
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+    }
+
+    .mission-control-grid {
+        grid-template-rows: 150px 1fr;
+        gap: 12px;
+    }
+
+    .mc-sessions-panel {
+        max-height: 150px;
+    }
+
+    .mc-panel-header {
+        padding: 12px 16px;
+    }
+
+    .mc-session-item {
+        padding: 10px 12px;
+    }
+
+    .mc-message {
+        padding: 10px 12px;
+        margin-bottom: 8px;
+    }
+
+    .mc-conversation-stream {
+        font-size: 11px;
+        padding: 12px;
+    }
+}
