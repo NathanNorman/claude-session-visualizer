@@ -305,6 +305,55 @@ class SoundManager {
 
 const soundManager = new SoundManager();
 
+// MissionControlManager - centralized view state and navigation
+class MissionControlManager {
+    constructor() {
+        this.views = ['sessions', 'gastown', 'timeline', 'analytics'];
+        this.currentView = localStorage.getItem('missionControlView') || 'sessions';
+        this.viewShortcuts = {
+            's': 'sessions',
+            'g': 'gastown',
+            't': 'timeline',
+            'a': 'analytics'
+        };
+    }
+
+    getCurrentView() {
+        return this.currentView;
+    }
+
+    setView(viewName) {
+        if (this.views.includes(viewName)) {
+            this.currentView = viewName;
+            localStorage.setItem('missionControlView', viewName);
+            return true;
+        }
+        return false;
+    }
+
+    getViewForShortcut(key) {
+        return this.viewShortcuts[key] || null;
+    }
+
+    cycleView(direction = 1) {
+        const currentIndex = this.views.indexOf(this.currentView);
+        const nextIndex = (currentIndex + direction + this.views.length) % this.views.length;
+        return this.views[nextIndex];
+    }
+
+    getViewDisplayName(viewName) {
+        const names = {
+            'sessions': 'Sessions',
+            'gastown': 'Gastown',
+            'timeline': 'Timeline',
+            'analytics': 'Analytics'
+        };
+        return names[viewName] || viewName;
+    }
+}
+
+const missionControl = new MissionControlManager();
+
 // Feature 12: Session Notes - localStorage management
 function getNotes() {
     const stored = localStorage.getItem(NOTES_KEY);
@@ -2871,7 +2920,13 @@ function handleKeyPress(e) {
         'v': () => toggleCardMode(),
         'f': () => toggleFocusMode(),
         '?': () => showShortcutsHelp(),
-        'Escape': () => clearSelection()
+        'Escape': () => clearSelection(),
+        // View navigation shortcuts (Mission Control)
+        's': () => { switchView('sessions'); showToast('Sessions view'); },
+        'g': () => { switchView('gastown'); showToast('Gastown view'); },
+        't': () => { switchView('timeline'); showToast('Timeline view'); },
+        'a': () => { switchView('analytics'); showToast('Analytics view'); },
+        'Tab': () => { const next = missionControl.cycleView(1); switchView(next); showToast(`${missionControl.getViewDisplayName(next)} view`); }
     };
     const handler = shortcuts[e.key];
     if (handler) {
@@ -2929,6 +2984,16 @@ function showShortcutsHelp() {
     showModal(`
         <h2>Keyboard Shortcuts</h2>
         <div class="shortcuts-grid">
+            <div class="shortcut-section">
+                <h4>Views</h4>
+                <dl>
+                    <dt>s</dt><dd>Sessions view</dd>
+                    <dt>g</dt><dd>Gastown view</dd>
+                    <dt>t</dt><dd>Timeline view</dd>
+                    <dt>a</dt><dd>Analytics view</dd>
+                    <dt>Tab</dt><dd>Cycle views</dd>
+                </dl>
+            </div>
             <div class="shortcut-section">
                 <h4>Navigation</h4>
                 <dl>
@@ -3333,6 +3398,9 @@ function hideTimelinePopover() {
 
 // View switching
 function switchView(viewName) {
+    // Track view in MissionControlManager
+    missionControl.setView(viewName);
+
     // Update tab buttons
     document.querySelectorAll('.tab-button').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.view === viewName);
