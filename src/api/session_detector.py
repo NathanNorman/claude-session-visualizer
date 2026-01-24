@@ -697,6 +697,31 @@ def extract_activity(content_item: dict) -> str | None:
             url = tool_input.get('url', '')[:40]
             return f"Fetching {url}"
 
+        elif tool_name == 'Skill':
+            skill_name = tool_input.get('skill', '')
+            args = tool_input.get('args', '')
+            if skill_name:
+                if args:
+                    return f"Running /{skill_name} {args[:30]}"
+                return f"Running /{skill_name} skill"
+            return "Running skill"
+
+        elif tool_name == 'AskUserQuestion':
+            questions = tool_input.get('questions', [])
+            if questions and isinstance(questions, list):
+                first_q = questions[0].get('question', '')[:40] if questions else ''
+                return f"Asking: {first_q}" if first_q else "Asking user question"
+            return "Asking user question"
+
+        elif tool_name and tool_name.startswith('mcp__'):
+            # MCP tool - extract meaningful name
+            parts = tool_name.split('__')
+            if len(parts) >= 3:
+                server = parts[1]
+                action = parts[2]
+                return f"{server}: {action}"
+            return f"MCP: {tool_name[5:]}"
+
         elif tool_name:
             return f"Using {tool_name}"
 

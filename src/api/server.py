@@ -790,6 +790,27 @@ Summary (one sentence, no quotes):"""
         return f"Summary unavailable: {str(e)}"
 
 
+MIN_ACTIVITIES_FOR_SUMMARY = 3  # Require at least 3 meaningful activities
+GENERIC_ACTIVITY_PATTERNS = [
+    'Using Skill',
+    'Running skill',  # Skill without name
+    'Using ',  # Generic tool fallback (short form)
+    'Updating task list',  # TodoWrite is noise
+    'Asking user question',  # AskUserQuestion without content
+]
+
+
+def is_meaningful_activity(activity: str) -> bool:
+    """Check if an activity provides enough context for summarization."""
+    if not activity:
+        return False
+    # Filter out generic/vague activities
+    for pattern in GENERIC_ACTIVITY_PATTERNS:
+        if activity == pattern or (pattern.endswith(' ') and activity.startswith(pattern) and len(activity) < len(pattern) + 10):
+            return False
+    return True
+
+
 async def generate_activity_summary(session_id: str, activities: list[str], cwd: str) -> str | None:
     """Generate action→context summary when activity changes or on first encounter.
 
@@ -797,6 +818,13 @@ async def generate_activity_summary(session_id: str, activities: list[str], cwd:
     """
     # Skip if no activities to summarize
     if not activities:
+        return None
+
+    # Filter to meaningful activities only
+    meaningful = [a for a in activities if is_meaningful_activity(a)]
+
+    # Require minimum meaningful activities before generating summary
+    if len(meaningful) < MIN_ACTIVITIES_FOR_SUMMARY:
         return None
 
     current_hash = compute_activity_hash(activities)
@@ -819,8 +847,8 @@ async def generate_activity_summary(session_id: str, activities: list[str], cwd:
     if not token:
         return None  # Silent fail - no token available
 
-    # Build prompt for action+context format
-    activity_text = "\n".join(f"- {a}" for a in activities[-5:])
+    # Build prompt for action+context format (use filtered meaningful activities)
+    activity_text = "\n".join(f"- {a}" for a in meaningful[-5:])
 
     prompt = f"""Based on these Claude Code actions, write a SHORT summary (8-15 words max) in this exact format:
 "[Action verb]ing [file/thing] → [what for]"
