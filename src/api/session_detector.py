@@ -1,16 +1,32 @@
 import subprocess
 import json
 import re
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 import time
 from collections import Counter
 from statistics import mean, median
 from .git_tracker import get_cached_git_status
+from .config import (
+    CLAUDE_PROJECTS_DIR,
+    ACTIVE_CPU_THRESHOLD,
+    ACTIVE_RECENCY_SECONDS,
+)
+from .utils import calculate_cost, get_token_percentage
 
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-ACTIVE_CPU_THRESHOLD = 0.5  # CPU% above this = active (Claude uses little CPU when waiting for API)
-ACTIVE_RECENCY_SECONDS = 30  # File modified within this many seconds = active
+# Import stateless helper functions from detection modules to reduce duplication
+from .detection.jsonl_parser import (
+    is_gastown_path,
+    extract_gastown_role_from_cwd,
+    cwd_to_project_slug,
+    extract_text_content,
+    extract_tool_calls,
+    extract_activity,
+)
+from .detection.matcher import match_process_to_session
+
+logger = logging.getLogger(__name__)
 MAX_SESSION_AGE_HOURS = 2  # Only show sessions with activity in last N hours
 STATE_DIR = Path.home() / ".claude" / "visualizer" / "session-state"
 STATE_FILE_MAX_AGE_SECONDS = 300  # Consider state files stale after 5 minutes
@@ -39,52 +55,60 @@ _state_file_mtimes: dict[str, float] = {}
 # Continuation cache: {session_id: continuation_session_id or None}
 _continuation_cache: dict[str, str | None] = {}
 _continuation_cache_mtime: dict[str, float] = {}  # Track when cache was built
+CACHE_CLEANUP_INTERVAL = 3600  # Clean caches every hour
+_last_cache_cleanup: float = 0.0
 
 # Process list cache: (timestamp, processes_list)
 _process_cache: tuple[float, list] | None = None
 PROCESS_CACHE_TTL = 2  # Cache processes for 2 seconds (faster stale session detection)
 
-# Feature 03: Token Usage Visualization
-MAX_CONTEXT_TOKENS = 200000  # Claude's context window
-
-# Feature 04: Cost Tracking
-# Claude 3.5 Sonnet pricing (as of 2024)
-PRICING = {
-    'input_per_mtok': 3.00,      # $3 per million input tokens
-    'output_per_mtok': 15.00,    # $15 per million output tokens
-    'cache_read_per_mtok': 0.30, # $0.30 per million cached tokens
-    'cache_write_per_mtok': 3.75 # $3.75 per million cache writes
-}
+# Note: MAX_CONTEXT_TOKENS, PRICING, calculate_cost, and get_token_percentage
+# are now imported from config.py and utils.py
 
 
-def get_token_percentage(tokens: int) -> float:
-    """Calculate token usage percentage of max context window."""
-    return min(100, (tokens / MAX_CONTEXT_TOKENS) * 100)
-
-
-def calculate_cost(usage: dict) -> float:
-    """Calculate estimated cost from token usage.
+def cleanup_stale_caches(current_state_files: set[str] | None = None) -> None:
+    """Clean up stale entries from caches to prevent memory leaks.
 
     Args:
-        usage: Dict with keys: input_tokens, output_tokens,
-               cache_read_input_tokens, cache_creation_input_tokens
-
-    Returns:
-        Estimated cost in USD
+        current_state_files: Set of currently active state file session IDs.
+                            If provided, cleans continuation cache for removed sessions.
     """
-    input_tokens = usage.get('input_tokens', 0)
-    output_tokens = usage.get('output_tokens', 0)
-    cache_read = usage.get('cache_read_input_tokens', 0)
-    cache_write = usage.get('cache_creation_input_tokens', 0)
+    global _metadata_cache, _continuation_cache, _continuation_cache_mtime, _last_cache_cleanup
 
-    cost = (
-        (input_tokens / 1_000_000) * PRICING['input_per_mtok'] +
-        (output_tokens / 1_000_000) * PRICING['output_per_mtok'] +
-        (cache_read / 1_000_000) * PRICING['cache_read_per_mtok'] +
-        (cache_write / 1_000_000) * PRICING['cache_write_per_mtok']
-    )
+    now = time.time()
 
-    return round(cost, 2)
+    # Only run cleanup periodically
+    if now - _last_cache_cleanup < CACHE_CLEANUP_INTERVAL:
+        return
+
+    _last_cache_cleanup = now
+
+    # Clean metadata cache: remove entries older than 1 hour
+    max_cache_age = 3600  # 1 hour
+    stale_paths = [
+        path for path, (_, cache_time, _) in _metadata_cache.items()
+        if now - cache_time > max_cache_age
+    ]
+    for path in stale_paths:
+        del _metadata_cache[path]
+
+    # Clean continuation cache: remove entries for sessions that no longer exist
+    stale_sessions: list[str] = []
+    if current_state_files is not None:
+        stale_sessions = [
+            sid for sid in _continuation_cache
+            if sid not in current_state_files
+        ]
+        for sid in stale_sessions:
+            _continuation_cache.pop(sid, None)
+            _continuation_cache_mtime.pop(sid, None)
+
+    if stale_paths or stale_sessions:
+        logger.debug(
+            "Cache cleanup: removed %d metadata entries, %d continuation entries",
+            len(stale_paths),
+            len(stale_sessions)
+        )
 
 
 def check_background_shell_status(shells: list[dict], cwd: str) -> list[dict]:
@@ -262,6 +286,9 @@ def get_all_active_state_files() -> dict[str, dict]:
     _state_file_mtimes = current_mtimes
     if state_changed:
         update_activity_timestamp()
+
+    # Periodically clean up stale cache entries to prevent memory leaks
+    cleanup_stale_caches(set(current_mtimes.keys()))
 
     return active_states
 
@@ -608,7 +635,7 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
         metadata['cumulativeUsage'] = cumulative_usage
 
     except Exception:
-        pass
+        logger.exception("Failed to extract metadata from %s", jsonl_file)
 
     # If slug is still a UUID (same as sessionId), try to use a better name
     if metadata['slug'] == metadata['sessionId']:
@@ -635,140 +662,8 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
     return metadata
 
 
-def is_gastown_path(cwd: str) -> bool:
-    """Check if a cwd path indicates a gastown session."""
-    if not cwd:
-        return False
-    # Check for gastown directory patterns
-    # Note: '/gt' matches both '/gt/' and paths ending in '/gt'
-    if cwd.endswith('/gt') or '/gt/' in cwd:
-        return True
-    return any(pattern in cwd for pattern in [
-        '/deacon', '/witness', '/mayor', '/polecats/',
-        '/refinery/', '/rig'
-    ])
-
-
-def extract_gastown_role_from_cwd(cwd: str) -> str | None:
-    """Extract gastown role from cwd path."""
-    if not cwd:
-        return None
-    if cwd.endswith('/rig'):
-        return 'rig'
-    if '/deacon' in cwd:
-        return 'deacon'
-    if '/mayor' in cwd:
-        return 'mayor'
-    if '/witness' in cwd:
-        return 'witness'
-    if '/refinery' in cwd and '/rig' not in cwd:
-        return 'refinery'
-    if '/polecats/' in cwd:
-        return 'polecat'
-    # Generic gastown directory (e.g., /gt or /gt/something)
-    if cwd.endswith('/gt') or '/gt/' in cwd:
-        return 'gastown'
-    return None
-
-
-def extract_activity(content_item: dict) -> str | None:
-    """Extract a one-sentence activity description from a content item."""
-    item_type = content_item.get('type')
-
-    if item_type == 'tool_use':
-        tool_name = content_item.get('name', '')
-        tool_input = content_item.get('input', {})
-
-        if tool_name == 'Read':
-            path = tool_input.get('file_path', '')
-            filename = path.split('/')[-1] if path else 'file'
-            return f"Reading {filename}"
-
-        elif tool_name == 'Write':
-            path = tool_input.get('file_path', '')
-            filename = path.split('/')[-1] if path else 'file'
-            return f"Writing {filename}"
-
-        elif tool_name == 'Edit':
-            path = tool_input.get('file_path', '')
-            filename = path.split('/')[-1] if path else 'file'
-            return f"Editing {filename}"
-
-        elif tool_name == 'Bash':
-            cmd = tool_input.get('command', '')[:50]
-            desc = tool_input.get('description', '')
-            if desc:
-                return desc[:60]
-            elif cmd:
-                return f"Running: {cmd}"
-
-        elif tool_name == 'Grep':
-            pattern = tool_input.get('pattern', '')[:30]
-            return f"Searching for '{pattern}'"
-
-        elif tool_name == 'Glob':
-            pattern = tool_input.get('pattern', '')[:30]
-            return f"Finding files: {pattern}"
-
-        elif tool_name == 'Task':
-            desc = tool_input.get('description', '')[:50]
-            return f"Spawning agent: {desc}" if desc else "Spawning agent"
-
-        elif tool_name == 'TodoWrite':
-            return "Updating task list"
-
-        elif tool_name == 'WebFetch':
-            url = tool_input.get('url', '')[:40]
-            return f"Fetching {url}"
-
-        elif tool_name == 'Skill':
-            skill_name = tool_input.get('skill', '')
-            args = tool_input.get('args', '')
-            if skill_name:
-                if args:
-                    return f"Running /{skill_name} {args[:30]}"
-                return f"Running /{skill_name} skill"
-            return "Running skill"
-
-        elif tool_name == 'AskUserQuestion':
-            questions = tool_input.get('questions', [])
-            if questions and isinstance(questions, list):
-                first_q = questions[0].get('question', '')[:40] if questions else ''
-                return f"Asking: {first_q}" if first_q else "Asking user question"
-            return "Asking user question"
-
-        elif tool_name and tool_name.startswith('mcp__'):
-            # MCP tool - extract meaningful name
-            parts = tool_name.split('__')
-            if len(parts) >= 3:
-                server = parts[1]
-                action = parts[2]
-                return f"{server}: {action}"
-            return f"MCP: {tool_name[5:]}"
-
-        elif tool_name:
-            return f"Using {tool_name}"
-
-    elif item_type == 'text':
-        text = content_item.get('text', '').strip()
-        if text:
-            # Get first sentence or first 80 chars
-            first_line = text.split('\n')[0][:100]
-            if '. ' in first_line:
-                return first_line.split('. ')[0] + '.'
-            elif len(first_line) > 60:
-                return first_line[:60] + '...'
-            elif first_line:
-                return first_line
-
-    return None
-
-
-def cwd_to_project_slug(cwd: str) -> str:
-    """Convert a cwd path to the project slug format used by Claude."""
-    # Claude uses paths like: -Users-nathan-norman-projectname
-    # Note: keeps leading dash, replaces /, ., and _ with -
-    return cwd.replace('/', '-').replace('.', '-').replace('_', '-')
+# is_gastown_path, extract_gastown_role_from_cwd, cwd_to_project_slug, and extract_activity
+# are imported from detection.jsonl_parser
 
 
 def extract_session_timeline(jsonl_file: Path) -> list[dict]:
@@ -850,7 +745,7 @@ def extract_session_timeline(jsonl_file: Path) -> list[dict]:
                 except (json.JSONDecodeError, KeyError):
                     continue
     except Exception:
-        pass
+        logger.exception("Failed to extract session timeline from %s", jsonl_file)
 
     return events
 
@@ -975,7 +870,8 @@ def get_all_sessions(max_age_hours: int = 24) -> list[dict]:
                     metadata = extract_jsonl_metadata(jsonl_file)
                     metadata['recency'] = now - mtime
                     results.append(metadata)
-            except:
+            except Exception:
+                logger.debug("Error reading session file %s", jsonl_file, exc_info=True)
                 continue
 
     # Sort by most recent first
@@ -1039,6 +935,7 @@ def get_dead_sessions(max_age_hours: int = 24) -> list[dict]:
 
                     results.append(metadata)
             except Exception:
+                logger.debug("Error reading dead session file %s", jsonl_file, exc_info=True)
                 continue
 
     # Sort by most recent first (smallest recency = most recent)
@@ -1138,6 +1035,7 @@ def search_dead_sessions(query: str, max_age_hours: int = 24, search_content: bo
                     results.append(metadata)
 
             except Exception:
+                logger.debug("Error searching session file %s", jsonl_file, exc_info=True)
                 continue
 
     # Sort by recency (most recent first)
@@ -1219,59 +1117,14 @@ def get_sessions_for_cwd(cwd: str) -> list[dict]:
             if metadata.get('cwd') == cwd:
                 metadata['file_mtime'] = jsonl_file.stat().st_mtime
                 sessions.append(metadata)
-        except:
+        except Exception:
+            logger.debug("Error reading session for cwd %s", cwd, exc_info=True)
             continue
 
     return sessions
 
 
-def match_process_to_session(proc: dict, available_sessions: list[dict]) -> dict | None:
-    """Match a process to its session by comparing start times.
-
-    Args:
-        proc: Process dict with 'start_time' key
-        available_sessions: List of session metadata dicts with 'startTimestamp'
-
-    Returns:
-        Best matching session metadata, or None
-    """
-    if not available_sessions:
-        return None
-
-    proc_start = proc.get('start_time')
-    if not proc_start:
-        # Fall back to most recent if we can't get process start time
-        available_sessions.sort(key=lambda x: x.get('file_mtime', 0), reverse=True)
-        return available_sessions[0]
-
-    # Find session with start time closest to process start time
-    best_match = None
-    best_diff = float('inf')
-
-    for session in available_sessions:
-        session_start_str = session.get('startTimestamp')
-        if not session_start_str:
-            continue
-
-        try:
-            # Parse ISO timestamp
-            session_start = datetime.fromisoformat(
-                session_start_str.replace('Z', '+00:00')
-            ).timestamp()
-
-            diff = abs(session_start - proc_start)
-            if diff < best_diff:
-                best_diff = diff
-                best_match = session
-        except (ValueError, AttributeError):
-            continue
-
-    # If no timestamp match, fall back to most recent
-    if not best_match and available_sessions:
-        available_sessions.sort(key=lambda x: x.get('file_mtime', 0), reverse=True)
-        best_match = available_sessions[0]
-
-    return best_match
+# match_process_to_session imported from detection.matcher
 
 
 def get_sessions() -> list[dict]:
@@ -1668,69 +1521,7 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
     return messages
 
 
-def extract_text_content(message: dict) -> str:
-    """Extract text from message content."""
-    content = message.get('content', [])
-    if isinstance(content, str):
-        return content[:500]  # Truncate long messages
-
-    texts = []
-    for item in content:
-        if isinstance(item, dict) and item.get('type') == 'text':
-            texts.append(item.get('text', '')[:500])
-
-    return '\n'.join(texts)[:1000]
-
-
-def extract_tool_calls(content: list) -> list[str]:
-    """Extract tool call summaries from content with details."""
-    tools = []
-    for item in content:
-        if isinstance(item, dict) and item.get('type') == 'tool_use':
-            tool_name = item.get('name', 'Unknown')
-            tool_input = item.get('input', {})
-
-            # Build informative summary based on tool type
-            if tool_name == 'Read':
-                path = tool_input.get('file_path', '')
-                filename = path.split('/')[-1] if path else 'file'
-                tools.append(f"Read {filename}")
-            elif tool_name == 'Write':
-                path = tool_input.get('file_path', '')
-                filename = path.split('/')[-1] if path else 'file'
-                tools.append(f"Write {filename}")
-            elif tool_name == 'Edit':
-                path = tool_input.get('file_path', '')
-                filename = path.split('/')[-1] if path else 'file'
-                tools.append(f"Edit {filename}")
-            elif tool_name == 'Bash':
-                cmd = tool_input.get('command', '')[:40]
-                desc = tool_input.get('description', '')
-                if desc:
-                    tools.append(f"Bash: {desc[:40]}")
-                elif cmd:
-                    tools.append(f"Bash: {cmd}")
-                else:
-                    tools.append("Bash")
-            elif tool_name == 'Grep':
-                pattern = tool_input.get('pattern', '')[:25]
-                tools.append(f"Grep '{pattern}'")
-            elif tool_name == 'Glob':
-                pattern = tool_input.get('pattern', '')[:25]
-                tools.append(f"Glob {pattern}")
-            elif tool_name == 'Task':
-                desc = tool_input.get('description', '')[:30]
-                tools.append(f"Task: {desc}" if desc else "Task")
-            elif tool_name == 'TodoWrite':
-                tools.append("Update todos")
-            elif tool_name == 'WebFetch':
-                url = tool_input.get('url', '')
-                # Extract domain from URL
-                domain = url.split('/')[2] if url.count('/') >= 2 else url[:30]
-                tools.append(f"Fetch {domain}")
-            else:
-                tools.append(tool_name)
-    return tools
+# extract_text_content and extract_tool_calls imported from detection.jsonl_parser
 
 
 def extract_metrics(jsonl_file: Path) -> dict:
@@ -1767,8 +1558,8 @@ def extract_metrics(jsonl_file: Path) -> dict:
                                 response_time = (t2 - t1).total_seconds()
                                 if 0 < response_time < 300:  # Sanity check
                                     response_times.append(response_time)
-                            except:
-                                pass
+                            except (ValueError, AttributeError):
+                                pass  # Invalid timestamp format, skip this pair
                             prev_timestamp = None
 
                         # Token usage (all assistant messages)
@@ -1788,7 +1579,7 @@ def extract_metrics(jsonl_file: Path) -> dict:
                 except json.JSONDecodeError:
                     continue
     except Exception:
-        pass
+        logger.exception("Failed to extract metrics from %s", jsonl_file)
 
     # Calculate duration
     duration_seconds = 0
@@ -1797,8 +1588,8 @@ def extract_metrics(jsonl_file: Path) -> dict:
             t1 = datetime.fromisoformat(first_timestamp.replace('Z', '+00:00'))
             t2 = datetime.fromisoformat(last_timestamp.replace('Z', '+00:00'))
             duration_seconds = (t2 - t1).total_seconds()
-        except:
-            pass
+        except (ValueError, AttributeError):
+            pass  # Invalid timestamp format
 
     return {
         'responseTime': {

@@ -113,9 +113,14 @@ class StickyScroll {
         StickyScroll.instances.set(this.id, this);
     }
 
-    attach() {
-        this.scrollToBottom();
+    attach(skipInitialScroll = false) {
         this.element.addEventListener('scroll', () => this.handleScroll());
+        if (!skipInitialScroll) {
+            // Defer initial scroll until element is in DOM and rendered
+            requestAnimationFrame(() => {
+                this.element.scrollTop = this.element.scrollHeight;
+            });
+        }
         return this;
     }
 
@@ -187,10 +192,17 @@ class StickyScroll {
             const showIndicator = oldInstance.showIndicator;
             StickyScroll.instances.delete(oldId);
 
-            // Create new instance with preserved state
+            // Create new instance with preserved state, skip initial scroll
             const newInstance = new StickyScroll(newElement, { showIndicator });
             newInstance.autoScroll = wasAutoScroll;
-            newInstance.attach();
+            newInstance.attach(true);  // Skip initial scroll, we handle it below
+
+            // Scroll to bottom only if auto-scroll was enabled
+            if (wasAutoScroll) {
+                requestAnimationFrame(() => {
+                    newElement.scrollTop = newElement.scrollHeight;
+                });
+            }
 
             return newInstance;
         }
@@ -199,6 +211,23 @@ class StickyScroll {
 
     static getById(id) {
         return StickyScroll.instances.get(id);
+    }
+
+    static cleanup(element) {
+        // Clean up StickyScroll instance when element is removed from DOM
+        const id = element?.dataset?.stickyScrollId;
+        if (id) {
+            StickyScroll.instances.delete(id);
+        }
+    }
+
+    static cleanupAll() {
+        // Remove instances for elements no longer in the DOM (periodic cleanup)
+        for (const [id, instance] of StickyScroll.instances) {
+            if (!document.contains(instance.element)) {
+                StickyScroll.instances.delete(id);
+            }
+        }
     }
 }
 
@@ -318,33 +347,7 @@ class SoundManager {
     }
 
     play(soundName) {
-        // EMERGENCY: Completely disabled
-        return;
-
-        this.initAudioContext();
-
-        // Different tones for different events
-        switch (soundName) {
-            case 'active':
-                // Positive ascending tone (session became active)
-                this.playTone(523.25, 0.1, 'sine'); // C5
-                setTimeout(() => this.playTone(659.25, 0.1, 'sine'), 100); // E5
-                break;
-            case 'waiting':
-                // Neutral soft tone (session became waiting)
-                this.playTone(440, 0.15, 'sine'); // A4
-                break;
-            case 'highContext':
-                // Warning tone (high context usage)
-                this.playTone(587.33, 0.1, 'square'); // D5
-                setTimeout(() => this.playTone(587.33, 0.1, 'square'), 150);
-                setTimeout(() => this.playTone(587.33, 0.1, 'square'), 300);
-                break;
-            case 'error':
-                // Alert tone (error/failure)
-                this.playTone(392, 0.2, 'sawtooth'); // G4
-                break;
-        }
+        // Sound playback disabled - kept as no-op for API compatibility
     }
 
     setVolume(vol) {
@@ -859,15 +862,10 @@ function createCard(session, index = 0) {
         stateEmoji = activityStatus.isStale ? '🟠' : '🟡';
     }
 
-    // Activity badge HTML
-    let activityBadgeHtml = '';
-    if (session.state === 'active') {
-        activityBadgeHtml = '<span class="active-indicator">just now</span>';
-    } else if (activityStatus.text) {
-        activityBadgeHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
-    } else {
-        activityBadgeHtml = '<span class="idle-indicator">idle</span>';
-    }
+    // Activity badge HTML - always use activityStatus for consistent display
+    const activityBadgeHtml = activityStatus.text
+        ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+        : '<span class="idle-indicator">idle</span>';
 
     // Session duration
     const duration = formatAgentDuration(session.startTimestamp) || '0m';
@@ -982,19 +980,11 @@ function createCompactCard(session, index = 0) {
     // Session duration
     const duration = formatAgentDuration(session.startTimestamp) || '0m';
 
-    // Show activity status - consistent with Mission Control
-    // Active sessions show "just now", non-active show idle time
+    // Show activity status - always use activityStatus for consistent display
     const activityStatus = getActivityStatus(session.lastActivity);
-    let activityHtml = '';
-    if (session.state === 'active') {
-        activityHtml = '<span class="active-indicator">just now</span>';
-    } else {
-        if (activityStatus.text) {
-            activityHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
-        } else {
-            activityHtml = '<span class="idle-indicator">idle</span>';
-        }
-    }
+    const activityHtml = activityStatus.text
+        ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+        : '<span class="idle-indicator">idle</span>';
 
     // State emoji like Mission Control
     let stateEmoji = '🟢';  // active
@@ -1506,10 +1496,7 @@ function updateCard(card, session) {
             if (newLogEl && !newLogEl.classList.contains('empty')) {
                 if (oldStickyId && !wasEmpty) {
                     // Transfer state from destroyed element to new element
-                    const stickyScroll = StickyScroll.transferState(oldStickyId, newLogEl);
-                    if (stickyScroll) {
-                        stickyScroll.scrollToBottom();
-                    }
+                    StickyScroll.transferState(oldStickyId, newLogEl);
                 } else {
                     // First time (was empty) - create fresh instance
                     new StickyScroll(newLogEl).attach();
@@ -1529,12 +1516,10 @@ function updateCard(card, session) {
     if (footerRight) {
         const duration = formatAgentDuration(session.startTimestamp) || '0m';
         const activityStatus = getActivityStatus(session.lastActivity);
-        let activityBadgeHtml = '';
-        if (session.state === 'active') {
-            activityBadgeHtml = '<span class="active-indicator">just now</span>';
-        } else if (activityStatus.text && !activityStatus.isActive) {
-            activityBadgeHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
-        }
+        // Always use activityStatus for consistent display (avoids flicker when state changes)
+        const activityBadgeHtml = activityStatus.text
+            ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+            : '';
         footerRight.innerHTML = `
             <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
             ${activityBadgeHtml}
@@ -2668,7 +2653,11 @@ function updateSessionsInPlace(sessions) {
             cardsToRemove.push(card);
         }
     });
-    cardsToRemove.forEach(card => card.remove());
+    cardsToRemove.forEach(card => {
+        // Clean up any StickyScroll instances to prevent memory leaks
+        card.querySelectorAll('[data-sticky-scroll-id]').forEach(el => StickyScroll.cleanup(el));
+        card.remove();
+    });
 
     // Add new sessions - append to appropriate group or create group
     if (sessionsToAdd.length > 0) {
@@ -2951,62 +2940,11 @@ async function enableNotifications() {
 }
 
 function sendNotification(title, body, options = {}) {
-    // EMERGENCY: Completely disabled
-    return;
-    const notification = new Notification(title, {
-        body,
-        icon: '/favicon.ico',
-        tag: options.sessionId,
-        ...options
-    });
-    notification.onclick = () => {
-        window.focus();
-        if (options.sessionId) {
-            const card = document.querySelector(`[data-session-id="${options.sessionId}"]`);
-            if (card) {
-                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                card.classList.add('keyboard-selected');
-                setTimeout(() => card.classList.remove('keyboard-selected'), 2000);
-            }
-        }
-        notification.close();
-    };
-    setTimeout(() => notification.close(), 5000);
+    // Notification sending disabled - kept as no-op for API compatibility
 }
 
 function checkStateChanges(oldSessions, newSessions) {
-    // EMERGENCY: Completely disabled
-    return;
-
-    const oldMap = new Map(oldSessions.map(s => [s.sessionId, s]));
-    for (const session of newSessions) {
-        const old = oldMap.get(session.sessionId);
-        if (!old) continue;
-        // Skip notifications for gastown sessions
-        if (session.isGastown) continue;
-        if (old.state === 'waiting' && session.state === 'active') {
-            if (notificationSettings.onActive) {
-                sendNotification('🟢 Session Active', `${session.slug} is working`,
-                    { sessionId: session.sessionId, type: 'active' });
-                soundManager.play('active');
-            }
-        }
-        if (old.state === 'active' && session.state === 'waiting') {
-            if (notificationSettings.onWaiting) {
-                sendNotification('🔵 Session Waiting', `${session.slug} needs input`,
-                    { sessionId: session.sessionId, type: 'waiting' });
-                soundManager.play('waiting');
-            }
-        }
-        if (old.contextTokens < 160000 && session.contextTokens >= 160000) {
-            if (notificationSettings.onWarning) {
-                sendNotification('⚠️ Context Warning',
-                    `${session.slug} is at ${Math.round(session.contextTokens/2000)}% capacity`,
-                    { sessionId: session.sessionId, type: 'warning' });
-                soundManager.play('highContext');
-            }
-        }
-    }
+    // State change detection disabled - kept as no-op for API compatibility
 }
 
 // ============================================================================
@@ -3668,6 +3606,11 @@ setInterval(() => {
         refreshTimeline();
     }
 }, 30000); // Refresh every 30 seconds when viewing timeline
+
+// Periodic cleanup of orphaned StickyScroll instances to prevent memory leaks
+setInterval(() => {
+    StickyScroll.cleanupAll();
+}, 60000); // Every 60 seconds
 
 // Timeline bar hover event delegation
 document.addEventListener('mouseover', (e) => {
@@ -4760,21 +4703,10 @@ function renderMCSessionItem(session, isGastown = false) {
         stateEmoji = activityStatus.isStale ? '🟠' : '🟡';  // orange for stale, yellow for idle
     }
 
-    // Show activity status - but only show "idle" for non-active sessions
-    // This prevents contradictory display (green dot + "idle" badge)
-    let activityHtml = '';
-    if (session.state === 'active') {
-        // Active session: show "just now" or active indicator
-        activityHtml = '<span class="active-indicator">just now</span>';
-    } else {
-        // Non-active session: show idle time from lastActivity
-        if (activityStatus.text) {
-            activityHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
-        } else {
-            // No lastActivity data - show idle without time
-            activityHtml = '<span class="idle-indicator">idle</span>';
-        }
-    }
+    // Show activity status - always use activityStatus for consistent display
+    const activityHtml = activityStatus.text
+        ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+        : '<span class="idle-indicator">idle</span>';
 
     // For gastown, show role icon
     let roleIcon = '';

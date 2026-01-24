@@ -9,55 +9,73 @@ Usage:
     python3 remote_agent.py                  # Default port 8081
     python3 remote_agent.py --port 8082      # Custom port
     python3 remote_agent.py --host 0.0.0.0   # Allow external connections (LAN only)
+
+Note: This agent is designed to run standalone on remote machines that may not
+have the full package installed. It includes fallback implementations when
+shared utilities aren't available.
 """
 import subprocess
 import json
 import re
 import socket
 import argparse
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 import time
-from collections import Counter
-from statistics import mean, median
 
+logger = logging.getLogger(__name__)
 
-# Configuration
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-ACTIVE_CPU_THRESHOLD = 0.5
-ACTIVE_RECENCY_SECONDS = 30
-MAX_SESSION_AGE_HOURS = 24
-MAX_CONTEXT_TOKENS = 200000
-
-# Pricing for cost estimation (Claude 3.5 Sonnet)
-PRICING = {
-    'input_per_mtok': 3.00,
-    'output_per_mtok': 15.00,
-    'cache_read_per_mtok': 0.30,
-    'cache_write_per_mtok': 3.75
-}
-
-
-def get_token_percentage(tokens: int) -> float:
-    """Calculate token usage percentage of max context window."""
-    return min(100, (tokens / MAX_CONTEXT_TOKENS) * 100)
-
-
-def calculate_cost(usage: dict) -> float:
-    """Calculate estimated cost from token usage."""
-    input_tokens = usage.get('input_tokens', 0)
-    output_tokens = usage.get('output_tokens', 0)
-    cache_read = usage.get('cache_read_input_tokens', 0)
-    cache_write = usage.get('cache_creation_input_tokens', 0)
-
-    cost = (
-        (input_tokens / 1_000_000) * PRICING['input_per_mtok'] +
-        (output_tokens / 1_000_000) * PRICING['output_per_mtok'] +
-        (cache_read / 1_000_000) * PRICING['cache_read_per_mtok'] +
-        (cache_write / 1_000_000) * PRICING['cache_write_per_mtok']
+# Try to import shared utilities, fall back to local definitions if not available
+# This allows the remote agent to run standalone without the full package
+try:
+    from .config import (
+        CLAUDE_PROJECTS_DIR,
+        ACTIVE_CPU_THRESHOLD,
+        ACTIVE_RECENCY_SECONDS,
+        MAX_CONTEXT_TOKENS,
+        PRICING,
     )
+    from .utils import calculate_cost, get_token_percentage
+    from .detection.jsonl_parser import extract_activity
+except ImportError:
+    # Standalone mode - define locally
+    CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+    ACTIVE_CPU_THRESHOLD = 0.5
+    ACTIVE_RECENCY_SECONDS = 30
+    MAX_CONTEXT_TOKENS = 200000
+    PRICING = {
+        'input_per_mtok': 3.00,
+        'output_per_mtok': 15.00,
+        'cache_read_per_mtok': 0.30,
+        'cache_write_per_mtok': 3.75,
+    }
 
-    return round(cost, 2)
+    def get_token_percentage(tokens: int) -> float:
+        """Calculate token usage percentage of max context window."""
+        return min(100, (tokens / MAX_CONTEXT_TOKENS) * 100)
+
+    def calculate_cost(usage: dict) -> float:
+        """Calculate estimated cost from token usage."""
+        input_tokens = usage.get('input_tokens', 0)
+        output_tokens = usage.get('output_tokens', 0)
+        cache_read = usage.get('cache_read_input_tokens', 0)
+        cache_write = usage.get('cache_creation_input_tokens', 0)
+
+        cost = (
+            (input_tokens / 1_000_000) * PRICING['input_per_mtok'] +
+            (output_tokens / 1_000_000) * PRICING['output_per_mtok'] +
+            (cache_read / 1_000_000) * PRICING['cache_read_per_mtok'] +
+            (cache_write / 1_000_000) * PRICING['cache_write_per_mtok']
+        )
+        return round(cost, 2)
+
+    def extract_activity(content_item: dict) -> str | None:
+        """Extract a one-sentence activity description from a content item."""
+        # Inline implementation for standalone mode
+        pass  # Will be defined below
+
+MAX_SESSION_AGE_HOURS = 24
 
 
 def get_claude_processes() -> list[dict]:
@@ -266,7 +284,7 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
         metadata['cumulativeUsage'] = cumulative_usage
 
     except Exception:
-        pass
+        logger.exception("Failed to extract metadata from %s", jsonl_file)
 
     return metadata
 
@@ -310,7 +328,8 @@ def get_all_sessions(max_age_hours: int = 24) -> list[dict]:
                     metadata = extract_jsonl_metadata(jsonl_file)
                     metadata['recency'] = now - mtime
                     results.append(metadata)
-            except:
+            except Exception:
+                logger.debug("Error reading session file %s", jsonl_file, exc_info=True)
                 continue
 
     results.sort(key=lambda x: x['recency'])
