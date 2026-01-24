@@ -96,6 +96,113 @@ let cardDisplayMode = localStorage.getItem('cardDisplayMode') || 'compact'; // '
 let focusMode = JSON.parse(localStorage.getItem('focusMode') || 'false');
 
 // ============================================================================
+// StickyScroll - Unified sticky scroll behavior for activity windows
+// ============================================================================
+
+class StickyScroll {
+    static THRESHOLD = 30;  // Unified threshold for all scroll containers
+    static instances = new Map();
+    static nextId = 1;
+
+    constructor(element, options = {}) {
+        this.element = element;
+        this.autoScroll = true;
+        this.showIndicator = options.showIndicator ?? false;
+        this.id = `sticky-scroll-${StickyScroll.nextId++}`;
+        element.dataset.stickyScrollId = this.id;
+        StickyScroll.instances.set(this.id, this);
+    }
+
+    attach() {
+        this.scrollToBottom();
+        this.element.addEventListener('scroll', () => this.handleScroll());
+        return this;
+    }
+
+    handleScroll() {
+        const wasAutoScroll = this.autoScroll;
+        this.autoScroll = this.isAtBottom();
+
+        // Update visual indicator if enabled
+        if (this.showIndicator && wasAutoScroll !== this.autoScroll) {
+            this.updateIndicator();
+        }
+    }
+
+    isAtBottom() {
+        const el = this.element;
+        return el.scrollTop + el.clientHeight >= el.scrollHeight - StickyScroll.THRESHOLD;
+    }
+
+    scrollToBottom() {
+        // Only scroll if auto-scroll is enabled
+        if (this.autoScroll) {
+            this.element.scrollTop = this.element.scrollHeight;
+        }
+    }
+
+    forceScrollToBottom() {
+        // Force scroll regardless of auto-scroll state, and re-enable auto-scroll
+        this.autoScroll = true;
+        this.element.scrollTop = this.element.scrollHeight;
+        if (this.showIndicator) {
+            this.updateIndicator();
+        }
+    }
+
+    updateIndicator() {
+        let indicator = this.element.querySelector('.sticky-scroll-indicator');
+
+        if (this.autoScroll) {
+            // Remove indicator when auto-scroll is enabled
+            if (indicator) {
+                indicator.remove();
+            }
+        } else {
+            // Show indicator when auto-scroll is paused
+            if (!indicator) {
+                indicator = document.createElement('div');
+                indicator.className = 'sticky-scroll-indicator';
+                indicator.innerHTML = `
+                    <span class="indicator-text">Scroll paused</span>
+                    <button class="indicator-resume" onclick="StickyScroll.resumeById('${this.id}')">Resume</button>
+                `;
+                this.element.appendChild(indicator);
+            }
+        }
+    }
+
+    static resumeById(id) {
+        const instance = StickyScroll.instances.get(id);
+        if (instance) {
+            instance.forceScrollToBottom();
+        }
+    }
+
+    static transferState(oldId, newElement) {
+        // Transfer state from old element (destroyed by outerHTML) to new element
+        const oldInstance = StickyScroll.instances.get(oldId);
+        if (oldInstance) {
+            const wasAutoScroll = oldInstance.autoScroll;
+            const showIndicator = oldInstance.showIndicator;
+            StickyScroll.instances.delete(oldId);
+
+            // Create new instance with preserved state
+            const newInstance = new StickyScroll(newElement, { showIndicator });
+            newInstance.autoScroll = wasAutoScroll;
+            newInstance.attach();
+
+            return newInstance;
+        }
+        return null;
+    }
+
+    static getById(id) {
+        return StickyScroll.instances.get(id);
+    }
+}
+
+// ============================================================================
 // Session Diffing Helpers (for differential DOM updates)
 // ============================================================================
 
@@ -849,12 +956,7 @@ function createCard(session, index = 0) {
     // Auto-scroll activity summary log to bottom (newest entries at bottom)
     const summaryLogEl = card.querySelector('.activity-summary-log');
     if (summaryLogEl && !summaryLogEl.classList.contains('empty')) {
-        summaryLogEl.scrollTop = summaryLogEl.scrollHeight;
-        // Track when user manually scrolls away from bottom
-        summaryLogEl.addEventListener('scroll', () => {
-            const isAtBottom = summaryLogEl.scrollTop + summaryLogEl.clientHeight >= summaryLogEl.scrollHeight - 10;
-            summaryLogEl.dataset.userScrolledAway = isAtBottom ? '' : 'true';
-        });
+        new StickyScroll(summaryLogEl).attach();
     }
 
     // Make card clickable to focus iTerm tab
@@ -1396,26 +1498,22 @@ function updateCard(card, session) {
 
         // Check if summaries changed (new entries added)
         if (newSummaries.length !== prevSummaries.length) {
-            // Check if user has manually scrolled away from bottom
-            const userScrolledAway = summaryLogEl.dataset.userScrolledAway === 'true';
+            const oldStickyId = summaryLogEl.dataset.stickyScrollId;
             const wasEmpty = summaryLogEl.classList.contains('empty');
             summaryLogEl.outerHTML = renderActivitySummaryLog(newSummaries);
             // Re-query and set up scroll tracking on new element
             const newLogEl = card.querySelector('.activity-summary-log');
             if (newLogEl && !newLogEl.classList.contains('empty')) {
-                // Scroll to bottom unless user previously scrolled away
-                if (!userScrolledAway || wasEmpty) {
-                    newLogEl.scrollTop = newLogEl.scrollHeight;
+                if (oldStickyId && !wasEmpty) {
+                    // Transfer state from destroyed element to new element
+                    const stickyScroll = StickyScroll.transferState(oldStickyId, newLogEl);
+                    if (stickyScroll) {
+                        stickyScroll.scrollToBottom();
+                    }
+                } else {
+                    // First time (was empty) - create fresh instance
+                    new StickyScroll(newLogEl).attach();
                 }
-                // Preserve the userScrolledAway state (but not if it was empty before)
-                if (userScrolledAway && !wasEmpty) {
-                    newLogEl.dataset.userScrolledAway = 'true';
-                }
-                // Attach scroll listener to track user scroll
-                newLogEl.addEventListener('scroll', () => {
-                    const isAtBottom = newLogEl.scrollTop + newLogEl.clientHeight >= newLogEl.scrollHeight - 10;
-                    newLogEl.dataset.userScrolledAway = isAtBottom ? '' : 'true';
-                });
             }
         }
     }
@@ -4427,7 +4525,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Mission Control state
 let mcSelectedSessionId = null;
 let mcConversationCache = new Map();
-let mcAutoScroll = true;
+let mcStickyScroll = null;  // StickyScroll instance for Mission Control
 let mcLastMessageCount = 0;
 
 /**
@@ -4443,13 +4541,10 @@ function initMissionControl() {
         });
     }
 
-    // Track scroll position to disable auto-scroll when user scrolls up
+    // Set up sticky scroll for conversation stream
     const streamEl = document.getElementById('mc-conversation-stream');
     if (streamEl) {
-        streamEl.addEventListener('scroll', () => {
-            const isAtBottom = streamEl.scrollHeight - streamEl.scrollTop <= streamEl.clientHeight + 50;
-            mcAutoScroll = isAtBottom;
-        });
+        mcStickyScroll = new StickyScroll(streamEl, { showIndicator: true }).attach();
     }
 }
 
@@ -4706,7 +4801,10 @@ function renderMCSessionItem(session, isGastown = false) {
  */
 function selectMissionControlSession(sessionId) {
     mcSelectedSessionId = sessionId;
-    mcAutoScroll = true;
+    // Reset auto-scroll when selecting a new session
+    if (mcStickyScroll) {
+        mcStickyScroll.autoScroll = true;
+    }
 
     // Update session list UI
     document.querySelectorAll('.mc-session-item').forEach(el => {
@@ -4796,9 +4894,7 @@ function renderConversation(messages) {
         return;
     }
 
-    // Full render - remember scroll position
-    const wasAtBottom = streamEl.scrollTop + streamEl.clientHeight >= streamEl.scrollHeight - 50;
-
+    // Full render
     // Build all message HTML
     const html = filteredMessages.map((msg, idx) => {
         const role = msg.role || 'unknown';
@@ -4849,9 +4945,9 @@ function renderConversation(messages) {
 
     streamEl.innerHTML = html;
 
-    // Auto-scroll to bottom if was at bottom or if auto-scroll enabled
-    if ((wasAtBottom || mcAutoScroll) && filteredMessages.length > 0) {
-        streamEl.scrollTop = streamEl.scrollHeight;
+    // Auto-scroll to bottom if auto-scroll is enabled
+    if (mcStickyScroll && filteredMessages.length > 0) {
+        mcStickyScroll.scrollToBottom();
     }
 }
 

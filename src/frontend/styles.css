@@ -1122,6 +1122,7 @@ body.keyboard-mode .session-card .card-number {
 
 /* Activity Summary Log - AI-generated activity summaries */
 .activity-summary-log {
+    position: relative;  /* For sticky scroll indicator */
     max-height: 225px;
     overflow-y: auto;
     margin: 8px 0;
@@ -1150,6 +1151,49 @@ body.keyboard-mode .session-card .card-number {
 .activity-summary-log::-webkit-scrollbar-thumb {
     background: rgba(255,255,255,0.2);
     border-radius: 3px;
+}
+
+/* Sticky Scroll Indicator - shows when auto-scroll is paused */
+.sticky-scroll-indicator {
+    position: sticky;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: rgba(30, 30, 30, 0.95);
+    border-radius: 20px;
+    margin: 8px auto 0;
+    width: fit-content;
+    max-width: calc(100% - 24px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    backdrop-filter: blur(8px);
+    animation: fadeIn 0.2s ease-out;
+    z-index: 10;
+}
+
+.sticky-scroll-indicator .indicator-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.sticky-scroll-indicator .indicator-resume {
+    background: var(--active-color);
+    color: #000;
+    border: none;
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.sticky-scroll-indicator .indicator-resume:hover {
+    background: #5aef98;
 }
 
 .summary-entry {
@@ -4073,6 +4117,7 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 /* Conversation stream */
 .mc-conversation-stream {
+    position: relative;  /* For sticky scroll indicator */
     font-family: 'SF Mono', Monaco, Consolas, monospace;
     font-size: 12px;
     line-height: 1.5;
