@@ -24,6 +24,7 @@ from .session_detector import (
     extract_session_timeline,
     get_activity_periods,
     get_activity_timestamp,
+    get_all_active_state_files,
     CLAUDE_PROJECTS_DIR
 )
 from .git_tracker import (
@@ -348,6 +349,10 @@ def check_sessions_changed(since: float = 0):
     Returns:
         {changed: bool, timestamp: float} - sub-10ms response time
     """
+    # Scan state files to detect state changes (active/waiting transitions)
+    # This updates the activity timestamp if any state file has changed
+    get_all_active_state_files()
+
     current = get_activity_timestamp()
     return {
         "changed": current > since,

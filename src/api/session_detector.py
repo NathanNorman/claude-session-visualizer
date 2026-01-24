@@ -29,9 +29,12 @@ def get_activity_timestamp() -> float:
     """Get the last activity timestamp for dirty-check endpoint."""
     return _last_activity_time
 
-# JSONL metadata cache: {path_str: (mtime, metadata_dict)}
-_metadata_cache: dict[str, tuple[float, dict]] = {}
+# JSONL metadata cache: {path_str: (mtime, cache_time, metadata_dict)}
+_metadata_cache: dict[str, tuple[float, float, dict]] = {}
 METADATA_CACHE_TTL = 60  # Max cache age in seconds
+
+# State file mtime cache for dirty-check: {session_id: mtime}
+_state_file_mtimes: dict[str, float] = {}
 
 # Continuation cache: {session_id: continuation_session_id or None}
 _continuation_cache: dict[str, str | None] = {}
@@ -206,19 +209,31 @@ def read_session_state(session_id: str, ignore_stale: bool = False) -> dict | No
 def get_all_active_state_files() -> dict[str, dict]:
     """Scan all state files and return valid (non-stale) ones.
 
+    Also updates activity timestamp if any state file has changed (for dirty-check).
+
     Returns:
         Dict mapping session_id -> state dict (includes cwd, transcript_path)
     """
+    global _state_file_mtimes
+
     if not STATE_DIR.exists():
         return {}
 
     now = time.time()
     active_states = {}
+    current_mtimes = {}
+    state_changed = False
 
     for state_file in STATE_DIR.glob("*.json"):
         try:
             mtime = state_file.stat().st_mtime
             age = now - mtime
+            session_id = state_file.stem
+
+            # Track mtime for dirty-check
+            current_mtimes[session_id] = mtime
+            if _state_file_mtimes.get(session_id) != mtime:
+                state_changed = True
 
             if age > STATE_FILE_MAX_AGE_SECONDS:
                 continue
@@ -238,6 +253,15 @@ def get_all_active_state_files() -> dict[str, dict]:
 
         except (json.JSONDecodeError, OSError, KeyError):
             continue
+
+    # Check for removed state files
+    if set(_state_file_mtimes.keys()) != set(current_mtimes.keys()):
+        state_changed = True
+
+    # Update mtime cache and activity timestamp
+    _state_file_mtimes = current_mtimes
+    if state_changed:
+        update_activity_timestamp()
 
     return active_states
 
