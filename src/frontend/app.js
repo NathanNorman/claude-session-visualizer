@@ -850,6 +850,11 @@ function createCard(session, index = 0) {
     const summaryLogEl = card.querySelector('.activity-summary-log');
     if (summaryLogEl && !summaryLogEl.classList.contains('empty')) {
         summaryLogEl.scrollTop = summaryLogEl.scrollHeight;
+        // Track when user manually scrolls away from bottom
+        summaryLogEl.addEventListener('scroll', () => {
+            const isAtBottom = summaryLogEl.scrollTop + summaryLogEl.clientHeight >= summaryLogEl.scrollHeight - 10;
+            summaryLogEl.dataset.userScrolledAway = isAtBottom ? '' : 'true';
+        });
     }
 
     // Make card clickable to focus iTerm tab
@@ -1391,13 +1396,26 @@ function updateCard(card, session) {
 
         // Check if summaries changed (new entries added)
         if (newSummaries.length !== prevSummaries.length) {
-            // Check if user has scrolled up before replacing
-            const wasAtBottom = summaryLogEl.scrollTop + summaryLogEl.clientHeight >= summaryLogEl.scrollHeight - 10;
+            // Check if user has manually scrolled away from bottom
+            const userScrolledAway = summaryLogEl.dataset.userScrolledAway === 'true';
+            const wasEmpty = summaryLogEl.classList.contains('empty');
             summaryLogEl.outerHTML = renderActivitySummaryLog(newSummaries);
-            // Re-query and scroll to bottom if user was at bottom
+            // Re-query and set up scroll tracking on new element
             const newLogEl = card.querySelector('.activity-summary-log');
-            if (newLogEl && wasAtBottom) {
-                newLogEl.scrollTop = newLogEl.scrollHeight;
+            if (newLogEl && !newLogEl.classList.contains('empty')) {
+                // Scroll to bottom unless user previously scrolled away
+                if (!userScrolledAway || wasEmpty) {
+                    newLogEl.scrollTop = newLogEl.scrollHeight;
+                }
+                // Preserve the userScrolledAway state (but not if it was empty before)
+                if (userScrolledAway && !wasEmpty) {
+                    newLogEl.dataset.userScrolledAway = 'true';
+                }
+                // Attach scroll listener to track user scroll
+                newLogEl.addEventListener('scroll', () => {
+                    const isAtBottom = newLogEl.scrollTop + newLogEl.clientHeight >= newLogEl.scrollHeight - 10;
+                    newLogEl.dataset.userScrolledAway = isAtBottom ? '' : 'true';
+                });
             }
         }
     }
