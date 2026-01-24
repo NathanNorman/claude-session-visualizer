@@ -1,13 +1,38 @@
-// Adaptive polling intervals
+// Dirty-check polling intervals (fast lightweight checks)
+const DIRTY_CHECK_INTERVAL = 500;     // 500ms dirty-check frequency
+const FULL_POLL_FALLBACK = 30000;     // 30s fallback if dirty-check fails
+
+// Legacy adaptive intervals (used when dirty-check unavailable)
 const POLL_INTERVAL_ACTIVE = 3000;    // 3s when sessions are active
 const POLL_INTERVAL_IDLE = 10000;     // 10s when all sessions idle
 let currentPollInterval = POLL_INTERVAL_ACTIVE;
 let pollTimeoutId = null;
 
+// Dirty-check state
+let lastKnownTimestamp = 0;
+let dirtyCheckEnabled = true;
+let dirtyCheckTimeoutId = null;
+
 const API_URL = '/api/sessions';
+const API_URL_CHANGED = '/api/sessions/changed';
 const API_URL_ALL = '/api/sessions/all';
 let previousSessions = new Map();
-const NOTES_KEY = 'session-notes';
+
+// Polecat avatar images for Gastown agents
+const POLECAT_IMAGES = [
+    'assets/polecats/polecat-rider.png',
+    'assets/polecats/polecat-scout.png',
+    'assets/polecats/polecat-pyro.png',
+    'assets/polecats/polecat-bandit.png',
+    'assets/polecats/polecat-sniper.png',
+    'assets/polecats/polecat-mechanic.png'
+];
+
+// Get consistent polecat image based on session/slug hash
+function getPolecatImage(identifier) {
+    const hash = (identifier || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+    return POLECAT_IMAGES[hash % POLECAT_IMAGES.length];
+}
 
 // Track if initial render has happened (for differential updates)
 let initialRenderComplete = false;
@@ -186,9 +211,8 @@ class SoundManager {
     }
 
     play(soundName) {
-        if (!this.enabled) return;
-        if (!this.userHasInteracted) return; // No sound until user clicks/types
-        if (!this.settings[soundName]?.enabled) return;
+        // EMERGENCY: Completely disabled
+        return;
 
         this.initAudioContext();
 
@@ -355,32 +379,6 @@ class MissionControlManager {
 }
 
 const missionControl = new MissionControlManager();
-
-// Feature 12: Session Notes - localStorage management
-function getNotes() {
-    const stored = localStorage.getItem(NOTES_KEY);
-    return stored ? JSON.parse(stored) : {};
-}
-
-function getNote(sessionId) {
-    return getNotes()[sessionId] || null;
-}
-
-function setNote(sessionId, note) {
-    const notes = getNotes();
-    notes[sessionId] = {
-        text: note.text,
-        tags: note.tags || [],
-        updated: new Date().toISOString()
-    };
-    localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
-}
-
-function deleteNote(sessionId) {
-    const notes = getNotes();
-    delete notes[sessionId];
-    localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
-}
 
 // Feature 11: Template management
 async function loadTemplates() {
@@ -608,12 +606,88 @@ async function fetchSessions() {
     }
 }
 
-// Adaptive polling: faster when active, slower when idle
+// Force refresh all session data
+async function forceRefreshSessions() {
+    showToast('Refreshing all session data...');
+    try {
+        // Force include summaries
+        const response = await fetch(`${API_URL}?include_summaries=true`);
+        if (!response.ok) throw new Error('API error');
+        const data = await response.json();
+
+        lastSummaryRefresh = Date.now();
+
+        // Clear and repopulate
+        previousSessions.clear();
+        data.sessions.forEach(s => previousSessions.set(s.sessionId, { ...s }));
+
+        // Force full render
+        renderCurrentSessions(data.sessions, true);
+
+        const activeCount = data.sessions.filter(s => s.state === 'active').length;
+        updateStatus(activeCount, data.sessions.length, data.timestamp);
+
+        showToast(`Refreshed ${data.sessions.length} sessions`);
+    } catch (error) {
+        console.error('Failed to refresh sessions:', error);
+        showToast('Failed to refresh sessions', 'error');
+    }
+}
+
+// Dirty-check polling: fast lightweight checks with full refresh only when needed
+async function pollForChanges() {
+    if (dirtyCheckTimeoutId) {
+        clearTimeout(dirtyCheckTimeoutId);
+    }
+
+    try {
+        const resp = await fetch(`${API_URL_CHANGED}?since=${lastKnownTimestamp}`);
+        if (!resp.ok) {
+            // Dirty-check endpoint not available, fall back to legacy polling
+            console.warn('Dirty-check unavailable, falling back to legacy polling');
+            dirtyCheckEnabled = false;
+            scheduleNextPoll(true);
+            return;
+        }
+
+        const data = await resp.json();
+
+        if (data.changed) {
+            lastKnownTimestamp = data.timestamp;
+            await fetchSessions();  // Full refresh - will call scheduleDirtyCheck
+        } else {
+            // No changes, schedule next dirty-check
+            scheduleDirtyCheck();
+        }
+    } catch (error) {
+        console.error('Dirty-check failed:', error);
+        // On error, fall back to legacy polling
+        dirtyCheckEnabled = false;
+        scheduleNextPoll(true);
+    }
+}
+
+// Schedule the next dirty-check poll
+function scheduleDirtyCheck() {
+    if (dirtyCheckTimeoutId) {
+        clearTimeout(dirtyCheckTimeoutId);
+    }
+    dirtyCheckTimeoutId = setTimeout(pollForChanges, DIRTY_CHECK_INTERVAL);
+}
+
+// Legacy adaptive polling: used as fallback when dirty-check unavailable
 function scheduleNextPoll(hasActiveSessions) {
     if (pollTimeoutId) {
         clearTimeout(pollTimeoutId);
     }
 
+    // If dirty-check is enabled, use that instead
+    if (dirtyCheckEnabled) {
+        scheduleDirtyCheck();
+        return;
+    }
+
+    // Fallback to legacy adaptive polling
     currentPollInterval = hasActiveSessions ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE;
 
     pollTimeoutId = setTimeout(() => {
@@ -623,113 +697,39 @@ function scheduleNextPoll(hasActiveSessions) {
 
 // Old renderSessions removed - replaced by renderCurrentSessions with grouping support
 
-function renderNote(session) {
-    const note = getNote(session.sessionId);
-    if (!note) {
+// Activity Summary Log Renderer - shows AI-generated summaries of session activity
+function renderActivitySummaryLog(entries) {
+    if (!entries || entries.length === 0) {
+        return '<div class="activity-summary-log empty">No activity summaries yet</div>';
+    }
+
+    const items = entries.map((entry, i) => {
+        const time = formatRelativeTime(entry.timestamp);
+        const isCurrent = i === entries.length - 1;
         return `
-            <div class="session-note empty" onclick="event.stopPropagation(); editNote('${session.sessionId}')">
-                <span class="add-note">+ Add note</span>
+            <div class="summary-entry ${isCurrent ? 'current' : ''}">
+                <span class="summary-time">${time}</span>
+                <span class="summary-text">${escapeHtml(entry.summary)}</span>
             </div>
         `;
-    }
+    }).join('');  // Oldest first, newest at bottom
 
-    return `
-        <div class="session-note" onclick="event.stopPropagation(); editNote('${session.sessionId}')">
-            <div class="note-header">
-                <span class="note-icon">📝</span>
-                ${note.tags?.length ? `
-                    <div class="note-tags">
-                        ${note.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
-                    </div>
-                ` : ''}
-            </div>
-            <div class="note-content">${escapeHtml(note.text)}</div>
-        </div>
-    `;
+    return `<div class="activity-summary-log">${items}</div>`;
 }
 
-function editNote(sessionId) {
-    const existing = getNote(sessionId);
+// Format timestamp to relative time (e.g., "2m ago", "1h ago")
+function formatRelativeTime(isoTimestamp) {
+    if (!isoTimestamp) return '';
+    const date = new Date(isoTimestamp);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
 
-    showModal(`
-        <div class="note-editor">
-            <h3>Session Note</h3>
-            <textarea id="note-text" placeholder="What is this session for?">${existing?.text || ''}</textarea>
-
-            <div class="tag-input">
-                <label>Tags:</label>
-                <div class="tags-container" id="note-tags">
-                    ${(existing?.tags || []).map(t =>
-                        `<span class="tag">${escapeHtml(t)} <button onclick="removeTag(this)">×</button></span>`
-                    ).join('')}
-                    <input type="text" id="new-tag" placeholder="Add tag..."
-                           onkeydown="if(event.key==='Enter') addTag()">
-                </div>
-            </div>
-
-            <div class="modal-actions">
-                ${existing ? `<button class="danger" onclick="deleteNoteAndClose('${sessionId}')">Delete</button>` : ''}
-                <button onclick="closeModal()">Cancel</button>
-                <button class="primary" onclick="saveNoteAndClose('${sessionId}')">Save</button>
-            </div>
-        </div>
-    `);
-}
-
-function saveNoteAndClose(sessionId) {
-    const text = document.getElementById('note-text').value.trim();
-    const tagEls = document.querySelectorAll('#note-tags .tag');
-    const tags = Array.from(tagEls).map(el => el.textContent.replace('×', '').trim());
-
-    if (text) {
-        setNote(sessionId, { text, tags });
-    } else {
-        deleteNote(sessionId);
-    }
-
-    closeModal();
-
-    // Immediately update the note display on the card
-    updateNoteDisplay(sessionId);
-}
-
-function deleteNoteAndClose(sessionId) {
-    deleteNote(sessionId);
-    closeModal();
-
-    // Immediately update the note display on the card
-    updateNoteDisplay(sessionId);
-}
-
-function updateNoteDisplay(sessionId) {
-    const card = document.querySelector(`[data-session-id="${sessionId}"]`);
-    if (!card) return;
-
-    const noteEl = card.querySelector('.session-note');
-    if (!noteEl) return;
-
-    const session = previousSessions.get(sessionId) || { sessionId };
-    const noteHtml = renderNote(session);
-    const temp = document.createElement('div');
-    temp.innerHTML = noteHtml;
-    noteEl.replaceWith(temp.firstElementChild);
-}
-
-function addTag() {
-    const input = document.getElementById('new-tag');
-    const tag = input.value.trim();
-    if (!tag) return;
-
-    const container = document.getElementById('note-tags');
-    const tagEl = document.createElement('span');
-    tagEl.className = 'tag';
-    tagEl.innerHTML = `${escapeHtml(tag)} <button onclick="removeTag(this)">×</button>`;
-    container.insertBefore(tagEl, input);
-    input.value = '';
-}
-
-function removeTag(btn) {
-    btn.parentElement.remove();
+    if (diffMins < 1) return 'now';
+    if (diffMins < 60) return `${diffMins}m`;
+    if (diffHours < 24) return `${diffHours}h`;
+    return `${Math.floor(diffHours / 24)}d`;
 }
 
 function createCard(session, index = 0) {
@@ -744,6 +744,26 @@ function createCard(session, index = 0) {
     const summaryHtml = session.summary
         ? `<div class="summary">${escapeHtml(session.summary)}</div>`
         : '';
+
+    // Activity status for Mission Control style display
+    const activityStatus = getActivityStatus(session.lastActivity);
+    let stateEmoji = '🟢';  // active
+    if (session.state !== 'active') {
+        stateEmoji = activityStatus.isStale ? '🟠' : '🟡';
+    }
+
+    // Activity badge HTML
+    let activityBadgeHtml = '';
+    if (session.state === 'active') {
+        activityBadgeHtml = '<span class="active-indicator">just now</span>';
+    } else if (activityStatus.text) {
+        activityBadgeHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
+    } else {
+        activityBadgeHtml = '<span class="idle-indicator">idle</span>';
+    }
+
+    // Session duration
+    const duration = formatAgentDuration(session.startTimestamp) || '0m';
 
 
     // Feature 20: Git Status display
@@ -761,27 +781,13 @@ function createCard(session, index = 0) {
         </div>
     ` : '';
 
-    const activityLogHtml = formatActivityLog(session.recentActivity || []);
-    const noteHtml = renderNote(session);
+    // Activity summary log (AI-generated summaries)
+    const activitySummaryLogHtml = renderActivitySummaryLog(session.activitySummaries);
 
     // State source indicator (hooks = real-time, polling = heuristic)
     const stateIcon = session.stateSource === 'hooks' ? '<span class="state-source-indicator" title="Real-time hooks detection">⚡</span>' : '';
 
     // Current activity display (only when hooks-based and active)
-    let currentActivityHtml = '';
-    if (session.currentActivity && session.state === 'active') {
-        let activityText = session.currentActivity.description || session.currentActivity.tool_name || '';
-        if (activityText.length > 35) {
-            activityText = activityText.substring(0, 32) + '...';
-        }
-        if (activityText) {
-            const animatedIcon = renderAnimatedActivity(session.sessionId, session.currentActivity);
-            currentActivityHtml = `<div class="current-activity ${session.currentActivity.type === 'tool_use' ? 'tool-running' : ''}" title="What Claude is doing right now">${animatedIcon} Running: ${escapeHtml(activityText)}</div>`;
-            // Start animation loop if not running
-            setTimeout(startAnimationLoop, 0);
-        }
-    }
-
     // Agent tree display (spawned agents)
     const agentTreeHtml = renderAgentTree(session.spawnedAgents);
 
@@ -791,13 +797,16 @@ function createCard(session, index = 0) {
     // Emoji activity trail (hieroglyphic history)
     const activityTrailHtml = renderEmojiTrail(session.activityLog, session.state === 'active');
 
+    // Polecat avatar for Gastown agents
+    const agentType = session.isGastown ? getGastownAgentType(session.gastownRole || session.slug) : null;
+    const polecatAvatarHtml = (agentType?.type === 'polecat')
+        ? `<img class="polecat-avatar" src="${getPolecatImage(session.slug)}" alt="Polecat" />`
+        : '';
+
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
         <div class="card-header">
-            <span class="status-badge ${session.state}">
-                <span class="status-indicator"></span>
-                ${session.state}${stateIcon}
-            </span>
+            <div class="slug">${stateEmoji} ${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</div>
             <div class="card-actions">
                 <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${session.sessionId}')">⋮</button>
                 <div class="action-menu hidden" id="menu-${session.sessionId}">
@@ -813,42 +822,34 @@ function createCard(session, index = 0) {
                 </div>
             </div>
         </div>
-        <div class="slug">${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.slug).css}" title="${getGastownAgentType(session.slug).label}">${getGastownAgentType(session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</div>
-        ${summaryHtml}
-        ${noteHtml}
-        ${gitHtml}
-        ${formatTokenBar(session.contextTokens)}
-        ${currentActivityHtml}
-        ${activityTrailHtml}
-        ${agentTreeHtml}
-        ${backgroundShellsHtml}
-        <div class="activity-log">${activityLogHtml}</div>
-        <div class="card-footer">
+        <div class="card-body">
+            ${polecatAvatarHtml}
+            ${summaryHtml}
+            ${activityTrailHtml}
+            ${agentTreeHtml}
+            ${backgroundShellsHtml}
+            ${activitySummaryLogHtml}
+        </div>
+        <div class="card-bottom">
+            ${formatTokenBar(session.contextTokens)}
+            <div class="card-footer">
             <div class="meta">
                 <span>PID: ${session.pid || '--'}</span>
-                <span>CPU: ${formatCpu(session.cpuPercent)}%</span>
-                <span>${formatTime(session.lastActivity)}</span>
             </div>
-            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')" title="View Metrics">📊</button>
+            <div class="footer-right">
+                <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
+                ${activityBadgeHtml}
+                <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')" title="View Metrics">📊</button>
+            </div>
+            </div>
         </div>`;
 
     // No fade-in animation - cards appear instantly for visual stability
 
-    // Auto-scroll activity log to bottom, but respect manual scroll
-    const logEl = card.querySelector('.activity-log');
-    if (logEl) {
-        // Defer scroll until after DOM is fully rendered
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                logEl.scrollTop = logEl.scrollHeight;
-            });
-        });
-        // Track if user manually scrolls
-        logEl.dataset.userScrolled = 'false';
-        logEl.addEventListener('scroll', () => {
-            const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 20;
-            logEl.dataset.userScrolled = atBottom ? 'false' : 'true';
-        });
+    // Auto-scroll activity summary log to bottom (newest entries at bottom)
+    const summaryLogEl = card.querySelector('.activity-summary-log');
+    if (summaryLogEl && !summaryLogEl.classList.contains('empty')) {
+        summaryLogEl.scrollTop = summaryLogEl.scrollHeight;
     }
 
     // Make card clickable to focus iTerm tab
@@ -871,15 +872,43 @@ function createCompactCard(session, index = 0) {
 
     const latestActivity = (session.recentActivity || [])[0] || 'Idle';
 
+    // Session duration
+    const duration = formatAgentDuration(session.startTimestamp) || '0m';
+
+    // Show activity status - consistent with Mission Control
+    // Active sessions show "just now", non-active show idle time
+    const activityStatus = getActivityStatus(session.lastActivity);
+    let activityHtml = '';
+    if (session.state === 'active') {
+        activityHtml = '<span class="active-indicator">just now</span>';
+    } else {
+        if (activityStatus.text) {
+            activityHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
+        } else {
+            activityHtml = '<span class="idle-indicator">idle</span>';
+        }
+    }
+
+    // State emoji like Mission Control
+    let stateEmoji = '🟢';  // active
+    if (session.state !== 'active') {
+        stateEmoji = activityStatus.isStale ? '🟠' : '🟡';  // orange for stale, yellow for idle
+    }
+
+    // Gastown role icon
+    const roleIcon = session.isGastown
+        ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> `
+        : '';
+
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
-        <div class="compact-row">
-            <span class="status-dot ${session.state}"></span>
-            <span class="compact-slug">${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.slug).css}">${getGastownAgentType(session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</span>
-            <span class="compact-tokens ${tokenClass}">${Math.round(tokenPct)}%</span>
+        <div class="compact-name">${stateEmoji} ${roleIcon}${escapeHtml(session.slug)}</div>
+        <div class="compact-meta">
+            <span>${duration}</span>
+            <span>${Math.round(tokenPct)}% ctx</span>
+            ${activityHtml}
             <button class="compact-expand" onclick="event.stopPropagation(); expandCard('${session.sessionId}')" title="Show details">▼</button>
         </div>
-        <div class="compact-activity">${escapeHtml(latestActivity)}</div>
     `;
 
     card.style.cursor = 'pointer';
@@ -1021,134 +1050,10 @@ function closeAllMenus() {
     document.querySelectorAll('.action-menu').forEach(m => m.classList.add('hidden'));
 }
 
-// Feature 15: AI Summary refresh
+// Feature 15: AI Summary - now auto-generated on activity change
 async function refreshSummary(sessionId) {
     closeAllMenus();
-    showToast('Generating AI summary...');
-
-    try {
-        const response = await fetch(`/api/sessions/${sessionId}/summary?force_refresh=true`, {
-            method: 'POST'
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            showToast(`Failed: ${error.detail || 'Unknown error'}`, 'error');
-            return;
-        }
-
-        const data = await response.json();
-        const card = document.querySelector(`[data-session-id="${sessionId}"]`);
-
-        // Save AI summary to notes - PREPEND to top of existing notes
-        const existingNote = getNote(sessionId);
-        const timestamp = new Date().toLocaleTimeString();
-        const newEntry = `[${timestamp}] AI:\n${data.summary}`;
-        const combinedText = existingNote?.text
-            ? `${newEntry}\n\n${existingNote.text}`
-            : newEntry;
-        const combinedTags = existingNote?.tags || [];
-        if (!combinedTags.includes('ai-generated')) {
-            combinedTags.push('ai-generated');
-        }
-        setNote(sessionId, { text: combinedText, tags: combinedTags });
-
-        // Update the note display on the card
-        if (card) {
-            const noteEl = card.querySelector('.session-note');
-            const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
-            if (noteEl) {
-                noteEl.outerHTML = `
-                    <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
-                        <div class="note-header">
-                            <span class="note-icon">📝</span>
-                            <div class="note-tags">${tagsHtml}</div>
-                        </div>
-                        <div class="note-content">${escapeHtml(combinedText)}</div>
-                    </div>
-                `;
-            }
-        }
-
-        showToast('AI summary added to notes!');
-    } catch (e) {
-        console.error('Failed to refresh summary:', e);
-        showToast('Failed to refresh summary', 'error');
-    }
-}
-
-// Refresh all AI summaries for non-gastown sessions with new activity
-async function refreshAllSummaries() {
-    const btn = document.getElementById('refresh-all-summaries');
-    if (btn) btn.disabled = true;
-
-    showToast('Refreshing AI summaries...');
-
-    try {
-        const response = await fetch('/api/sessions/refresh-all-summaries', {
-            method: 'POST'
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            showToast(`Failed: ${error.detail || 'Unknown error'}`, 'error');
-            return;
-        }
-
-        const data = await response.json();
-
-        // Save summaries to notes and update cards
-        for (const item of data.details.refreshed) {
-            const sessionId = item.sessionId;
-            const summary = item.summary;
-
-            // Save to notes - PREPEND to top of existing notes
-            const existingNote = getNote(sessionId);
-            const timestamp = new Date().toLocaleTimeString();
-            const newEntry = `[${timestamp}] AI:\n${summary}`;
-            const combinedText = existingNote?.text
-                ? `${newEntry}\n\n${existingNote.text}`
-                : newEntry;
-            const combinedTags = existingNote?.tags || [];
-            if (!combinedTags.includes('ai-generated')) {
-                combinedTags.push('ai-generated');
-            }
-            setNote(sessionId, { text: combinedText, tags: combinedTags });
-
-            // Update note display on card
-            const card = document.querySelector(`[data-session-id="${sessionId}"]`);
-            if (card) {
-                const noteEl = card.querySelector('.session-note');
-                if (noteEl) {
-                    const tagsHtml = combinedTags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
-                    noteEl.outerHTML = `
-                        <div class="session-note" onclick="event.stopPropagation(); editNote('${sessionId}')">
-                            <div class="note-header">
-                                <span class="note-icon">📝</span>
-                                <div class="note-tags">${tagsHtml}</div>
-                            </div>
-                            <div class="note-content">${escapeHtml(combinedText)}</div>
-                        </div>
-                    `;
-                }
-            }
-        }
-
-        const skippedNoActivity = data.details.skipped.filter(s => s.reason === 'no_new_activity').length;
-        const skippedGastown = data.details.skipped.filter(s => s.reason === 'gastown').length;
-
-        let message = `Updated ${data.refreshed} summaries`;
-        if (skippedNoActivity > 0) {
-            message += `, ${skippedNoActivity} unchanged`;
-        }
-        showToast(message);
-
-    } catch (e) {
-        console.error('Failed to refresh all summaries:', e);
-        showToast('Failed to refresh summaries', 'error');
-    } finally {
-        if (btn) btn.disabled = false;
-    }
+    showToast('AI summaries are now generated automatically when activity changes');
 }
 
 // Feature 16: Session sharing
@@ -1429,12 +1334,17 @@ async function focusWarpTab(session) {
 function updateCard(card, session) {
     const prev = previousSessions.get(session.sessionId);
 
+    // For compact cards, replace entirely to avoid complex partial updates
+    if (card.classList.contains('compact')) {
+        const index = parseInt(card.querySelector('.card-number')?.textContent || '1') - 1;
+        const newCard = createCompactCard(session, index);
+        card.replaceWith(newCard);
+        return;
+    }
+
     if (!prev || prev.state !== session.state) {
         card.classList.remove('active', 'waiting');
         card.classList.add(session.state);
-        const badge = card.querySelector('.status-badge');
-        badge.className = `status-badge ${session.state}`;
-        badge.innerHTML = `<span class="status-indicator"></span>${session.state}`;
 
         // Update activity trail - remove pulse animation when session goes idle
         const lastTrailEmoji = card.querySelector('.trail-emoji:last-child');
@@ -1473,20 +1383,21 @@ function updateCard(card, session) {
         tokenUsageEl.title = `${session.contextTokens.toLocaleString()} / ${MAX_CONTEXT_TOKENS.toLocaleString()} tokens`;
     }
 
-    // Update activity log
-    const logEl = card.querySelector('.activity-log');
-    if (logEl) {
-        const newActivity = session.recentActivity || [];
-        const prevActivity = prev?.recentActivity || [];
+    // Update activity summary log (AI-generated summaries)
+    const summaryLogEl = card.querySelector('.activity-summary-log');
+    if (summaryLogEl) {
+        const newSummaries = session.activitySummaries || [];
+        const prevSummaries = prev?.activitySummaries || [];
 
-        // Check if activity changed
-        if (JSON.stringify(newActivity) !== JSON.stringify(prevActivity)) {
-            logEl.innerHTML = formatActivityLog(newActivity);
-            // Only auto-scroll if user hasn't manually scrolled up
-            if (logEl.dataset.userScrolled !== 'true') {
-                requestAnimationFrame(() => {
-                    logEl.scrollTop = logEl.scrollHeight;
-                });
+        // Check if summaries changed (new entries added)
+        if (newSummaries.length !== prevSummaries.length) {
+            // Check if user has scrolled up before replacing
+            const wasAtBottom = summaryLogEl.scrollTop + summaryLogEl.clientHeight >= summaryLogEl.scrollHeight - 10;
+            summaryLogEl.outerHTML = renderActivitySummaryLog(newSummaries);
+            // Re-query and scroll to bottom if user was at bottom
+            const newLogEl = card.querySelector('.activity-summary-log');
+            if (newLogEl && wasAtBottom) {
+                newLogEl.scrollTop = newLogEl.scrollHeight;
             }
         }
     }
@@ -1494,62 +1405,44 @@ function updateCard(card, session) {
     // Update current activity display (hooks-based real-time activity)
     updateCurrentActivity(card, session, prev);
 
-    // Update note display (notes are stored in localStorage, not server)
-    const noteEl = card.querySelector('.session-note');
-    if (noteEl) {
-        const noteHtml = renderNote(session);
-        const temp = document.createElement('div');
-        temp.innerHTML = noteHtml;
-        noteEl.replaceWith(temp.firstElementChild);
+    card.querySelector('.meta').innerHTML = `
+        <span>PID: ${session.pid || '--'}</span>`;
+
+    // Update footer-right with duration and activity badge
+    const footerRight = card.querySelector('.footer-right');
+    if (footerRight) {
+        const duration = formatAgentDuration(session.startTimestamp) || '0m';
+        const activityStatus = getActivityStatus(session.lastActivity);
+        let activityBadgeHtml = '';
+        if (session.state === 'active') {
+            activityBadgeHtml = '<span class="active-indicator">just now</span>';
+        } else if (activityStatus.text && !activityStatus.isActive) {
+            activityBadgeHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
+        }
+        footerRight.innerHTML = `
+            <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
+            ${activityBadgeHtml}
+            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')" title="View Metrics">📊</button>`;
     }
 
-    card.querySelector('.meta').innerHTML = `
-        <span>PID: ${session.pid || '--'}</span>
-        <span>CPU: ${formatCpu(session.cpuPercent)}%</span>
-        <span>${formatTime(session.lastActivity)}</span>`;
+    // Update slug with state emoji
+    const slugEl = card.querySelector('.slug');
+    if (slugEl) {
+        const activityStatus = getActivityStatus(session.lastActivity);
+        let stateEmoji = '🟢';
+        if (session.state !== 'active') {
+            stateEmoji = activityStatus.isStale ? '🟠' : '🟡';
+        }
+        const gastownIcon = session.isGastown
+            ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> `
+            : '';
+        slugEl.innerHTML = `${stateEmoji} ${gastownIcon}${escapeHtml(session.slug)}`;
+    }
 }
 
-// Update current activity element (hooks-based real-time activity)
+// Update current activity element - DISABLED (feature removed, redundant with activity logs)
 function updateCurrentActivity(card, session, prev) {
-    // Only update if activity has changed
-    if (prev && !hasActivityChanged(prev, session)) return;
-
-    const currentActivityEl = card.querySelector('.current-activity');
-    const activityLog = card.querySelector('.activity-log');
-
-    // Check if we should show current activity
-    if (session.currentActivity && session.state === 'active') {
-        let activityText = session.currentActivity.description || session.currentActivity.tool_name || '';
-        if (activityText.length > 35) {
-            activityText = activityText.substring(0, 32) + '...';
-        }
-
-        if (activityText) {
-            const animatedIcon = renderAnimatedActivity(session.sessionId, session.currentActivity);
-            const isToolRunning = session.currentActivity.type === 'tool_use';
-
-            if (currentActivityEl) {
-                // Update existing element
-                currentActivityEl.className = `current-activity ${isToolRunning ? 'tool-running' : ''}`;
-                currentActivityEl.title = 'What Claude is doing right now';
-                currentActivityEl.innerHTML = `${animatedIcon} Running: ${escapeHtml(activityText)}`;
-            } else if (activityLog) {
-                // Create new element and insert before activity log
-                const newActivityEl = document.createElement('div');
-                newActivityEl.className = `current-activity ${isToolRunning ? 'tool-running' : ''}`;
-                newActivityEl.title = 'What Claude is doing right now';
-                newActivityEl.innerHTML = `${animatedIcon} Running: ${escapeHtml(activityText)}`;
-                activityLog.parentNode.insertBefore(newActivityEl, activityLog);
-            }
-            // Start animation loop
-            setTimeout(startAnimationLoop, 0);
-        } else if (currentActivityEl) {
-            currentActivityEl.remove();
-        }
-    } else if (currentActivityEl) {
-        // Remove element if session is not active or has no current activity
-        currentActivityEl.remove();
-    }
+    // No-op - current activity display was removed
 }
 
 function formatTime(isoString) {
@@ -1607,6 +1500,29 @@ function formatTokenBar(tokens) {
 function formatCpu(cpu) {
     if (cpu === null || cpu === undefined) return '--';
     return cpu.toFixed(1);
+}
+
+// Convert hooks-based activityLog to format for formatActivityLog
+function convertActivityLogForDisplay(activityLog) {
+    if (!activityLog || activityLog.length === 0) return null;
+
+    const result = [];
+    for (const entry of activityLog) {
+        if (entry.event === 'PostToolUse' && entry.tool) {
+            result.push({
+                text: entry.description || entry.tool,
+                timestamp: entry.timestamp
+            });
+        } else if (entry.event === 'UserPromptSubmit') {
+            result.push({
+                text: '💬 User message',
+                timestamp: entry.timestamp
+            });
+        }
+    }
+
+    // Return last 15 items
+    return result.length > 0 ? result.slice(-15) : null;
 }
 
 function formatActivityLog(activities) {
@@ -2012,6 +1928,57 @@ function formatAgentDuration(startedAt) {
     }
 }
 
+// Format activity status based on lastActivity timestamp
+// Returns { isActive: bool, text: string, class: string }
+function getActivityStatus(lastActivity) {
+    if (!lastActivity) return { isActive: false, isStale: false, text: '', class: '' };
+    try {
+        const last = new Date(lastActivity);
+        const now = new Date();
+        const diffMs = now - last;
+        const diffSecs = Math.floor(diffMs / 1000);
+        const diffMins = Math.floor(diffMs / 60000);
+
+        // Active if activity within last 60 seconds
+        if (diffSecs < 60) {
+            return {
+                isActive: true,
+                isStale: false,
+                text: diffSecs < 5 ? 'just now' : `${diffSecs}s active`,
+                class: 'active-indicator'
+            };
+        }
+
+        // Stale: >1 min and <1 hour idle (orange)
+        if (diffMins < 60) {
+            return {
+                isActive: false,
+                isStale: true,
+                text: `${diffMins}m idle`,
+                class: 'stale-indicator'
+            };
+        }
+
+        // Idle: >= 1 hour (yellow)
+        const hours = Math.floor(diffMins / 60);
+        const mins = diffMins % 60;
+        return {
+            isActive: false,
+            isStale: false,
+            text: `${hours}h ${mins}m idle`,
+            class: 'idle-indicator'
+        };
+    } catch {
+        return { isActive: false, isStale: false, text: '', class: '' };
+    }
+}
+
+// Backwards-compatible wrapper
+function formatIdleTime(lastActivity) {
+    const status = getActivityStatus(lastActivity);
+    return status.isActive ? '' : status.text;
+}
+
 // Render agent tree for session card
 function renderAgentTree(agents) {
     if (!agents || agents.length === 0) return '';
@@ -2097,6 +2064,30 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+/**
+ * Get emoji for a tool name (used in activity trails)
+ */
+function getToolEmoji(tool) {
+    const toolEmojis = {
+        'Read': '📖',
+        'Write': '✍️',
+        'Edit': '✏️',
+        'Bash': '💻',
+        'Grep': '🔍',
+        'Glob': '📁',
+        'Task': '🤖',
+        'TodoWrite': '📋',
+        'WebFetch': '🌐',
+        'AskUserQuestion': '❓',
+        'NotebookEdit': '📓',
+        'MultiEdit': '✏️',
+        'Skill': '⚡',
+        'EnterPlanMode': '📝',
+        'ExitPlanMode': '✅',
+    };
+    return toolEmojis[tool] || '🔧';
+}
+
 function updateStatus(activeCount, totalCount, timestamp) {
     const label = activeCount > 0
         ? `${activeCount} active, ${totalCount - activeCount} waiting`
@@ -2178,9 +2169,15 @@ function groupSessionsByProject(sessions) {
             groups[project].activeCount++;
         }
     }
-    // Stable sort: alphabetically by name, NOT by active count
-    // This prevents groups from jumping around when session states change
-    return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name));
+    // Sort: repos with active sessions first, then alphabetically within each tier
+    return Object.values(groups).sort((a, b) => {
+        // First by active count (descending) - repos with active sessions come first
+        if (a.activeCount !== b.activeCount) {
+            return b.activeCount - a.activeCount;
+        }
+        // Then alphabetically for stability
+        return a.name.localeCompare(b.name);
+    });
 }
 
 function toggleGroup(projectName) {
@@ -2201,11 +2198,23 @@ function renderGroups(groups) {
         const groupDiv = document.createElement('div');
         groupDiv.className = 'session-row';
 
-        // Left side: repo name
+        // Get git status from first session (all sessions in group share same repo)
+        const firstSession = group.sessions[0];
+        const git = firstSession?.git;
+        const gitStatusHtml = git ? `
+            <div class="row-git-status">
+                <span class="git-branch">🌿 ${escapeHtml(git.branch)}</span>
+                ${git.uncommitted ? `<span class="git-uncommitted">⚠️ ${git.modified_count} uncommitted</span>` : '<span class="git-clean">✓ clean</span>'}
+                ${git.ahead > 0 ? `<span class="git-ahead">↑${git.ahead}</span>` : ''}
+            </div>
+        ` : '';
+
+        // Left side: repo name + git status
         const labelDiv = document.createElement('div');
         labelDiv.className = 'session-row-label';
         labelDiv.innerHTML = `
             <span class="row-name">${escapeHtml(group.name)}</span>
+            ${gitStatusHtml}
             <span class="row-stats">
                 ${group.sessions.length}${group.activeCount > 0 ? ` <span class="row-active">(${group.activeCount} active)</span>` : ''}
             </span>
@@ -2326,6 +2335,7 @@ function getGastownAgentType(slug) {
     if (s === 'deacon' || s.includes('deacon')) return { type: 'deacon', icon: '✟', label: 'Deacon', css: 'gt-deacon' };
     if (s === 'mayor') return { type: 'mayor', icon: '♔', label: 'Mayor', css: 'gt-mayor' };
     if (s === 'spa' || s === 'bff') return { type: 'service', icon: '◈', label: s.toUpperCase(), css: 'gt-service' };
+    if (s === 'gastown' || s === 'gt') return { type: 'gastown', icon: '🏭', label: 'Gas Town', css: 'gt-hq' };
 
     // Polecats have adjective-verb-noun names (3 parts with hyphens)
     const parts = s.split('-');
@@ -2362,23 +2372,32 @@ function groupGastownByRepo(sessions) {
             repoName = parts[2]; // /Users/username/REPO/...
 
             // Special case: if in 'gt' (gastown) directory
-            if (repoName === 'gt' && parts.length >= 4) {
-                const rigOrHq = parts[3];
-                // Check if it's an HQ-level agent (deacon, mayor) vs a rig
-                if (GT_HQ_AGENTS.includes(rigOrHq)) {
+            if (repoName === 'gt') {
+                if (parts.length >= 4) {
+                    const rigOrHq = parts[3];
+                    // Check if it's an HQ-level agent (deacon, mayor) vs a rig
+                    if (GT_HQ_AGENTS.includes(rigOrHq)) {
+                        repoName = 'Gas Town HQ';
+                    } else {
+                        repoName = rigOrHq; // It's a rig name = actual repo
+                    }
+                } else if (GT_HQ_AGENTS.includes(session.gastownRole)) {
+                    // Agent in /gt root with HQ role (e.g., mayor)
                     repoName = 'Gas Town HQ';
-                } else {
-                    repoName = rigOrHq; // It's a rig name = actual repo
                 }
             }
         } else if (parts.length >= 3 && parts[0] === 'home') {
             repoName = parts[2]; // /home/username/REPO/...
-            if (repoName === 'gt' && parts.length >= 4) {
-                const rigOrHq = parts[3];
-                if (GT_HQ_AGENTS.includes(rigOrHq)) {
+            if (repoName === 'gt') {
+                if (parts.length >= 4) {
+                    const rigOrHq = parts[3];
+                    if (GT_HQ_AGENTS.includes(rigOrHq)) {
+                        repoName = 'Gas Town HQ';
+                    } else {
+                        repoName = rigOrHq;
+                    }
+                } else if (GT_HQ_AGENTS.includes(session.gastownRole)) {
                     repoName = 'Gas Town HQ';
-                } else {
-                    repoName = rigOrHq;
                 }
             }
         } else if (parts.length > 0) {
@@ -2719,7 +2738,7 @@ function showNotificationSettings() {
                 <label class="setting-toggle">
                     <input type="checkbox" id="notify-enabled"
                            ${notificationSettings.enabled ? 'checked' : ''}
-                           onchange="toggleNotificationSetting('enabled')">
+                           onchange="toggleNotificationSetting('enabled', this)">
                     <span>Enable desktop notifications</span>
                 </label>
             </div>
@@ -2730,7 +2749,7 @@ function showNotificationSettings() {
                     <label class="setting-toggle">
                         <input type="checkbox" id="notify-active"
                                ${notificationSettings.onActive ? 'checked' : ''}
-                               onchange="toggleNotificationSetting('onActive')">
+                               onchange="toggleNotificationSetting('onActive', this)">
                         <span>🟢 Session became active</span>
                     </label>
                     <p class="setting-desc">Notify when a waiting session starts working</p>
@@ -2739,7 +2758,7 @@ function showNotificationSettings() {
                     <label class="setting-toggle">
                         <input type="checkbox" id="notify-waiting"
                                ${notificationSettings.onWaiting ? 'checked' : ''}
-                               onchange="toggleNotificationSetting('onWaiting')">
+                               onchange="toggleNotificationSetting('onWaiting', this)">
                         <span>🔵 Session needs input</span>
                     </label>
                     <p class="setting-desc">Notify when an active session becomes idle (can be noisy)</p>
@@ -2748,7 +2767,7 @@ function showNotificationSettings() {
                     <label class="setting-toggle">
                         <input type="checkbox" id="notify-warning"
                                ${notificationSettings.onWarning ? 'checked' : ''}
-                               onchange="toggleNotificationSetting('onWarning')">
+                               onchange="toggleNotificationSetting('onWarning', this)">
                         <span>⚠️ Context warning (80%)</span>
                     </label>
                     <p class="setting-desc">Notify when a session reaches 80% context capacity</p>
@@ -2764,8 +2783,8 @@ function showNotificationSettings() {
     `);
 }
 
-function toggleNotificationSetting(setting) {
-    notificationSettings[setting] = !notificationSettings[setting];
+function toggleNotificationSetting(setting, checkbox) {
+    notificationSettings[setting] = checkbox.checked;
     saveNotificationSettings();
     updateNotificationToggleUI();
 }
@@ -2816,8 +2835,8 @@ async function enableNotifications() {
 }
 
 function sendNotification(title, body, options = {}) {
-    if (!notificationSettings.enabled) return;
-    if (Notification.permission !== 'granted') return;
+    // EMERGENCY: Completely disabled
+    return;
     const notification = new Notification(title, {
         body,
         icon: '/favicon.ico',
@@ -2840,6 +2859,9 @@ function sendNotification(title, body, options = {}) {
 }
 
 function checkStateChanges(oldSessions, newSessions) {
+    // EMERGENCY: Completely disabled
+    return;
+
     const oldMap = new Map(oldSessions.map(s => [s.sessionId, s]));
     for (const session of newSessions) {
         const old = oldMap.get(session.sessionId);
@@ -3055,13 +3077,21 @@ document.addEventListener('DOMContentLoaded', () => {
 // Feature 05: Session Timeline Implementation
 // ============================================================================
 
-let timelineHours = 8; // Show last 8 hours (configurable)
+let timelineHours = parseInt(localStorage.getItem('timelineHours') || '8', 10); // Show last 8 hours (configurable)
 let timelineData = new Map(); // sessionId -> activityPeriods
 let timelineViewActive = false;
 
 function changeTimelineRange(hours) {
     timelineHours = parseInt(hours, 10);
+    localStorage.setItem('timelineHours', timelineHours);
     refreshTimeline();
+}
+
+function syncTimelineRangeSelect() {
+    const select = document.getElementById('timeline-range-select');
+    if (select) {
+        select.value = timelineHours.toString();
+    }
 }
 
 async function fetchSessionTimeline(sessionId) {
@@ -3080,37 +3110,73 @@ async function refreshTimeline() {
     if (!timelineViewActive) return;
 
     const container = document.getElementById('timeline-container');
-    const sessions = Array.from(previousSessions.values());
-
-    if (sessions.length === 0) {
-        container.innerHTML = `
-            <div class="timeline-empty">
-                <p>No active sessions to show on timeline.</p>
-                <p>Start a Claude Code session to see activity here.</p>
-            </div>
-        `;
-        return;
-    }
-
     container.innerHTML = '<div class="timeline-loading">Loading timeline data...</div>';
 
-    // Fetch timeline data for all sessions in parallel
-    const timelinePromises = sessions.map(async (session) => {
-        const periods = await fetchSessionTimeline(session.sessionId);
-        return { session, periods };
-    });
+    try {
+        // Fetch all sessions with activity in the time window (including closed ones)
+        const response = await fetch(`/api/timeline/sessions?hours=${timelineHours}`);
+        if (!response.ok) throw new Error('Failed to fetch timeline sessions');
 
-    const results = await Promise.all(timelinePromises);
+        const data = await response.json();
+        const sessions = data.sessions || [];
 
-    // Store timeline data
-    results.forEach(({ session, periods }) => {
-        if (periods) {
-            timelineData.set(session.sessionId, periods);
+        if (sessions.length === 0) {
+            container.innerHTML = `
+                <div class="timeline-empty">
+                    <p>No sessions with activity in the last ${timelineHours} hours.</p>
+                    <p>Start a Claude Code session to see activity here.</p>
+                </div>
+            `;
+            return;
         }
-    });
 
-    // Render the timeline
-    renderTimeline(sessions);
+        // Fetch timeline data for all sessions in parallel
+        const timelinePromises = sessions.map(async (session) => {
+            const periods = await fetchSessionTimeline(session.sessionId);
+            return { session, periods };
+        });
+
+        const results = await Promise.all(timelinePromises);
+
+        // Calculate visible time window
+        const now = Date.now();
+        const windowStart = now - (timelineHours * 60 * 60 * 1000);
+
+        // Store timeline data and filter to sessions with activity IN THE VISIBLE WINDOW
+        const sessionsWithActivity = [];
+        results.forEach(({ session, periods }) => {
+            if (!periods || periods.length === 0) return;
+
+            // Check if any period overlaps with the visible time window
+            const hasVisibleActivity = periods.some(period => {
+                const periodStart = new Date(period.start).getTime();
+                const periodEnd = new Date(period.end).getTime();
+                // Period overlaps if it ends after window start AND starts before now
+                return periodEnd >= windowStart && periodStart <= now;
+            });
+
+            if (hasVisibleActivity) {
+                timelineData.set(session.sessionId, periods);
+                sessionsWithActivity.push(session);
+            }
+        });
+
+        if (sessionsWithActivity.length === 0) {
+            container.innerHTML = `
+                <div class="timeline-empty">
+                    <p>No activity found in the last ${timelineHours} hours.</p>
+                </div>
+            `;
+            return;
+        }
+
+        // Render the timeline
+        renderTimeline(sessionsWithActivity);
+
+    } catch (error) {
+        console.error('Failed to load timeline:', error);
+        container.innerHTML = `<div class="timeline-empty"><p>Failed to load timeline: ${error.message}</p></div>`;
+    }
 }
 
 function renderTimeline(sessions) {
@@ -3164,10 +3230,20 @@ function renderTimeline(sessions) {
         `;
     }).join('');
 
-    // Generate timeline rows for gastown sessions
-    const gastownRowsHtml = gastownSessions.map(session => {
-        const periods = timelineData.get(session.sessionId) || [];
-        return renderTimelineRow(session, periods, startTime, now);
+    // Group gastown sessions by repo (HQ, rigs, etc.)
+    const gastownGroups = groupGastownByRepo(gastownSessions);
+    const gastownSectionsHtml = gastownGroups.map(group => {
+        const rowsHtml = group.sessions.map(session => {
+            const periods = timelineData.get(session.sessionId) || [];
+            return renderTimelineRow(session, periods, startTime, now);
+        }).join('');
+
+        return `
+            <div class="timeline-subsection">
+                <div class="timeline-subsection-header">${escapeHtml(group.repoName)}</div>
+                <div class="timeline-rows">${rowsHtml}</div>
+            </div>
+        `;
     }).join('');
 
     container.innerHTML = `
@@ -3175,8 +3251,8 @@ function renderTimeline(sessions) {
         ${repoSectionsHtml}
         ${gastownSessions.length > 0 ? `
             <div class="timeline-section gastown-section">
-                <div class="timeline-section-header">🏭 Gastown Agents</div>
-                <div class="timeline-rows">${gastownRowsHtml}</div>
+                <div class="timeline-section-header">🏭 Gas Town</div>
+                ${gastownSectionsHtml}
             </div>
         ` : ''}
         ${sessions.length === 0 ? `
@@ -3221,8 +3297,9 @@ function generateTimeAxis(startTime, endTime, hoursBack) {
 function renderTimelineRow(session, periods, startTime, endTime) {
     const duration = endTime - startTime;
 
-    // Determine session status for styling
-    const statusClass = session.state === 'active' ? 'active' : 'waiting';
+    // Determine session status for styling (closed = historical session no longer running)
+    const statusClass = session.state === 'closed' ? 'closed' :
+                        session.state === 'active' ? 'active' : 'waiting';
 
     // Calculate last activity time
     const lastActivityTime = getLastActivityTime(periods);
@@ -3429,6 +3506,7 @@ function switchView(viewName) {
 
     // Refresh timeline when switching to it
     if (viewName === 'timeline') {
+        syncTimelineRangeSelect();
         refreshTimeline();
     }
 
@@ -3448,6 +3526,11 @@ function switchView(viewName) {
     if (viewName === 'mission-control') {
         refreshMissionControl();
     }
+
+    // Refresh Graveyard when switching to it
+    if (viewName === 'graveyard') {
+        refreshGraveyard();
+    }
 }
 
 function toggleAnalytics() {
@@ -3459,7 +3542,8 @@ function toggleAnalytics() {
     }
 }
 
-// Initial fetch - scheduleNextPoll() is called inside fetchSessions()
+// Initial fetch - uses dirty-check polling for sub-second updates
+// fetchSessions() will call scheduleNextPoll() which uses dirty-check when enabled
 fetchSessions();
 
 // Auto-refresh timeline when on that view
@@ -4367,10 +4451,9 @@ function refreshMissionControl() {
         if (sessionStillExists) {
             loadConversationHistory(mcSelectedSessionId, true);
         } else {
-            // Session ended, clear selection and play notification
+            // Session ended, clear selection
             mcSelectedSessionId = null;
             clearMissionControlConversation();
-            soundManager.playNotification('waiting');
         }
     }
 }
@@ -4394,7 +4477,7 @@ function updateMissionControlStatus(hasActiveSessions) {
 }
 
 /**
- * Render the list of sessions in Mission Control
+ * Render the list of sessions in Mission Control (differential updates to prevent blinking)
  */
 function renderMissionControlSessions(sessions) {
     const container = document.getElementById('mc-sessions-list');
@@ -4409,43 +4492,195 @@ function renderMissionControlSessions(sessions) {
 
     // Handle empty state
     if (sessions.length === 0) {
-        container.innerHTML = '<div class="mc-empty">No active sessions</div>';
+        if (!container.querySelector('.mc-empty')) {
+            container.innerHTML = '<div class="mc-empty">No active sessions</div>';
+        }
         return;
     }
 
-    // Sort: active first, then waiting, then by most recent activity
-    const sorted = [...sessions].sort((a, b) => {
-        const stateOrder = { active: 0, waiting: 1, idle: 2 };
-        const aOrder = stateOrder[a.state] ?? 3;
-        const bOrder = stateOrder[b.state] ?? 3;
-        if (aOrder !== bOrder) return aOrder - bOrder;
+    // Separate gastown from regular sessions
+    const regularSessions = sessions.filter(s => !s.isGastown);
+    const gastownSessions = sessions.filter(s => s.isGastown);
 
-        // Then by most recent activity
-        const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
-        const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
-        return bTime - aTime;
+    // Group regular sessions by repo
+    const groups = groupSessionsByRepo(regularSessions);
+
+    // Group gastown sessions
+    const gastownGroups = groupGastownByRepo(gastownSessions);
+
+    // Differential update: update existing items in place, only add/remove as needed
+    const existingItems = new Map();
+    container.querySelectorAll('.mc-session-item').forEach(el => {
+        existingItems.set(el.dataset.sessionId, el);
     });
 
-    container.innerHTML = sorted.map(session => {
-        const isSelected = session.sessionId === mcSelectedSessionId;
-        const stateClass = session.state === 'active' ? 'active' : '';
-        const selectedClass = isSelected ? 'selected' : '';
-        const displayName = session.cwd ? session.cwd.split('/').pop() : session.sessionId.slice(0, 8);
-        const duration = session.duration || '0m';
-        const stateEmoji = session.state === 'active' ? '🟢' : session.state === 'waiting' ? '🟡' : '⚪';
+    // Track which sessions we've seen (to detect removals)
+    const seenSessionIds = new Set();
 
-        return `
-            <div class="mc-session-item ${stateClass} ${selectedClass}"
-                 data-session-id="${session.sessionId}"
-                 onclick="selectMissionControlSession('${session.sessionId}')">
-                <div class="mc-session-name">${stateEmoji} ${escapeHtml(displayName)}</div>
-                <div class="mc-session-meta">
-                    <span>${duration}</span>
-                    <span>${session.contextPercent || 0}% ctx</span>
+    // Build new HTML only if structure changed significantly
+    const allSessions = [...regularSessions, ...gastownSessions];
+    const currentSessionIds = allSessions.map(s => s.sessionId).join(',');
+    const previousSessionIds = container.dataset.sessionIds || '';
+
+    // If session list structure changed (add/remove), do full rebuild
+    if (currentSessionIds !== previousSessionIds) {
+        // Build HTML
+        let html = '';
+
+        // Regular session groups
+        for (const group of groups) {
+            html += `
+                <div class="mc-repo-group">
+                    <div class="mc-repo-header">${escapeHtml(group.repoName)}</div>
+                    <div class="mc-repo-sessions">
+                        ${group.sessions.map(session => renderMCSessionItem(session)).join('')}
+                    </div>
                 </div>
+            `;
+        }
+
+        // Gastown section (if any)
+        if (gastownSessions.length > 0) {
+            html += `<div class="mc-gastown-section">`;
+            html += `<div class="mc-section-header">🏭 Gas Town</div>`;
+
+            for (const group of gastownGroups) {
+                html += `
+                    <div class="mc-repo-group mc-gastown-group">
+                        <div class="mc-repo-header">${escapeHtml(group.repoName)}</div>
+                        <div class="mc-repo-sessions">
+                            ${group.sessions.map(session => renderMCSessionItem(session, true)).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            html += `</div>`;
+        }
+
+        container.innerHTML = html;
+        container.dataset.sessionIds = currentSessionIds;
+
+        // Reattach click handlers
+        container.querySelectorAll('.mc-session-item').forEach(el => {
+            el.onclick = () => selectMissionControlSession(el.dataset.sessionId);
+        });
+    } else {
+        // Structure unchanged - do in-place updates of existing items
+        for (const session of allSessions) {
+            const existingEl = existingItems.get(session.sessionId);
+            if (existingEl) {
+                // Update in place - just update the inner content
+                const isGastown = session.isGastown;
+                const newHtml = renderMCSessionItem(session, isGastown);
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = newHtml;
+                const newEl = tempDiv.firstElementChild;
+
+                // Only update if content changed
+                if (existingEl.innerHTML !== newEl.innerHTML ||
+                    existingEl.className !== newEl.className) {
+                    existingEl.innerHTML = newEl.innerHTML;
+                    existingEl.className = newEl.className;
+                }
+            }
+        }
+    }
+}
+
+function groupSessionsByRepo(sessions) {
+    const groups = {};
+
+    for (const session of sessions) {
+        const cwd = session.cwd || '';
+        const parts = cwd.split('/').filter(Boolean);
+        let repoName = 'Unknown';
+
+        // Extract repo name from path
+        if (parts.length >= 3 && parts[0] === 'Users') {
+            repoName = parts[2];
+        } else if (parts.length >= 3 && parts[0] === 'home') {
+            repoName = parts[2];
+        } else if (parts.length > 0) {
+            repoName = parts.find(p => !p.startsWith('.')) || parts[0];
+        }
+
+        if (!groups[repoName]) {
+            groups[repoName] = { repoName, sessions: [] };
+        }
+        groups[repoName].sessions.push(session);
+    }
+
+    // Sort groups by most recent activity, then sort sessions within each group
+    const sortedGroups = Object.values(groups).sort((a, b) => {
+        const aMax = Math.max(...a.sessions.map(s => s.lastActivity ? new Date(s.lastActivity).getTime() : 0));
+        const bMax = Math.max(...b.sessions.map(s => s.lastActivity ? new Date(s.lastActivity).getTime() : 0));
+        return bMax - aMax;
+    });
+
+    // Sort sessions within each group: active first, then by activity
+    for (const group of sortedGroups) {
+        group.sessions.sort((a, b) => {
+            const stateOrder = { active: 0, waiting: 1, idle: 2 };
+            const aOrder = stateOrder[a.state] ?? 3;
+            const bOrder = stateOrder[b.state] ?? 3;
+            if (aOrder !== bOrder) return aOrder - bOrder;
+            const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+            const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+            return bTime - aTime;
+        });
+    }
+
+    return sortedGroups;
+}
+
+function renderMCSessionItem(session, isGastown = false) {
+    const isSelected = session.sessionId === mcSelectedSessionId;
+    const displayName = session.cwd ? session.cwd.split('/').pop() : session.sessionId.slice(0, 8);
+    const duration = formatAgentDuration(session.startTimestamp) || '0m';
+    const contextPct = Math.round(session.tokenPercentage || 0);
+
+    // Determine state emoji based on activity status
+    // Green = active, Orange = stale (1-60 min idle), Yellow = idle (>1hr)
+    const activityStatus = getActivityStatus(session.lastActivity);
+    let stateEmoji = '🟢';  // active
+    if (session.state !== 'active') {
+        stateEmoji = activityStatus.isStale ? '🟠' : '🟡';  // orange for stale, yellow for idle
+    }
+
+    // Show activity status - but only show "idle" for non-active sessions
+    // This prevents contradictory display (green dot + "idle" badge)
+    let activityHtml = '';
+    if (session.state === 'active') {
+        // Active session: show "just now" or active indicator
+        activityHtml = '<span class="active-indicator">just now</span>';
+    } else {
+        // Non-active session: show idle time from lastActivity
+        if (activityStatus.text) {
+            activityHtml = `<span class="${activityStatus.class}">${activityStatus.text}</span>`;
+        } else {
+            // No lastActivity data - show idle without time
+            activityHtml = '<span class="idle-indicator">idle</span>';
+        }
+    }
+
+    // For gastown, show role icon
+    let roleIcon = '';
+    if (isGastown && session.gastownRole) {
+        const agentType = getGastownAgentType(session.gastownRole);
+        roleIcon = `<span class="gt-icon ${agentType.css}" title="${agentType.label}">${agentType.icon}</span> `;
+    }
+
+    return `
+        <div class="mc-session-item ${session.state === 'active' ? 'active' : ''} ${isSelected ? 'selected' : ''}"
+             data-session-id="${session.sessionId}">
+            <div class="mc-session-name">${stateEmoji} ${roleIcon}${escapeHtml(displayName)}</div>
+            <div class="mc-session-meta">
+                <span>${duration}</span>
+                <span>${contextPct}% ctx</span>
+                ${activityHtml}
             </div>
-        `;
-    }).join('');
+        </div>
+    `;
 }
 
 /**
@@ -4470,9 +4705,6 @@ function selectMissionControlSession(sessionId) {
 
     // Load conversation
     loadConversationHistory(sessionId);
-
-    // Play sound on selection
-    soundManager.playNotification('active');
 }
 
 /**
@@ -4488,22 +4720,13 @@ async function loadConversationHistory(sessionId, skipLoadingState = false) {
     }
 
     try {
-        const response = await fetch(`/api/session/${sessionId}/conversation?limit=50`);
+        const response = await fetch(`/api/session/${sessionId}/conversation`);
         if (!response.ok) {
             throw new Error('Failed to load conversation');
         }
 
         const data = await response.json();
         const messages = data.messages || [];
-
-        // Check for new messages and play sound
-        const previousMessages = mcConversationCache.get(sessionId) || [];
-        const hasNewMessages = messages.length > previousMessages.length;
-
-        if (hasNewMessages && previousMessages.length > 0) {
-            // New message arrived - play notification sound
-            soundManager.playNotification('active');
-        }
 
         // Cache the messages
         mcConversationCache.set(sessionId, messages);
@@ -4529,27 +4752,87 @@ function renderConversation(messages) {
         return;
     }
 
-    streamEl.innerHTML = messages.map(msg => {
+    // Filter out empty messages, but keep tool-only assistant messages and system messages
+    const filteredMessages = messages.filter(msg => {
+        const hasContent = msg.content && msg.content.trim();
+        const hasTools = msg.tools && msg.tools.length > 0;
+        const isSystem = msg.role === 'system';
+        return hasContent || hasTools || isSystem;
+    });
+
+    // Check if we need to re-render (message count changed)
+    const existingCount = streamEl.querySelectorAll('.mc-message').length;
+    const needsFullRender = existingCount !== filteredMessages.length;
+
+    if (!needsFullRender) {
+        // Same count - just update timestamps
+        streamEl.querySelectorAll('.mc-message').forEach((el, idx) => {
+            const msg = filteredMessages[idx];
+            if (msg) {
+                const timeEl = el.querySelector('.mc-message-time');
+                if (timeEl && msg.timestamp) {
+                    timeEl.textContent = formatTimeAgo(new Date(msg.timestamp));
+                }
+            }
+        });
+        return;
+    }
+
+    // Full render - remember scroll position
+    const wasAtBottom = streamEl.scrollTop + streamEl.clientHeight >= streamEl.scrollHeight - 50;
+
+    // Build all message HTML
+    const html = filteredMessages.map((msg, idx) => {
         const role = msg.role || 'unknown';
-        const roleClass = role === 'human' ? 'human' : 'assistant';
-        const roleLabel = role === 'human' ? '👤 Human' : '🤖 Assistant';
+        const roleClass = role === 'user' ? 'human' : role === 'system' ? 'system' : 'assistant';
+        const roleLabel = role === 'user' ? '👤 You' : role === 'system' ? '📋 System' : '🤖 Assistant';
         const timestamp = msg.timestamp ? formatTimeAgo(new Date(msg.timestamp)) : '';
-        const content = escapeHtml(msg.content || '').slice(0, 500);
-        const truncated = (msg.content || '').length > 500 ? '...' : '';
+
+        // Handle continuation markers specially
+        if (msg.isContinuation) {
+            const continuationId = msg.continuationId || '';
+            const shortId = continuationId.slice(0, 8);
+            return `
+                <div class="mc-continuation-marker" data-idx="${idx}" data-continuation-id="${continuationId}">
+                    <div class="mc-continuation-line"></div>
+                    <div class="mc-continuation-content">
+                        <span class="mc-continuation-icon">⬇️</span>
+                        <span class="mc-continuation-text">Conversation continued...</span>
+                        ${shortId ? `<span class="mc-continuation-id">${shortId}</span>` : ''}
+                    </div>
+                    <div class="mc-continuation-line"></div>
+                </div>
+            `;
+        }
+
+        let displayContent = '';
+        if (msg.content && msg.content.trim()) {
+            if (msg.isCompaction) {
+                displayContent = `<div class="mc-compaction">${escapeHtml(msg.content).replace(/\n/g, '<br>')}</div>`;
+            } else {
+                const content = escapeHtml(msg.content).slice(0, 500);
+                const truncated = msg.content.length > 500 ? '...' : '';
+                displayContent = content + truncated;
+            }
+        } else if (msg.tools && msg.tools.length > 0) {
+            displayContent = `<span class="mc-tools">🔧 ${msg.tools.join(', ')}</span>`;
+        }
 
         return `
-            <div class="mc-message ${roleClass}">
+            <div class="mc-message ${roleClass}" data-idx="${idx}">
                 <div class="mc-message-header">
                     <span class="mc-message-role">${roleLabel}</span>
                     <span class="mc-message-time">${timestamp}</span>
                 </div>
-                <div class="mc-message-content">${content}${truncated}</div>
+                <div class="mc-message-content">${displayContent}</div>
             </div>
         `;
     }).join('');
 
-    // Auto-scroll to bottom
-    if (mcAutoScroll) {
+    streamEl.innerHTML = html;
+
+    // Auto-scroll to bottom if was at bottom or if auto-scroll enabled
+    if ((wasAtBottom || mcAutoScroll) && filteredMessages.length > 0) {
         streamEl.scrollTop = streamEl.scrollHeight;
     }
 }
@@ -4573,18 +4856,370 @@ function clearMissionControlConversation() {
  * Format time ago helper
  */
 function formatTimeAgo(date) {
+    // Handle both Date objects and timestamps
+    const dateObj = date instanceof Date ? date : new Date(date);
+    if (isNaN(dateObj.getTime())) return 'N/A';
+
     const now = new Date();
-    const diffMs = now - date;
+    const diffMs = now - dateObj;
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMins / 60);
 
     if (diffMins < 1) return 'just now';
     if (diffMins < 60) return `${diffMins}m ago`;
     if (diffHours < 24) return `${diffHours}h ago`;
-    return date.toLocaleDateString();
+    return dateObj.toLocaleDateString();
 }
 
 // Initialize Mission Control on DOM ready
 document.addEventListener('DOMContentLoaded', initMissionControl);
+
+// ============================================================================
+// Session Graveyard - View dead/ended sessions
+// ============================================================================
+
+let graveyardData = { gastown: [], regular: [] };
+let graveyardSearchActive = false;
+
+/**
+ * Search graveyard sessions by text query
+ */
+async function searchGraveyard() {
+    const searchInput = document.getElementById('graveyard-search');
+    const container = document.getElementById('graveyard-container');
+    const countEl = document.getElementById('graveyard-count');
+    const rangeSelect = document.getElementById('graveyard-range-select');
+    const clearBtn = document.getElementById('graveyard-clear-search');
+    const searchContent = document.getElementById('graveyard-search-content')?.checked || false;
+
+    if (!container || !searchInput) return;
+
+    const query = searchInput.value.trim();
+    if (!query) {
+        clearGraveyardSearch();
+        return;
+    }
+
+    const hours = rangeSelect ? parseInt(rangeSelect.value) : 168;
+    graveyardSearchActive = true;
+
+    container.innerHTML = '<div class="graveyard-loading">Searching...</div>';
+    clearBtn?.classList.remove('hidden');
+
+    try {
+        const response = await fetch(`/api/sessions/graveyard/search?q=${encodeURIComponent(query)}&hours=${hours}&content=${searchContent}`);
+        if (!response.ok) throw new Error('Search failed');
+
+        const data = await response.json();
+        graveyardData = data;
+
+        if (countEl) {
+            countEl.textContent = `${data.count} match${data.count !== 1 ? 'es' : ''} for "${query}"`;
+        }
+
+        renderGraveyard(data, true);
+    } catch (error) {
+        console.error('Graveyard search failed:', error);
+        container.innerHTML = '<div class="graveyard-error">Search failed</div>';
+    }
+}
+
+/**
+ * Clear graveyard search and restore normal view
+ */
+function clearGraveyardSearch() {
+    const searchInput = document.getElementById('graveyard-search');
+    const clearBtn = document.getElementById('graveyard-clear-search');
+
+    if (searchInput) searchInput.value = '';
+    clearBtn?.classList.add('hidden');
+    graveyardSearchActive = false;
+
+    refreshGraveyard();
+}
+
+/**
+ * Refresh the graveyard view with dead sessions
+ */
+async function refreshGraveyard() {
+    const container = document.getElementById('graveyard-container');
+    const countEl = document.getElementById('graveyard-count');
+    const rangeSelect = document.getElementById('graveyard-range-select');
+
+    if (!container) return;
+
+    const hours = rangeSelect ? parseInt(rangeSelect.value) : 24;
+
+    container.innerHTML = '<div class="graveyard-loading">Loading dead sessions...</div>';
+
+    try {
+        const response = await fetch(`/api/sessions/graveyard?hours=${hours}`);
+        if (!response.ok) throw new Error('Failed to fetch graveyard data');
+
+        const data = await response.json();
+        graveyardData = data;
+
+        if (countEl) {
+            countEl.textContent = `${data.count} session${data.count !== 1 ? 's' : ''}`;
+        }
+
+        renderGraveyard(data);
+    } catch (error) {
+        console.error('Failed to load graveyard:', error);
+        container.innerHTML = '<div class="graveyard-error">Failed to load dead sessions</div>';
+    }
+}
+
+/**
+ * Render the graveyard with grouped sessions
+ * @param {Object} data - Graveyard data with sessions
+ * @param {boolean} isSearch - Whether this is a search result
+ */
+function renderGraveyard(data, isSearch = false) {
+    const container = document.getElementById('graveyard-container');
+    if (!container) return;
+
+    if (data.count === 0) {
+        const emptyMsg = isSearch
+            ? `No sessions found matching "${escapeHtml(data.query || '')}"`
+            : 'No dead sessions in this time range';
+        container.innerHTML = `<div class="graveyard-empty">${emptyMsg}</div>`;
+        return;
+    }
+
+    let html = '';
+
+    // Regular sessions section
+    if (data.regular.length > 0) {
+        const regularGroups = groupGraveyardByRepo(data.regular);
+        html += '<div class="graveyard-section">';
+        html += '<div class="graveyard-section-header">📁 Regular Sessions</div>';
+
+        for (const group of regularGroups) {
+            html += `
+                <div class="graveyard-group">
+                    <div class="graveyard-group-header">${escapeHtml(group.name)}</div>
+                    <div class="graveyard-group-sessions">
+                        ${group.sessions.map(s => renderGraveyardCard(s)).join('')}
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    // Gastown section
+    if (data.gastown.length > 0) {
+        const gastownGroups = groupGraveyardByRepo(data.gastown);
+        html += '<div class="graveyard-section graveyard-gastown">';
+        html += '<div class="graveyard-section-header">🏭 Gas Town</div>';
+
+        for (const group of gastownGroups) {
+            html += `
+                <div class="graveyard-group">
+                    <div class="graveyard-group-header">${escapeHtml(group.name)}</div>
+                    <div class="graveyard-group-sessions">
+                        ${group.sessions.map(s => renderGraveyardCard(s, true)).join('')}
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    container.innerHTML = html;
+
+    // Attach click handlers
+    container.querySelectorAll('.graveyard-card').forEach(card => {
+        card.addEventListener('click', () => {
+            const sessionId = card.dataset.sessionId;
+            showGraveyardDetails(sessionId);
+        });
+    });
+}
+
+/**
+ * Group graveyard sessions by repo/project
+ */
+function groupGraveyardByRepo(sessions) {
+    const groups = {};
+
+    for (const session of sessions) {
+        const cwd = session.cwd || '';
+        const parts = cwd.split('/').filter(Boolean);
+        let repoName = session.slug || 'Unknown';
+
+        // Extract repo name from path
+        if (parts.length >= 3 && parts[0] === 'Users') {
+            repoName = parts[2];
+        }
+
+        if (!groups[repoName]) {
+            groups[repoName] = { name: repoName, sessions: [] };
+        }
+        groups[repoName].sessions.push(session);
+    }
+
+    // Sort by most recent session in each group
+    return Object.values(groups).sort((a, b) => {
+        const aRecent = Math.min(...a.sessions.map(s => s.recency || Infinity));
+        const bRecent = Math.min(...b.sessions.map(s => s.recency || Infinity));
+        return aRecent - bRecent;
+    });
+}
+
+/**
+ * Render a single graveyard card
+ */
+function renderGraveyardCard(session, isGastown = false) {
+    const displayName = session.cwd ? session.cwd.split('/').pop() : session.slug || session.sessionId.slice(0, 8);
+    const contextPct = Math.round(session.tokenPercentage || 0);
+    const duration = formatAgentDuration(session.startTimestamp) || '?';
+
+    // Format ended time
+    const endedAgo = formatRecency(session.recency);
+
+    // Gastown role icon
+    let roleIcon = '';
+    if (isGastown && session.gastownRole) {
+        const agentType = getGastownAgentType(session.gastownRole);
+        roleIcon = `<span class="gt-icon ${agentType.css}">${agentType.icon}</span> `;
+    }
+
+    // Summary preview or match snippets (for search results)
+    let previewContent = '';
+    if (session.matchSnippets && session.matchSnippets.length > 0) {
+        // Show match snippets for search results
+        const snippetHtml = session.matchSnippets
+            .map(s => `<div class="match-snippet">${escapeHtml(s)}</div>`)
+            .join('');
+        const matchTypes = (session.matchType || []).join(', ');
+        previewContent = `
+            <div class="graveyard-matches">
+                <div class="match-types">📍 Found in: ${escapeHtml(matchTypes)}</div>
+                ${snippetHtml}
+            </div>
+        `;
+    } else if (session.summary) {
+        previewContent = `<div class="graveyard-summary">${escapeHtml(session.summary.substring(0, 100))}${session.summary.length > 100 ? '...' : ''}</div>`;
+    }
+
+    // Activity log section (if available)
+    let activityLogContent = '';
+    if (session.hasActivityLog && session.activityLog && session.activityLog.length > 0) {
+        // Filter to only PostToolUse events (more informative)
+        const postEvents = session.activityLog.filter(a => a.event === 'PostToolUse');
+        const recentActivities = postEvents.slice(-15); // Last 15 activities
+        const activityHtml = recentActivities
+            .map(a => {
+                const emoji = getToolEmoji(a.tool || 'unknown');
+                const desc = a.description || a.tool || 'Activity';
+                return `<span class="activity-item" title="${escapeHtml(desc)}">${emoji}</span>`;
+            })
+            .join('');
+        activityLogContent = `
+            <div class="graveyard-activity-log">
+                <div class="activity-trail">${activityHtml}</div>
+                <span class="activity-count">${postEvents.length} tools</span>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="graveyard-card${session.matchSnippets ? ' search-match' : ''}${session.hasActivityLog ? ' has-activity' : ''}" data-session-id="${session.sessionId}">
+            <div class="graveyard-card-header">
+                <span class="graveyard-name">💀 ${roleIcon}${escapeHtml(displayName)}</span>
+                <span class="graveyard-ended">${endedAgo}</span>
+            </div>
+            <div class="graveyard-card-meta">
+                <span>${duration}</span>
+                <span>${contextPct}% ctx</span>
+            </div>
+            ${previewContent}
+            ${activityLogContent}
+            <div class="graveyard-card-actions">
+                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${session.sessionId}')" title="Resume this session">
+                    ▶️ Resume
+                </button>
+                <button class="graveyard-btn" onclick="event.stopPropagation(); copyResumeCmd('${session.sessionId}')" title="Copy resume command">
+                    📋 Copy
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Format recency (seconds ago) to human-readable string
+ */
+function formatRecency(recencySeconds) {
+    if (!recencySeconds) return 'unknown';
+
+    const mins = Math.floor(recencySeconds / 60);
+    const hours = Math.floor(mins / 60);
+    const days = Math.floor(hours / 24);
+
+    if (mins < 60) return `${mins}m ago`;
+    if (hours < 24) return `${hours}h ${mins % 60}m ago`;
+    return `${days}d ${hours % 24}h ago`;
+}
+
+/**
+ * Show detailed modal for a graveyard session
+ */
+function showGraveyardDetails(sessionId) {
+    const session = [...graveyardData.regular, ...graveyardData.gastown].find(s => s.sessionId === sessionId);
+    if (!session) return;
+
+    const displayName = session.cwd ? session.cwd.split('/').pop() : session.slug;
+    const endedAgo = formatRecency(session.recency);
+
+    showModal(`
+        <div class="graveyard-details">
+            <h2>💀 ${escapeHtml(displayName)}</h2>
+            <div class="graveyard-details-meta">
+                <p><strong>Session ID:</strong> <code>${session.sessionId}</code></p>
+                <p><strong>Ended:</strong> ${endedAgo}</p>
+                <p><strong>Duration:</strong> ${formatAgentDuration(session.startTimestamp) || 'Unknown'}</p>
+                <p><strong>Context:</strong> ${Math.round(session.tokenPercentage || 0)}%</p>
+                <p><strong>Working Directory:</strong> <code>${escapeHtml(session.cwd || 'Unknown')}</code></p>
+                ${session.gitBranch ? `<p><strong>Branch:</strong> ${escapeHtml(session.gitBranch)}</p>` : ''}
+            </div>
+
+            ${session.summary ? `
+                <div class="graveyard-details-summary">
+                    <h3>Summary</h3>
+                    <p>${escapeHtml(session.summary)}</p>
+                </div>
+            ` : ''}
+
+            <div class="graveyard-details-actions">
+                <button class="btn-primary" onclick="resumeSession('${session.sessionId}'); closeModal();">
+                    ▶️ Resume Session
+                </button>
+                <button class="btn-secondary" onclick="copyResumeCmd('${session.sessionId}')">
+                    📋 Copy Resume Command
+                </button>
+                <button class="btn-secondary" onclick="openJsonl('${session.sessionId}')">
+                    📂 Open JSONL File
+                </button>
+            </div>
+        </div>
+    `);
+}
+
+/**
+ * Resume a dead session in a new terminal
+ */
+function resumeSession(sessionId) {
+    const cmd = `claude --resume ${sessionId}`;
+
+    // Try to copy to clipboard
+    navigator.clipboard.writeText(cmd).then(() => {
+        showToast(`Resume command copied! Paste in terminal to resume.`);
+    }).catch(() => {
+        showToast(`Resume: ${cmd}`, 'info');
+    });
+}
 
 console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');

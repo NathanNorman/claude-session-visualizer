@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Sessions</title>
-    <link rel="stylesheet" href="styles.css?v=5">
+    <link rel="stylesheet" href="styles.css?v=8">
 </head>
 <body>
     <header>
@@ -50,6 +50,9 @@
         <button class="tab-button" onclick="switchView('mission-control')" data-view="mission-control">
             🎛️ Mission Control
         </button>
+        <button class="tab-button" onclick="switchView('graveyard')" data-view="graveyard">
+            🪦 Graveyard
+        </button>
     </nav>
 
     <div id="sessions-view" class="view active">
@@ -64,7 +67,7 @@
             <div class="filter-divider"></div>
             <button id="view-mode-toggle" class="icon-button" onclick="toggleCardMode()" title="Toggle compact/detailed view (v)">📋</button>
             <button id="focus-mode-toggle" class="icon-button" onclick="toggleFocusMode()" title="Focus on active sessions (f)">🎯</button>
-            <button id="refresh-all-summaries" class="icon-button" onclick="refreshAllSummaries()" title="Refresh all AI summaries">🤖</button>
+            <button id="refresh-sessions" class="icon-button" onclick="forceRefreshSessions()" title="Refresh all session data">🔄</button>
         </div>
         <main id="sessions-container"></main>
     </div>
@@ -81,13 +84,22 @@
         <div class="timeline-header">
             <h2>Session Timeline</h2>
             <div class="timeline-controls">
-                <span class="timeline-range-label">Last 8 hours</span>
+                <select id="timeline-range-select" class="timeline-range-select" onchange="changeTimelineRange(this.value)">
+                    <option value="1">Last 1 hour</option>
+                    <option value="2">Last 2 hours</option>
+                    <option value="4">Last 4 hours</option>
+                    <option value="8" selected>Last 8 hours</option>
+                    <option value="12">Last 12 hours</option>
+                    <option value="24">Last 24 hours</option>
+                    <option value="48">Last 2 days</option>
+                </select>
                 <button class="refresh-btn" onclick="refreshTimeline()" title="Refresh timeline">🔄</button>
             </div>
         </div>
         <div class="timeline-legend">
             <span class="legend-item"><span class="legend-dot active"></span> Active</span>
             <span class="legend-item"><span class="legend-dot waiting"></span> Waiting</span>
+            <span class="legend-item"><span class="legend-dot closed"></span> Closed</span>
         </div>
         <div id="timeline-container" class="timeline-container">
             <div class="timeline-loading">Loading timeline...</div>
@@ -137,10 +149,44 @@
         </div>
     </div>
 
+    <div id="graveyard-view" class="view">
+        <div class="graveyard-header">
+            <h2>🪦 Session Graveyard</h2>
+            <div class="graveyard-controls">
+                <div class="graveyard-search-container">
+                    <input type="text" id="graveyard-search" class="graveyard-search"
+                           placeholder="Search sessions..."
+                           onkeydown="if(event.key==='Enter') searchGraveyard()">
+                    <button class="search-btn" onclick="searchGraveyard()" title="Search">🔍</button>
+                    <button id="graveyard-clear-search" class="clear-search-btn hidden"
+                            onclick="clearGraveyardSearch()" title="Clear search">✕</button>
+                    <label class="search-content-toggle" title="Search conversation content (slower)">
+                        <input type="checkbox" id="graveyard-search-content">
+                        <span>Deep</span>
+                    </label>
+                </div>
+                <select id="graveyard-range-select" class="graveyard-range-select" onchange="refreshGraveyard()">
+                    <option value="1">Last 1 hour</option>
+                    <option value="2">Last 2 hours</option>
+                    <option value="4">Last 4 hours</option>
+                    <option value="8">Last 8 hours</option>
+                    <option value="24" selected>Last 24 hours</option>
+                    <option value="48">Last 2 days</option>
+                    <option value="168">Last 7 days</option>
+                </select>
+                <button class="refresh-btn" onclick="refreshGraveyard()" title="Refresh graveyard">🔄</button>
+                <span id="graveyard-count" class="graveyard-count">0 sessions</span>
+            </div>
+        </div>
+        <div id="graveyard-container" class="graveyard-container">
+            <div class="graveyard-loading">Loading dead sessions...</div>
+        </div>
+    </div>
+
     <!-- Modal for keyboard shortcuts and other dialogs -->
     <div id="modal-overlay" class="modal-overlay hidden">
         <div id="modal-content" class="modal-content"></div>
     </div>
-    <script src="app.js?v=9"></script>
+    <script src="app.js?v=13"></script>
 </body>
 </html>

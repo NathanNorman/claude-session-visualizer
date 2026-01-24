@@ -16,10 +16,14 @@ import asyncio
 from dataclasses import dataclass, field
 from .session_detector import (
     get_sessions,
+    get_all_sessions,
+    get_dead_sessions,
+    search_dead_sessions,
     extract_conversation,
     extract_metrics,
     extract_session_timeline,
     get_activity_periods,
+    get_activity_timestamp,
     CLAUDE_PROJECTS_DIR
 )
 from .git_tracker import (
@@ -74,6 +78,19 @@ TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 # Feature 15: Summary cache
 _summary_cache: dict[str, dict] = {}  # sessionId -> {summary, timestamp}
 SUMMARY_TTL = 300  # 5 minutes
+
+# Activity Summary functions imported from analytics
+from .analytics import (
+    get_last_activity_hash,
+    save_activity_summary,
+    get_activity_summaries as db_get_activity_summaries,
+)
+
+
+def compute_activity_hash(activities: list[str]) -> str:
+    """Hash last 5 activities for change detection."""
+    key = '|'.join(activities[-5:]) if activities else ''
+    return hashlib.md5(key.encode()).hexdigest()[:8]
 
 # Feature 16: Shared sessions store
 _shared_sessions: dict[str, dict] = {}  # token -> {session, created_at, expires_at, created_by}
@@ -167,6 +184,28 @@ async def watch_sessions_loop(interval: float = 2.0):
 
                 if current_hash != _last_sessions_hash:
                     _last_sessions_hash = current_hash
+
+                    # Generate activity summaries for sessions with changed activity
+                    # This only triggers Haiku calls when activity actually changes
+                    for session in sessions:
+                        if session.get('isGastown'):
+                            continue  # Skip gastown sessions
+                        session_id = session.get('sessionId')
+                        if session_id:
+                            # Extract activities from session data
+                            activities = session.get('recentActivity', [])
+                            cwd = session.get('cwd', '')
+                            # Fire and forget - don't block broadcast
+                            asyncio.create_task(
+                                generate_activity_summary(session_id, activities, cwd)
+                            )
+
+                    # Include activity summaries in session data
+                    for session in sessions:
+                        session_id = session.get('sessionId')
+                        if session_id:
+                            session['activitySummaries'] = db_get_activity_summaries(session_id)
+
                     await ws_manager.broadcast({
                         'type': 'sessions_update',
                         'sessions': sessions,
@@ -261,7 +300,7 @@ def focus_tab_by_tty(request: FocusByTtyRequest):
     return result
 
 @app.get("/api/sessions")
-def api_get_sessions(include_summaries: bool = False):
+async def api_get_sessions(include_summaries: bool = False):
     """Get sessions, optionally with AI summaries."""
     sessions = get_sessions()
 
@@ -271,6 +310,152 @@ def api_get_sessions(include_summaries: bool = False):
             cached = _summary_cache.get(session['sessionId'])
             if cached and (time.time() - cached['timestamp']) < SUMMARY_TTL:
                 session['aiSummary'] = cached['summary']
+
+    # Generate activity summaries for sessions with new activity
+    for session in sessions:
+        if session.get('isGastown'):
+            continue
+        session_id = session.get('sessionId')
+        if session_id:
+            activities = session.get('recentActivity', [])
+            if activities:
+                cwd = session.get('cwd', '')
+                # This will only generate if activity changed or no summaries exist
+                asyncio.create_task(generate_activity_summary(session_id, activities, cwd))
+
+    # Always include activity summaries
+    for session in sessions:
+        session_id = session.get('sessionId')
+        if session_id:
+            session['activitySummaries'] = db_get_activity_summaries(session_id)
+
+    return {
+        "sessions": sessions,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/sessions/changed")
+def check_sessions_changed(since: float = 0):
+    """Fast dirty-check endpoint to determine if session data has changed.
+
+    Used by frontend to poll frequently without expensive full refreshes.
+    Returns whether any session activity has occurred since the given timestamp.
+
+    Args:
+        since: Unix timestamp of last known activity (default 0 = first call)
+
+    Returns:
+        {changed: bool, timestamp: float} - sub-10ms response time
+    """
+    current = get_activity_timestamp()
+    return {
+        "changed": current > since,
+        "timestamp": current
+    }
+
+
+@app.get("/api/sessions/graveyard")
+def get_graveyard_sessions(hours: int = 24):
+    """Get dead (ended) sessions for the graveyard view.
+
+    Returns sessions that have JSONL files but no running process,
+    modified within the specified time window.
+
+    Args:
+        hours: Number of hours to look back (default: 24)
+
+    Returns:
+        {
+            sessions: List of dead session metadata,
+            gastown: List of dead gastown sessions,
+            regular: List of dead non-gastown sessions,
+            count: Total count,
+            timestamp: ISO timestamp
+        }
+    """
+    sessions = get_dead_sessions(max_age_hours=hours)
+
+    # Separate gastown from regular sessions
+    gastown = [s for s in sessions if s.get('isGastown')]
+    regular = [s for s in sessions if not s.get('isGastown')]
+
+    return {
+        "sessions": sessions,
+        "gastown": gastown,
+        "regular": regular,
+        "count": len(sessions),
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/sessions/graveyard/search")
+def search_graveyard_sessions(q: str, hours: int = 168, content: bool = False):
+    """Search dead sessions by text query.
+
+    Args:
+        q: Search query (required)
+        hours: Number of hours to look back (default: 168 = 7 days)
+        content: If true, also search conversation content (slower)
+
+    Returns:
+        {
+            sessions: List of matching session metadata with matchType and matchSnippets,
+            gastown: List of matching gastown sessions,
+            regular: List of matching non-gastown sessions,
+            count: Total count,
+            query: The search query,
+            timestamp: ISO timestamp
+        }
+    """
+    if not q or not q.strip():
+        return {
+            "sessions": [],
+            "gastown": [],
+            "regular": [],
+            "count": 0,
+            "query": q,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    sessions = search_dead_sessions(query=q.strip(), max_age_hours=hours, search_content=content)
+
+    # Separate gastown from regular sessions
+    gastown = [s for s in sessions if s.get('isGastown')]
+    regular = [s for s in sessions if not s.get('isGastown')]
+
+    return {
+        "sessions": sessions,
+        "gastown": gastown,
+        "regular": regular,
+        "count": len(sessions),
+        "query": q,
+        "searchedContent": content,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/timeline/sessions")
+def get_timeline_sessions(hours: int = 24):
+    """Get all sessions with activity in the last N hours (including closed ones).
+
+    This is for the timeline view which needs to show historical sessions,
+    not just currently running ones.
+
+    Args:
+        hours: Number of hours to look back (default: 24)
+
+    Returns:
+        List of session metadata for timeline display
+    """
+    sessions = get_all_sessions(max_age_hours=hours)
+
+    # Add a flag to indicate if session is currently running
+    running_sessions = {s['sessionId'] for s in get_sessions()}
+
+    for session in sessions:
+        session['isRunning'] = session['sessionId'] in running_sessions
+        session['state'] = 'active' if session['isRunning'] else 'closed'
 
     return {
         "sessions": sessions,
@@ -348,8 +533,17 @@ def get_jsonl_path(session_id: str):
 
 
 @app.get("/api/session/{session_id}/conversation")
-def get_conversation(session_id: str, limit: int = 20):
-    """Get recent conversation for a session."""
+def get_conversation(session_id: str, limit: int = 0, follow_continuations: bool = True):
+    """Get conversation for a session.
+
+    Args:
+        session_id: Session UUID
+        limit: Max messages to return (0 = no limit, all messages)
+        follow_continuations: If True, follow compaction continuation chains
+
+    Returns:
+        {messages: [...], hasContinuation: bool}
+    """
     if not CLAUDE_PROJECTS_DIR.exists():
         raise HTTPException(404, "Claude projects directory not found")
 
@@ -359,8 +553,13 @@ def get_conversation(session_id: str, limit: int = 20):
             continue
         jsonl = project_dir / f"{session_id}.jsonl"
         if jsonl.exists():
-            messages = extract_conversation(jsonl, limit)
-            return {"messages": messages}
+            messages = extract_conversation(jsonl, limit, follow_continuations)
+            # Check if any continuation markers were added
+            has_continuation = any(msg.get('isContinuation') for msg in messages)
+            return {
+                "messages": messages,
+                "hasContinuation": has_continuation
+            }
 
     raise HTTPException(404, "Session not found")
 
@@ -589,6 +788,90 @@ Summary (one sentence, no quotes):"""
         return summary
     except Exception as e:
         return f"Summary unavailable: {str(e)}"
+
+
+async def generate_activity_summary(session_id: str, activities: list[str], cwd: str) -> str | None:
+    """Generate action→context summary when activity changes or on first encounter.
+
+    Returns the new summary if generated, None otherwise.
+    """
+    # Skip if no activities to summarize
+    if not activities:
+        return None
+
+    current_hash = compute_activity_hash(activities)
+    last_hash = get_last_activity_hash(session_id)
+    existing_entries = db_get_activity_summaries(session_id)
+
+    # Generate summary if:
+    # 1. Activity hash changed (new activity), OR
+    # 2. Session has activity but no summaries yet (first encounter)
+    needs_summary = (
+        last_hash != current_hash or
+        (len(existing_entries) == 0 and len(activities) > 0)
+    )
+
+    if not needs_summary:
+        return None
+
+    # Get JWT token
+    token = get_bedrock_token()
+    if not token:
+        return None  # Silent fail - no token available
+
+    # Build prompt for action+context format
+    activity_text = "\n".join(f"- {a}" for a in activities[-5:])
+
+    prompt = f"""Based on these Claude Code actions, write a SHORT summary (8-15 words max) in this exact format:
+"[Action verb]ing [file/thing] → [what for]"
+
+Examples:
+- "Editing server.py → adding authentication middleware"
+- "Reading tests → understanding validation logic"
+- "Running npm test → checking for regressions"
+
+Working directory: {cwd}
+Recent actions:
+{activity_text}
+
+Summary (format: "[verb]ing X → Y", no quotes):"""
+
+    try:
+        # Call Toast Bedrock Proxy
+        response = httpx.post(
+            f"{BEDROCK_PROXY_URL}/model/{HAIKU_MODEL_ID}/invoke",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 50,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=15.0
+        )
+        response.raise_for_status()
+        data = response.json()
+        summary = data["content"][0]["text"].strip()
+
+        # Store in database
+        save_activity_summary(session_id, summary, current_hash)
+
+        return summary
+    except Exception as e:
+        print(f"Activity summary generation failed for {session_id}: {e}")
+        return None
+
+
+@app.get("/api/sessions/{session_id}/activity-summaries")
+def api_get_activity_summaries(session_id: str):
+    """Get the AI activity summary log for a session."""
+    entries = db_get_activity_summaries(session_id)
+    return {
+        'sessionId': session_id,
+        'entries': entries
+    }
 
 
 @app.post("/api/sessions/{session_id}/summary")

@@ -17,6 +17,30 @@ STATE_FILE_MAX_AGE_SECONDS = 300  # Consider state files stale after 5 minutes
 
 # No longer need TTY cache - we now match by process cwd
 
+# Activity timestamp tracking for dirty-check optimization
+_last_activity_time: float = 0.0
+
+def update_activity_timestamp():
+    """Update the activity timestamp when session data changes."""
+    global _last_activity_time
+    _last_activity_time = time.time()
+
+def get_activity_timestamp() -> float:
+    """Get the last activity timestamp for dirty-check endpoint."""
+    return _last_activity_time
+
+# JSONL metadata cache: {path_str: (mtime, metadata_dict)}
+_metadata_cache: dict[str, tuple[float, dict]] = {}
+METADATA_CACHE_TTL = 60  # Max cache age in seconds
+
+# Continuation cache: {session_id: continuation_session_id or None}
+_continuation_cache: dict[str, str | None] = {}
+_continuation_cache_mtime: dict[str, float] = {}  # Track when cache was built
+
+# Process list cache: (timestamp, processes_list)
+_process_cache: tuple[float, list] | None = None
+PROCESS_CACHE_TTL = 2  # Cache processes for 2 seconds (faster stale session detection)
+
 # Feature 03: Token Usage Visualization
 MAX_CONTEXT_TOKENS = 200000  # Claude's context window
 
@@ -127,8 +151,12 @@ def check_background_shell_status(shells: list[dict], cwd: str) -> list[dict]:
     return result
 
 
-def read_session_state(session_id: str) -> dict | None:
+def read_session_state(session_id: str, ignore_stale: bool = False) -> dict | None:
     """Read hook-generated state file for a session.
+
+    Args:
+        session_id: The session UUID
+        ignore_stale: If True, return state even if file is stale (for graveyard)
 
     Returns:
         State dict with 'state', 'current_activity', etc. or None if not found/stale
@@ -142,17 +170,24 @@ def read_session_state(session_id: str) -> dict | None:
         return None
 
     try:
-        # Check file age - ignore stale files
+        # Check file age
         mtime = state_file.stat().st_mtime
         age = time.time() - mtime
 
-        if age > STATE_FILE_MAX_AGE_SECONDS:
+        # For active sessions, ignore stale files
+        if not ignore_stale and age > STATE_FILE_MAX_AGE_SECONDS:
             return None
 
         with open(state_file, 'r') as f:
             state = json.load(f)
 
-        # Validate required fields
+        # For graveyard, we only need activity_log - don't validate state fields
+        if ignore_stale:
+            state['_state_file_age'] = age
+            state['_is_stale'] = age > STATE_FILE_MAX_AGE_SECONDS
+            return state
+
+        # Validate required fields for active sessions
         if 'state' not in state or 'updated_at' not in state:
             return None
 
@@ -257,9 +292,9 @@ def get_claude_processes() -> list[dict]:
         if len(parts) < 11:
             continue
 
-        # Only consider processes where command starts with 'claude'
+        # Only consider processes where command is claude CLI
         cmd_start = parts[10]
-        if cmd_start != 'claude':
+        if not (cmd_start == 'claude' or cmd_start.endswith('/claude')):
             continue
 
         try:
@@ -270,6 +305,22 @@ def get_claude_processes() -> list[dict]:
             cmd = ' '.join(parts[10:])
         except (ValueError, IndexError):
             continue
+
+        # Skip processes with no controlling terminal (orphaned after terminal close)
+        # TTY of '?' or '??' indicates no controlling terminal
+        if tty in ('?', '??'):
+            continue
+
+        # Skip zombie processes
+        if state.startswith('Z'):
+            continue
+
+        # Verify TTY device still exists (terminal window not closed)
+        # ps aux returns TTY like 's000', 's007' which maps to /dev/ttys000, /dev/ttys007
+        if tty.startswith('s') and tty[1:].isdigit():
+            tty_path = Path(f"/dev/tty{tty}")
+            if not tty_path.exists():
+                continue
 
         # Get actual working directory and start time of the process
         cwd = get_process_cwd(pid)
@@ -285,11 +336,40 @@ def get_claude_processes() -> list[dict]:
         is_gastown_cwd = cwd and any(pattern in cwd for pattern in [
             '/deacon',      # deacon service
             '/witness',     # witness monitor
+            '/mayor',       # mayor orchestrator
             '/polecats/',   # polecat workers
             '/refinery/',   # rig refineries
             '/rig',         # rig directories
+            '/gt/',         # general gastown directory
         ])
         is_gastown = is_gastown_cmd or is_gastown_cwd
+
+        # Extract gastown role from command/env/cwd
+        gastown_role = None
+        if is_gastown:
+            # Try GT_ROLE env var first (e.g., "GT_ROLE=mayor")
+            role_match = re.search(r'GT_ROLE=(\w+)', line)
+            if role_match:
+                gastown_role = role_match.group(1)
+            # Try [GAS TOWN] prompt format (e.g., "[GAS TOWN] mayor <- human")
+            elif '[GAS TOWN]' in cmd:
+                prompt_match = re.search(r'\[GAS TOWN\]\s+(\w+)', cmd)
+                if prompt_match:
+                    gastown_role = prompt_match.group(1)
+            # Fallback: extract role from cwd path
+            if not gastown_role and cwd:
+                if cwd.endswith('/rig'):
+                    gastown_role = 'rig'
+                elif '/deacon' in cwd:
+                    gastown_role = 'deacon'
+                elif '/mayor' in cwd:
+                    gastown_role = 'mayor'
+                elif '/witness' in cwd:
+                    gastown_role = 'witness'
+                elif '/refinery' in cwd and '/rig' not in cwd:
+                    gastown_role = 'refinery'
+                elif '/polecats/' in cwd:
+                    gastown_role = 'polecat'
 
         # Extract session ID from --resume flag if present
         session_id = None
@@ -311,8 +391,25 @@ def get_claude_processes() -> list[dict]:
             'cwd': cwd,
             'start_time': start_time,
             'is_gastown': is_gastown,
+            'gastown_role': gastown_role,
         })
 
+    return processes
+
+
+def get_claude_processes_cached() -> list[dict]:
+    """Get claude processes with caching to avoid frequent subprocess calls.
+
+    Caches process list for PROCESS_CACHE_TTL seconds.
+    """
+    global _process_cache
+    now = time.time()
+
+    if _process_cache and (now - _process_cache[0]) < PROCESS_CACHE_TTL:
+        return _process_cache[1]
+
+    processes = get_claude_processes()
+    _process_cache = (now, processes)
     return processes
 
 
@@ -357,7 +454,27 @@ def get_recent_session_for_project(project_slug: str) -> dict | None:
 
 
 def extract_jsonl_metadata(jsonl_file: Path) -> dict:
-    """Extract metadata from a JSONL file."""
+    """Extract metadata from a JSONL file.
+
+    Uses caching based on file mtime to avoid re-parsing unchanged files.
+    """
+    global _metadata_cache
+    path_str = str(jsonl_file)
+    now = time.time()
+
+    try:
+        current_mtime = jsonl_file.stat().st_mtime
+    except OSError:
+        # File doesn't exist or can't be accessed
+        return {'sessionId': jsonl_file.stem, 'slug': jsonl_file.stem, 'cwd': ''}
+
+    # Check cache: return cached value if mtime hasn't changed and cache isn't stale
+    if path_str in _metadata_cache:
+        cached_mtime, cached_time, cached_data = _metadata_cache[path_str]
+        if cached_mtime == current_mtime and (now - cached_time) < METADATA_CACHE_TTL:
+            return cached_data
+
+    # File changed or cache miss - re-extract metadata
     # Try to derive a slug from the project directory name if needed
     # Project dirs are like: -Users-nathan-norman-projectname
     project_dir_name = jsonl_file.parent.name
@@ -372,7 +489,7 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
         'contextTokens': 0,
         'timestamp': '',
         'startTimestamp': '',  # Feature 05: Session start time
-        'file_mtime': jsonl_file.stat().st_mtime,
+        'file_mtime': current_mtime,
         'recentActivity': [],
         '_fallback_slug': fallback_slug,  # Store for later use
     }
@@ -481,7 +598,53 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
     # Clean up internal field
     metadata.pop('_fallback_slug', None)
 
+    # Detect gastown sessions from cwd path
+    cwd = metadata.get('cwd', '')
+    metadata['isGastown'] = is_gastown_path(cwd)
+    if metadata['isGastown']:
+        metadata['gastownRole'] = extract_gastown_role_from_cwd(cwd)
+
+    # Cache the result and update activity timestamp
+    _metadata_cache[path_str] = (current_mtime, time.time(), metadata)
+    update_activity_timestamp()
+
     return metadata
+
+
+def is_gastown_path(cwd: str) -> bool:
+    """Check if a cwd path indicates a gastown session."""
+    if not cwd:
+        return False
+    # Check for gastown directory patterns
+    # Note: '/gt' matches both '/gt/' and paths ending in '/gt'
+    if cwd.endswith('/gt') or '/gt/' in cwd:
+        return True
+    return any(pattern in cwd for pattern in [
+        '/deacon', '/witness', '/mayor', '/polecats/',
+        '/refinery/', '/rig'
+    ])
+
+
+def extract_gastown_role_from_cwd(cwd: str) -> str | None:
+    """Extract gastown role from cwd path."""
+    if not cwd:
+        return None
+    if cwd.endswith('/rig'):
+        return 'rig'
+    if '/deacon' in cwd:
+        return 'deacon'
+    if '/mayor' in cwd:
+        return 'mayor'
+    if '/witness' in cwd:
+        return 'witness'
+    if '/refinery' in cwd and '/rig' not in cwd:
+        return 'refinery'
+    if '/polecats/' in cwd:
+        return 'polecat'
+    # Generic gastown directory (e.g., /gt or /gt/something)
+    if cwd.endswith('/gt') or '/gt/' in cwd:
+        return 'gastown'
+    return None
 
 
 def extract_activity(content_item: dict) -> str | None:
@@ -555,8 +718,8 @@ def extract_activity(content_item: dict) -> str | None:
 def cwd_to_project_slug(cwd: str) -> str:
     """Convert a cwd path to the project slug format used by Claude."""
     # Claude uses paths like: -Users-nathan-norman-projectname
-    # Note: keeps leading dash, replaces both / and . with -
-    return cwd.replace('/', '-').replace('.', '-')
+    # Note: keeps leading dash, replaces /, ., and _ with -
+    return cwd.replace('/', '-').replace('.', '-').replace('_', '-')
 
 
 def extract_session_timeline(jsonl_file: Path) -> list[dict]:
@@ -771,6 +934,215 @@ def get_all_sessions(max_age_hours: int = 24) -> list[dict]:
     return results
 
 
+def get_dead_sessions(max_age_hours: int = 24) -> list[dict]:
+    """Get dead (ended) sessions - sessions with JSONL files but no running process.
+
+    Args:
+        max_age_hours: Only include sessions modified within this time window
+
+    Returns:
+        List of session metadata dicts with state='dead'
+    """
+    if not CLAUDE_PROJECTS_DIR.exists():
+        return []
+
+    now = time.time()
+    cutoff = now - (max_age_hours * 3600)
+
+    # Get all currently running session IDs
+    running_sessions = get_sessions()
+    running_session_ids = {s['sessionId'] for s in running_sessions}
+
+    results = []
+
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        for jsonl_file in project_dir.glob("*.jsonl"):
+            # Skip agent files
+            if jsonl_file.stem.startswith('agent-'):
+                continue
+
+            session_id = jsonl_file.stem
+
+            # Skip if this session is currently running
+            if session_id in running_session_ids:
+                continue
+
+            try:
+                mtime = jsonl_file.stat().st_mtime
+                if mtime > cutoff:
+                    metadata = extract_jsonl_metadata(jsonl_file)
+                    metadata['state'] = 'dead'
+                    metadata['recency'] = now - mtime
+                    metadata['endedAt'] = datetime.fromtimestamp(mtime).isoformat()
+                    metadata['jsonlPath'] = str(jsonl_file)
+
+                    # Try to get activity logs from (possibly stale) state file
+                    state = read_session_state(session_id, ignore_stale=True)
+                    if state:
+                        metadata['activityLog'] = state.get('activity_log', [])
+                        metadata['hasActivityLog'] = len(metadata['activityLog']) > 0
+                    else:
+                        metadata['activityLog'] = []
+                        metadata['hasActivityLog'] = False
+
+                    results.append(metadata)
+            except Exception:
+                continue
+
+    # Sort by most recent first (smallest recency = most recent)
+    results.sort(key=lambda x: x['recency'])
+    return results
+
+
+def search_dead_sessions(query: str, max_age_hours: int = 24, search_content: bool = False) -> list[dict]:
+    """Search dead sessions by text query.
+
+    Args:
+        query: Search query string (case-insensitive)
+        max_age_hours: Only include sessions modified within this time window
+        search_content: If True, also search conversation content (slower)
+
+    Returns:
+        List of matching session metadata dicts with match info
+    """
+    if not query or not CLAUDE_PROJECTS_DIR.exists():
+        return []
+
+    query_lower = query.lower()
+    query_terms = query_lower.split()
+    now = time.time()
+    cutoff = now - (max_age_hours * 3600)
+
+    # Get running session IDs to exclude
+    running_sessions = get_sessions()
+    running_session_ids = {s['sessionId'] for s in running_sessions}
+
+    results = []
+
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        for jsonl_file in project_dir.glob("*.jsonl"):
+            # Skip agent files
+            if jsonl_file.stem.startswith('agent-'):
+                continue
+
+            session_id = jsonl_file.stem
+
+            # Skip running sessions
+            if session_id in running_session_ids:
+                continue
+
+            try:
+                mtime = jsonl_file.stat().st_mtime
+                if mtime < cutoff:
+                    continue
+
+                metadata = extract_jsonl_metadata(jsonl_file)
+                matches = []
+                match_snippets = []
+
+                # Search metadata fields
+                searchable_meta = ' '.join([
+                    metadata.get('slug', ''),
+                    metadata.get('cwd', ''),
+                    metadata.get('summary', '') or '',
+                    metadata.get('gitBranch', ''),
+                ]).lower()
+
+                # Check if all query terms appear in metadata
+                meta_match = all(term in searchable_meta for term in query_terms)
+                if meta_match:
+                    matches.append('metadata')
+                    if metadata.get('summary'):
+                        match_snippets.append(f"Summary: {metadata['summary'][:100]}")
+
+                # Optionally search conversation content
+                if search_content:
+                    content_match, snippet = _search_jsonl_content(jsonl_file, query_terms)
+                    if content_match:
+                        matches.append('content')
+                        if snippet:
+                            match_snippets.append(snippet)
+
+                if matches:
+                    metadata['state'] = 'dead'
+                    metadata['recency'] = now - mtime
+                    metadata['endedAt'] = datetime.fromtimestamp(mtime).isoformat()
+                    metadata['jsonlPath'] = str(jsonl_file)
+                    metadata['matchType'] = matches
+                    metadata['matchSnippets'] = match_snippets[:3]  # Limit snippets
+
+                    # Try to get activity logs from (possibly stale) state file
+                    state = read_session_state(session_id, ignore_stale=True)
+                    if state:
+                        metadata['activityLog'] = state.get('activity_log', [])
+                        metadata['hasActivityLog'] = len(metadata['activityLog']) > 0
+                    else:
+                        metadata['activityLog'] = []
+                        metadata['hasActivityLog'] = False
+
+                    results.append(metadata)
+
+            except Exception:
+                continue
+
+    # Sort by recency (most recent first)
+    results.sort(key=lambda x: x['recency'])
+    return results
+
+
+def _search_jsonl_content(jsonl_file: Path, query_terms: list[str]) -> tuple[bool, str | None]:
+    """Search JSONL conversation content for query terms.
+
+    Args:
+        jsonl_file: Path to JSONL file
+        query_terms: List of lowercase search terms
+
+    Returns:
+        Tuple of (matched: bool, snippet: str | None)
+    """
+    try:
+        # Read limited amount to avoid huge files
+        max_bytes = 500000  # 500KB
+        file_size = jsonl_file.stat().st_size
+
+        with open(jsonl_file, 'r', encoding='utf-8', errors='ignore') as f:
+            if file_size > max_bytes:
+                # Read from end for recent content
+                f.seek(file_size - max_bytes)
+                f.readline()  # Skip partial line
+
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    line_lower = line.lower()
+
+                    # Quick check: all terms in the raw line
+                    if all(term in line_lower for term in query_terms):
+                        # Extract a snippet from user or assistant message
+                        if data.get('type') == 'user':
+                            content = extract_text_content(data.get('message', {}))
+                            if content:
+                                return True, f"User: {content[:80]}..."
+                        elif data.get('type') == 'assistant':
+                            content = extract_text_content(data.get('message', {}))
+                            if content:
+                                return True, f"Assistant: {content[:80]}..."
+
+                except json.JSONDecodeError:
+                    continue
+
+    except Exception:
+        pass
+
+    return False, None
+
+
 def get_sessions_for_cwd(cwd: str) -> list[dict]:
     """Find all JSONL session files for a given working directory.
 
@@ -866,7 +1238,7 @@ def get_sessions() -> list[dict]:
     2. State file CWD matching (handles sessions that cd'd to different dirs)
     3. Process CWD + start time matching (fallback)
     """
-    processes = get_claude_processes()
+    processes = get_claude_processes_cached()
     result = []
     now = time.time()
 
@@ -977,8 +1349,10 @@ def get_sessions() -> list[dict]:
             'tty': proc['tty'],
             'cpuPercent': proc['cpu'],
             'lastActivity': metadata.get('timestamp', ''),
+            'startTimestamp': metadata.get('startTimestamp', ''),
             'state': state,
             'isGastown': proc.get('is_gastown', False),
+            'gastownRole': proc.get('gastown_role'),
             # Feature 03: Token usage visualization
             'tokenPercentage': metadata.get('tokenPercentage', 0),
             # Feature 04: Cost tracking
@@ -1015,22 +1389,198 @@ def get_sessions() -> list[dict]:
     return result
 
 
-def extract_conversation(jsonl_file: Path, limit: int = 10) -> list[dict]:
-    """Extract recent conversation turns from JSONL."""
+# ============================================================================
+# Compaction Continuation Linking
+# ============================================================================
+
+def get_session_start_timestamp(jsonl_path: Path) -> datetime | None:
+    """Get the start timestamp from a JSONL file's first few lines."""
+    try:
+        with open(jsonl_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for _ in range(20):  # Check first 20 lines
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    data = json.loads(line.strip())
+                    ts = data.get('timestamp')
+                    if ts:
+                        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except Exception:
+        pass
+    return None
+
+
+def get_session_cwd(jsonl_path: Path) -> str | None:
+    """Get the working directory from a JSONL file."""
+    try:
+        with open(jsonl_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for _ in range(50):  # Check first 50 lines
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    data = json.loads(line.strip())
+                    cwd = data.get('cwd')
+                    if cwd:
+                        return cwd
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+    return None
+
+
+def find_session_continuation(session_id: str, project_dir: Path, compaction_timestamp: str) -> str | None:
+    """
+    Find a session that continues from a compacted session.
+
+    Strategy: Look for JSONL files in same project that started
+    within 60 seconds after compaction timestamp and have the same cwd.
+
+    Args:
+        session_id: The ID of the compacted session
+        project_dir: The project directory containing JSONL files
+        compaction_timestamp: ISO timestamp of the compaction event
+
+    Returns:
+        Session ID of the continuation, or None if not found
+    """
+    # Check cache first
+    if session_id in _continuation_cache:
+        # Verify cache is still fresh (check project dir mtime)
+        try:
+            dir_mtime = project_dir.stat().st_mtime
+            cached_mtime = _continuation_cache_mtime.get(session_id, 0)
+            if dir_mtime <= cached_mtime:
+                return _continuation_cache[session_id]
+        except OSError:
+            pass
+
+    # Parse compaction timestamp
+    try:
+        compaction_time = datetime.fromisoformat(compaction_timestamp.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+
+    # Get the source session's cwd for matching
+    source_jsonl = project_dir / f"{session_id}.jsonl"
+    source_cwd = get_session_cwd(source_jsonl) if source_jsonl.exists() else None
+
+    # List all JSONL files in project dir
+    best_match = None
+    best_delta = float('inf')
+
+    for jsonl_path in project_dir.glob("*.jsonl"):
+        # Skip the source session
+        if jsonl_path.stem == session_id:
+            continue
+
+        # Skip agent files
+        if jsonl_path.stem.startswith('agent-'):
+            continue
+
+        # Read first line to get start timestamp
+        start_time = get_session_start_timestamp(jsonl_path)
+        if not start_time:
+            continue
+
+        # Check if started within 60s after compaction
+        delta = (start_time - compaction_time).total_seconds()
+        if 0 < delta < 60 and delta < best_delta:
+            # Verify same cwd if available
+            if source_cwd:
+                candidate_cwd = get_session_cwd(jsonl_path)
+                if candidate_cwd != source_cwd:
+                    continue
+
+            best_match = jsonl_path.stem
+            best_delta = delta
+
+    # Cache result (even if None) with directory mtime
+    _continuation_cache[session_id] = best_match
+    try:
+        _continuation_cache_mtime[session_id] = project_dir.stat().st_mtime
+    except OSError:
+        _continuation_cache_mtime[session_id] = time.time()
+
+    return best_match
+
+
+def extract_conversation(jsonl_file: Path, limit: int = 0, follow_continuations: bool = True) -> list[dict]:
+    """Extract conversation turns from JSONL, optionally following continuation chains.
+
+    Args:
+        jsonl_file: Path to the JSONL file
+        limit: Max messages to return (0 = no limit, return all)
+        follow_continuations: If True, follow compaction continuations to linked sessions
+
+    Returns:
+        List of message dicts with role, content, timestamp, and optionally tools
+    """
+    messages = _extract_single_file_conversation(jsonl_file)
+
+    # Check if ends with compaction and follow continuations
+    if follow_continuations and messages:
+        # Find the last compaction message
+        last_compaction_idx = None
+        last_compaction_ts = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].get('isCompaction'):
+                last_compaction_idx = idx
+                last_compaction_ts = messages[idx].get('timestamp')
+                break
+
+        # If there's a compaction, look for continuation
+        if last_compaction_ts:
+            project_dir = jsonl_file.parent
+            session_id = jsonl_file.stem
+
+            continuation_id = find_session_continuation(session_id, project_dir, last_compaction_ts)
+            if continuation_id:
+                continuation_path = project_dir / f"{continuation_id}.jsonl"
+                if continuation_path.exists():
+                    # Add continuation marker after the compaction
+                    insert_idx = (last_compaction_idx + 1) if last_compaction_idx is not None else len(messages)
+                    messages.insert(insert_idx, {
+                        'role': 'system',
+                        'content': '⬇️ Session continued after compaction...',
+                        'isContinuation': True,
+                        'continuationId': continuation_id,
+                        'timestamp': last_compaction_ts
+                    })
+
+                    # Recursively get continuation messages (handles chains)
+                    continuation_messages = extract_conversation(
+                        continuation_path, limit=0, follow_continuations=True
+                    )
+                    messages.extend(continuation_messages)
+
+    # Apply limit at the end
+    if limit > 0:
+        return messages[-limit:]
+    return messages
+
+
+def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
+    """Extract conversation turns from a single JSONL file (no continuation following).
+
+    Args:
+        jsonl_file: Path to the JSONL file
+
+    Returns:
+        List of message dicts with role, content, timestamp, and optionally tools
+    """
     messages = []
 
     try:
-        with open(jsonl_file, 'rb') as f:
-            # Read from end for efficiency
-            file_size = f.seek(0, 2)
-            read_size = min(file_size, 500000)  # Last 500KB
-            f.seek(max(0, file_size - read_size))
-            if file_size > read_size:
-                f.readline()  # Skip partial line
-
+        # Read the entire file to get full conversation history
+        with open(jsonl_file, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 try:
-                    data = json.loads(line.decode('utf-8'))
+                    data = json.loads(line)
 
                     if data.get('type') == 'user':
                         messages.append({
@@ -1050,12 +1600,23 @@ def extract_conversation(jsonl_file: Path, limit: int = 10) -> list[dict]:
                             'timestamp': data.get('timestamp')
                         })
 
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                    elif data.get('type') == 'summary':
+                        # Compaction summary - shows where conversation was compressed
+                        summary_text = data.get('summary', '')
+                        if summary_text:
+                            messages.append({
+                                'role': 'system',
+                                'content': f"📋 [Conversation compacted]\n{summary_text[:500]}{'...' if len(summary_text) > 500 else ''}",
+                                'timestamp': data.get('timestamp'),
+                                'isCompaction': True
+                            })
+
+                except json.JSONDecodeError:
                     continue
     except Exception:
         pass
 
-    return messages[-limit:]
+    return messages
 
 
 def extract_text_content(message: dict) -> str:
@@ -1073,11 +1634,53 @@ def extract_text_content(message: dict) -> str:
 
 
 def extract_tool_calls(content: list) -> list[str]:
-    """Extract tool call names from content."""
+    """Extract tool call summaries from content with details."""
     tools = []
     for item in content:
         if isinstance(item, dict) and item.get('type') == 'tool_use':
-            tools.append(item.get('name', 'Unknown'))
+            tool_name = item.get('name', 'Unknown')
+            tool_input = item.get('input', {})
+
+            # Build informative summary based on tool type
+            if tool_name == 'Read':
+                path = tool_input.get('file_path', '')
+                filename = path.split('/')[-1] if path else 'file'
+                tools.append(f"Read {filename}")
+            elif tool_name == 'Write':
+                path = tool_input.get('file_path', '')
+                filename = path.split('/')[-1] if path else 'file'
+                tools.append(f"Write {filename}")
+            elif tool_name == 'Edit':
+                path = tool_input.get('file_path', '')
+                filename = path.split('/')[-1] if path else 'file'
+                tools.append(f"Edit {filename}")
+            elif tool_name == 'Bash':
+                cmd = tool_input.get('command', '')[:40]
+                desc = tool_input.get('description', '')
+                if desc:
+                    tools.append(f"Bash: {desc[:40]}")
+                elif cmd:
+                    tools.append(f"Bash: {cmd}")
+                else:
+                    tools.append("Bash")
+            elif tool_name == 'Grep':
+                pattern = tool_input.get('pattern', '')[:25]
+                tools.append(f"Grep '{pattern}'")
+            elif tool_name == 'Glob':
+                pattern = tool_input.get('pattern', '')[:25]
+                tools.append(f"Glob {pattern}")
+            elif tool_name == 'Task':
+                desc = tool_input.get('description', '')[:30]
+                tools.append(f"Task: {desc}" if desc else "Task")
+            elif tool_name == 'TodoWrite':
+                tools.append("Update todos")
+            elif tool_name == 'WebFetch':
+                url = tool_input.get('url', '')
+                # Extract domain from URL
+                domain = url.split('/')[2] if url.count('/') >= 2 else url[:30]
+                tools.append(f"Fetch {domain}")
+            else:
+                tools.append(tool_name)
     return tools
 
 

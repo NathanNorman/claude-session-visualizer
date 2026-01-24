@@ -62,8 +62,80 @@ def init_database():
         ON session_snapshots(session_id)
     ''')
 
+    # Activity summaries table (AI-generated summaries of session activity)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS activity_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            activity_hash TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+    ''')
+
+    c.execute('''
+        CREATE INDEX IF NOT EXISTS idx_activity_summaries_session
+        ON activity_summaries(session_id)
+    ''')
+
+    # Track last activity hash per session to avoid duplicate summaries
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS activity_summary_state (
+            session_id TEXT PRIMARY KEY,
+            last_hash TEXT NOT NULL
+        )
+    ''')
+
     conn.commit()
     conn.close()
+
+
+def get_last_activity_hash(session_id: str) -> str | None:
+    """Get the last activity hash for a session."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT last_hash FROM activity_summary_state WHERE session_id = ?', (session_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def save_activity_summary(session_id: str, summary: str, activity_hash: str) -> None:
+    """Save an activity summary to the database."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Insert the summary
+    c.execute('''
+        INSERT INTO activity_summaries (session_id, timestamp, summary, activity_hash)
+        VALUES (?, ?, ?, ?)
+    ''', (session_id, now, summary, activity_hash))
+
+    # Update the last hash state
+    c.execute('''
+        INSERT OR REPLACE INTO activity_summary_state (session_id, last_hash)
+        VALUES (?, ?)
+    ''', (session_id, activity_hash))
+
+    conn.commit()
+    conn.close()
+
+
+def get_activity_summaries(session_id: str) -> list[dict]:
+    """Get all activity summaries for a session."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT timestamp, summary, activity_hash
+        FROM activity_summaries
+        WHERE session_id = ?
+        ORDER BY timestamp ASC
+    ''', (session_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [{'timestamp': r[0], 'summary': r[1], 'hash': r[2]} for r in rows]
 
 
 def record_session_snapshot(session: dict):

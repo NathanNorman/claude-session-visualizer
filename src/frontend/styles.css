@@ -101,7 +101,24 @@ header h1 { font-size: 24px; font-weight: 600; }
 .card-header {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     margin-bottom: 12px;
+}
+
+.card-header .slug {
+    margin: 0;
+    flex: 1;
+}
+
+.card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.card-bottom {
+    margin-top: auto;
 }
 
 .status-badge {
@@ -142,7 +159,17 @@ header h1 { font-size: 24px; font-weight: 600; }
     opacity: 0.6;
 }
 
-.slug { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+.slug { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+
+/* Meta row with duration, context, and activity badge - like Mission Control */
+.card-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
 
 /* Current activity display (hooks-based state detection) */
 .current-activity {
@@ -534,6 +561,12 @@ header h1 { font-size: 24px; font-weight: 600; }
     opacity: 0.9;
     margin-bottom: 8px;
     line-height: 1.4;
+    max-height: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
 }
 
 .cwd {
@@ -670,7 +703,7 @@ header h1 { font-size: 24px; font-weight: 600; }
     display: flex;
     align-items: center;
     gap: 8px;
-    margin: 12px 0;
+    margin: 4px 0;
     font-size: 12px;
 }
 
@@ -719,8 +752,18 @@ header h1 { font-size: 24px; font-weight: 600; }
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: auto;
-    padding-top: 12px;
+    padding-top: 4px;
+}
+
+.footer-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.session-duration {
+    font-size: 12px;
+    color: var(--text-secondary);
 }
 
 .metrics-btn {
@@ -836,7 +879,7 @@ header h1 { font-size: 24px; font-weight: 600; }
 }
 
 .session-row-label {
-    flex: 0 0 120px;
+    flex: 0 0 160px;
     padding: 12px 0;
     text-align: right;
 }
@@ -857,6 +900,29 @@ header h1 { font-size: 24px; font-weight: 600; }
 
 .row-active {
     color: var(--active-color);
+}
+
+.row-git-status {
+    display: block;
+    font-size: 11px;
+    margin: 4px 0;
+    color: var(--text-secondary);
+}
+
+.row-git-status .git-branch {
+    color: var(--text-secondary);
+}
+
+.row-git-status .git-uncommitted {
+    color: var(--warning-color, #f59e0b);
+}
+
+.row-git-status .git-clean {
+    color: var(--success-color, #10b981);
+}
+
+.row-git-status .git-ahead {
+    color: var(--info-color, #3b82f6);
 }
 
 /* Horizontal cards container */
@@ -1054,174 +1120,69 @@ body.keyboard-mode .session-card .card-number {
     }
 }
 
-/* Feature 12: Session Notes */
-.session-note {
-    margin: 12px 0;
-    padding: 10px 12px;
-    background: rgba(96, 165, 250, 0.1);
-    border-left: 3px solid var(--waiting-color);
-    border-radius: 0 6px 6px 0;
-    cursor: pointer;
-    font-size: 13px;
-    transition: background 0.2s;
-}
-
-.session-note:hover {
-    background: rgba(96, 165, 250, 0.15);
-}
-
-.session-note.empty {
-    background: transparent;
-    border: 1px dashed rgba(255,255,255,0.2);
-    border-radius: 6px;
-    text-align: center;
-    color: var(--text-secondary);
-}
-
-.session-note.empty:hover {
-    background: rgba(255,255,255,0.05);
-}
-
-.add-note {
-    display: block;
-    padding: 4px;
-}
-
-.note-icon {
-    margin-right: 8px;
-}
-
-.note-text {
-    font-style: italic;
-    color: var(--text-primary);
-}
-
-.note-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-}
-
-.note-header .note-tags {
-    margin-top: 0;
-}
-
-.note-content {
-    max-height: 80px;
+/* Activity Summary Log - AI-generated activity summaries */
+.activity-summary-log {
+    max-height: 225px;
     overflow-y: auto;
-    font-size: 12px;
-    color: var(--text-primary);
-    white-space: pre-wrap;
-    line-height: 1.4;
-}
-
-.note-content::-webkit-scrollbar {
-    width: 4px;
-}
-
-.note-content::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.note-content::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,0.2);
-    border-radius: 2px;
-}
-
-.note-tags {
-    margin-top: 8px;
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-
-.tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    background: rgba(255,255,255,0.1);
-    border-radius: 4px;
-    font-size: 11px;
-}
-
-.tag button {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 0;
-    margin-left: 4px;
-}
-
-.tag button:hover {
-    color: var(--text-primary);
-}
-
-/* Note editor */
-.note-editor {
+    margin: 8px 0;
     padding: 8px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 6px;
+    border-left: 3px solid var(--active-color);
 }
 
-.note-editor h3 {
-    font-size: 20px;
-    margin-bottom: 16px;
-}
-
-.note-editor textarea {
-    width: 100%;
-    min-height: 100px;
+.activity-summary-log.empty {
+    color: var(--text-secondary);
+    font-style: italic;
+    text-align: center;
+    border-left: 3px solid rgba(255,255,255,0.2);
     padding: 12px;
-    background: rgba(0,0,0,0.2);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 8px;
-    color: var(--text-primary);
-    font-size: 14px;
-    resize: vertical;
-    font-family: inherit;
 }
 
-.note-editor textarea:focus {
-    outline: none;
-    border-color: var(--active-color);
+.activity-summary-log::-webkit-scrollbar {
+    width: 6px;
 }
 
-.tag-input {
-    margin-top: 16px;
-}
-
-.tag-input label {
-    display: block;
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-}
-
-.tags-container {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 8px;
-    background: rgba(0,0,0,0.2);
-    border-radius: 8px;
-    min-height: 40px;
-}
-
-#new-tag {
-    padding: 4px 8px;
+.activity-summary-log::-webkit-scrollbar-track {
     background: transparent;
-    border: 1px dashed rgba(255,255,255,0.2);
-    border-radius: 4px;
-    color: var(--text-primary);
-    font-size: 12px;
-    width: 100px;
-    font-family: inherit;
 }
 
-#new-tag:focus {
-    outline: none;
-    border-color: var(--active-color);
+.activity-summary-log::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.2);
+    border-radius: 3px;
+}
+
+.summary-entry {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    align-items: flex-start;
+}
+
+.summary-entry:last-child {
+    border-bottom: none;
+}
+
+.summary-entry.current {
+    background: rgba(74, 222, 128, 0.1);
+    border-radius: 4px;
+    padding: 4px 6px;
+    margin: 0 -6px;
+}
+
+.summary-time {
+    color: var(--text-secondary);
+    font-size: 11px;
+    min-width: 28px;
+    flex-shrink: 0;
+}
+
+.summary-text {
+    color: var(--text-primary);
+    flex: 1;
+    line-height: 1.4;
 }
 
 .modal-actions {
@@ -1270,6 +1231,7 @@ body.keyboard-mode .session-card .card-number {
 /* Feature 11: Session Templates */
 .card-actions {
     position: relative;
+    margin-left: auto;
 }
 
 .action-menu-btn {
@@ -2429,6 +2391,19 @@ body.keyboard-mode .session-card .card-number {
     opacity: 0.5;
 }
 
+.legend-dot.closed {
+    background: #6b7280;
+    opacity: 0.6;
+}
+
+.timeline-row.closed .timeline-info .session-name {
+    color: #9ca3af;
+}
+
+.timeline-row.closed .timeline-info .last-active {
+    color: #6b7280;
+}
+
 .timeline-container {
     background: var(--card-bg);
     border-radius: 12px;
@@ -2636,7 +2611,7 @@ body.keyboard-mode .session-card .card-number {
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 8px 0 8px 180px;
+    padding: 8px 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     margin-bottom: 8px;
     display: flex;
@@ -2668,6 +2643,48 @@ body.keyboard-mode .session-card .card-number {
 
 .timeline-row.gastown-row .timeline-bar.active {
     background: linear-gradient(90deg, #8b5cf6, #a78bfa);
+}
+
+/* Timeline subsections (for gastown grouping) */
+.timeline-subsection {
+    margin-bottom: 12px;
+}
+
+.timeline-subsection-header {
+    font-size: 11px;
+    font-weight: 500;
+    color: #d97706;
+    padding: 4px 16px 4px 32px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+/* Activity indicators */
+.idle-indicator {
+    color: #f59e0b;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    background: rgba(245, 158, 11, 0.15);
+    border-radius: 4px;
+}
+
+.active-indicator {
+    color: #4ade80;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    background: rgba(74, 222, 128, 0.15);
+    border-radius: 4px;
+}
+
+.stale-indicator {
+    color: #f5a623;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    background: rgba(245, 166, 35, 0.2);
+    border-radius: 4px;
 }
 
 /* Timeline Popover */
@@ -3308,6 +3325,27 @@ body.keyboard-mode .session-card .card-number {
     height: 2px;
 }
 
+/* Compact card - Mission Control style */
+.compact-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.compact-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.compact-meta .compact-expand {
+    margin-left: auto;
+}
+
+/* Legacy compact-row support */
 .compact-row {
     display: flex;
     align-items: center;
@@ -3329,6 +3367,11 @@ body.keyboard-mode .session-card .card-number {
 .compact-row .status-dot.waiting {
     background: var(--waiting-color);
     opacity: 0.6;
+}
+
+.compact-row .status-dot.stale {
+    background: #f5a623;
+    opacity: 0.9;
 }
 
 .compact-slug {
@@ -3779,6 +3822,17 @@ body.keyboard-mode .session-card .card-number {
     filter: brightness(1.1);
 }
 
+/* Polecat avatar image */
+.polecat-avatar {
+    width: 80px;
+    height: 80px;
+    object-fit: contain;
+    float: right;
+    margin: 0 0 8px 12px;
+    image-rendering: pixelated;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+
 /* ============================================================================
    UX Enhancement: Focus Mode
    ============================================================================ */
@@ -3966,6 +4020,57 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     gap: 8px;
 }
 
+/* Mission Control repo grouping */
+.mc-repo-group {
+    margin-bottom: 16px;
+}
+
+.mc-repo-header {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    padding: 8px 12px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    margin-bottom: 8px;
+}
+
+.mc-repo-sessions {
+    padding-left: 0;
+}
+
+.mc-gastown-section {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.mc-section-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: #f59e0b;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+}
+
+.mc-gastown-group .mc-repo-header {
+    color: #d97706;
+}
+
+.mc-gastown-group .mc-session-item {
+    background: rgba(245, 158, 11, 0.05);
+}
+
+.mc-gastown-group .mc-session-item:hover {
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.mc-gastown-group .mc-session-item.active {
+    background: rgba(245, 158, 11, 0.15);
+    border-left-color: #f59e0b;
+}
+
 /* Conversation stream */
 .mc-conversation-stream {
     font-family: 'SF Mono', Monaco, Consolas, monospace;
@@ -4020,6 +4125,70 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 .mc-message.assistant .mc-message-role {
     color: var(--active-color);
+}
+
+.mc-message.system {
+    background: rgba(156, 163, 175, 0.1);
+    border-left: 3px solid #6b7280;
+}
+
+.mc-message.system .mc-message-role {
+    color: #9ca3af;
+}
+
+.mc-compaction {
+    font-size: 0.85em;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Continuation marker - shown when conversation continues in a new JSONL file after compaction */
+.mc-continuation-marker {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 8px;
+    margin: 8px 0;
+}
+
+.mc-continuation-line {
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(74, 222, 128, 0.4), transparent);
+}
+
+.mc-continuation-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(74, 222, 128, 0.1);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+    border-radius: 20px;
+    color: var(--active-color);
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.mc-continuation-icon {
+    font-size: 14px;
+    animation: bounce 1.5s ease-in-out infinite;
+}
+
+.mc-continuation-text {
+    font-weight: 500;
+}
+
+.mc-continuation-id {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: 'SF Mono', Monaco, monospace;
+    opacity: 0.7;
+}
+
+@keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(3px); }
 }
 
 .mc-message-time {
@@ -4077,5 +4246,411 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     .mc-conversation-stream {
         font-size: 11px;
         padding: 12px;
+    }
+}
+
+/* ============================================================================
+   Session Graveyard Styles
+   ============================================================================ */
+
+#graveyard-view {
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.graveyard-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    padding-bottom: 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.graveyard-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    color: #9ca3af;
+}
+
+.graveyard-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+/* Graveyard Search */
+.graveyard-search-container {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+.graveyard-search {
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 13px;
+    width: 160px;
+    outline: none;
+}
+
+.graveyard-search::placeholder {
+    color: var(--text-secondary);
+}
+
+.search-btn,
+.clear-search-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px;
+    font-size: 14px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.search-btn:hover,
+.clear-search-btn:hover {
+    opacity: 1;
+}
+
+.clear-search-btn {
+    color: #ef4444;
+}
+
+.search-content-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.search-content-toggle input {
+    cursor: pointer;
+}
+
+/* Search Result Highlights */
+.graveyard-card.search-match {
+    border-color: rgba(59, 130, 246, 0.5);
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), var(--card-bg));
+}
+
+.graveyard-matches {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+}
+
+.match-types {
+    color: #3b82f6;
+    margin-bottom: 4px;
+    font-weight: 500;
+}
+
+.match-snippet {
+    color: var(--text-secondary);
+    padding: 2px 0;
+    border-left: 2px solid #3b82f6;
+    padding-left: 8px;
+    margin-top: 4px;
+    font-size: 10px;
+    line-height: 1.4;
+    max-height: 40px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.graveyard-range-select {
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.graveyard-range-select:hover {
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.graveyard-count {
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 12px;
+}
+
+.graveyard-container {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.graveyard-loading,
+.graveyard-empty,
+.graveyard-error {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.graveyard-error {
+    color: #ef4444;
+}
+
+.graveyard-section {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.graveyard-section-header {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.graveyard-gastown {
+    border-left: 3px solid #f59e0b;
+}
+
+.graveyard-gastown .graveyard-section-header {
+    color: #f59e0b;
+}
+
+.graveyard-group {
+    margin-bottom: 16px;
+}
+
+.graveyard-group:last-child {
+    margin-bottom: 0;
+}
+
+.graveyard-group-header {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+    letter-spacing: 0.5px;
+}
+
+.graveyard-group-sessions {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+}
+
+.graveyard-card {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.graveyard-card:hover {
+    background: rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+}
+
+.graveyard-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.graveyard-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: #9ca3af;
+}
+
+.graveyard-ended {
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: rgba(0, 0, 0, 0.3);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.graveyard-card-meta {
+    display: flex;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.graveyard-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    margin-bottom: 10px;
+    padding: 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    border-left: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Graveyard Activity Log - shows emoji trail from session activity */
+.graveyard-activity-log {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding: 6px 8px;
+    background: rgba(74, 222, 128, 0.05);
+    border-radius: 4px;
+    border-left: 2px solid rgba(74, 222, 128, 0.3);
+}
+
+.graveyard-activity-log .activity-trail {
+    display: flex;
+    gap: 2px;
+    flex-wrap: wrap;
+    font-size: 14px;
+}
+
+.graveyard-activity-log .activity-item {
+    cursor: default;
+    transition: transform 0.2s ease;
+}
+
+.graveyard-activity-log .activity-item:hover {
+    transform: scale(1.3);
+}
+
+.graveyard-activity-log .activity-count {
+    font-size: 10px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+/* Highlight cards with activity logs */
+.graveyard-card.has-activity {
+    border-left: 2px solid rgba(74, 222, 128, 0.4);
+}
+
+.graveyard-card-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.graveyard-btn {
+    flex: 1;
+    padding: 6px 10px;
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.graveyard-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Graveyard Details Modal */
+.graveyard-details {
+    max-width: 500px;
+}
+
+.graveyard-details h2 {
+    margin: 0 0 16px 0;
+    color: #9ca3af;
+}
+
+.graveyard-details-meta {
+    margin-bottom: 16px;
+}
+
+.graveyard-details-meta p {
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+.graveyard-details-meta code {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.graveyard-details-summary {
+    margin-bottom: 16px;
+    padding: 12px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
+}
+
+.graveyard-details-summary h3 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.graveyard-details-summary p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.graveyard-details-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.graveyard-details-actions button {
+    flex: 1;
+    min-width: 140px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .graveyard-header {
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+    }
+
+    .graveyard-group-sessions {
+        grid-template-columns: 1fr;
+    }
+
+    .graveyard-details-actions {
+        flex-direction: column;
+    }
+
+    .graveyard-details-actions button {
+        width: 100%;
     }
 }

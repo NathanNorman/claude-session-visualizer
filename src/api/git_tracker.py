@@ -224,7 +224,7 @@ def find_related_pr(cwd: str, branch: str) -> Optional[dict]:
 
 # Cache for git status to avoid frequent subprocess calls
 _git_status_cache: dict[str, tuple[float, Optional[GitStatus]]] = {}
-_cache_ttl = 10.0  # Cache for 10 seconds
+_cache_ttl = 60.0  # Cache for 60 seconds (optimized for dirty-check pattern)
 
 
 def get_cached_git_status(cwd: str) -> Optional[GitStatus]:
