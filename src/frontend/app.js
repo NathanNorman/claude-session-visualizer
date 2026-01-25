@@ -5018,6 +5018,623 @@ function formatTimeAgo(date) {
 document.addEventListener('DOMContentLoaded', initMissionControl);
 
 // ============================================================================
+// Process Management - Spawn and control Claude sessions from Mission Control
+// ============================================================================
+
+// Track managed processes (spawned from MC)
+let managedProcesses = new Map(); // processId -> { ws, state, cwd }
+let selectedProcessId = null; // Currently selected managed process
+let processOutputStickyScroll = null;
+
+/**
+ * Show the spawn session modal
+ */
+async function showSpawnModal() {
+    const modal = document.getElementById('spawn-modal');
+    const directoryInput = document.getElementById('spawn-directory');
+
+    if (modal) {
+        modal.classList.remove('hidden');
+        if (directoryInput) {
+            directoryInput.value = '';
+            directoryInput.focus();
+        }
+        await loadRecentDirectories();
+    }
+}
+
+/**
+ * Hide the spawn session modal
+ */
+function hideSpawnModal() {
+    const modal = document.getElementById('spawn-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+/**
+ * Load recent directories for quick selection
+ */
+async function loadRecentDirectories() {
+    const listEl = document.getElementById('spawn-recent-list');
+    if (!listEl) return;
+
+    listEl.innerHTML = '<div class="spawn-loading">Loading recent directories...</div>';
+
+    try {
+        const response = await fetch('/api/recent-directories');
+        if (!response.ok) throw new Error('Failed to load directories');
+
+        const data = await response.json();
+        const directories = data.directories || [];
+
+        if (directories.length === 0) {
+            listEl.innerHTML = '<div class="spawn-loading">No recent directories found</div>';
+            return;
+        }
+
+        listEl.innerHTML = directories.map(dir => `
+            <div class="spawn-recent-item" onclick="selectSpawnDirectory('${escapeHtml(dir.path)}')">
+                <span class="dir-icon">📁</span>
+                <div class="dir-info">
+                    <div class="dir-name">${escapeHtml(dir.name)}</div>
+                    <div class="dir-path">${escapeHtml(dir.path)}</div>
+                </div>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('Failed to load recent directories:', error);
+        listEl.innerHTML = '<div class="spawn-loading">Failed to load directories</div>';
+    }
+}
+
+/**
+ * Select a directory from the recent list
+ */
+function selectSpawnDirectory(path) {
+    const input = document.getElementById('spawn-directory');
+    if (input) {
+        input.value = path;
+        input.focus();
+    }
+}
+
+/**
+ * Spawn a new Claude session
+ */
+async function spawnSession() {
+    const input = document.getElementById('spawn-directory');
+    const cwd = input?.value?.trim();
+
+    if (!cwd) {
+        showToast('Please enter a directory path', 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/spawn', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cwd })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        const processId = data.process_id;
+
+        // Track the managed process
+        managedProcesses.set(processId, {
+            id: processId,
+            cwd: data.cwd,
+            state: data.state,
+            ws: null
+        });
+
+        hideSpawnModal();
+        showToast(`Spawned session in ${data.cwd}`, 'success');
+
+        // Connect to process output stream
+        connectToProcess(processId);
+
+        // Refresh the session list
+        refreshMissionControl();
+        refreshManagedProcessList();
+
+    } catch (error) {
+        console.error('Failed to spawn session:', error);
+        showToast(`Failed to spawn: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Connect to a managed process WebSocket for output streaming
+ */
+function connectToProcess(processId) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    // Close existing connection if any
+    if (process.ws) {
+        process.ws.close();
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/process/${processId}`);
+
+    ws.onopen = () => {
+        console.log(`[Process ${processId}] WebSocket connected`);
+        process.state = 'running';
+        updateProcessUI(processId);
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            handleProcessMessage(processId, msg);
+        } catch (e) {
+            console.error('Failed to parse process message:', e);
+        }
+    };
+
+    ws.onclose = () => {
+        console.log(`[Process ${processId}] WebSocket closed`);
+        process.ws = null;
+    };
+
+    ws.onerror = (error) => {
+        console.error(`[Process ${processId}] WebSocket error:`, error);
+    };
+
+    process.ws = ws;
+}
+
+/**
+ * Handle incoming process WebSocket message
+ */
+function handleProcessMessage(processId, msg) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    switch (msg.type) {
+        case 'output':
+            appendTerminalOutput(processId, msg.data);
+            break;
+
+        case 'history':
+            // Received buffered history on connect
+            if (Array.isArray(msg.lines)) {
+                const content = msg.lines.join('');
+                setTerminalOutput(processId, content);
+            }
+            break;
+
+        case 'state':
+            process.state = msg.state;
+            if (msg.exit_code !== undefined && msg.exit_code !== null) {
+                process.exitCode = msg.exit_code;
+            }
+            updateProcessUI(processId);
+            if (msg.state === 'stopped') {
+                showToast(`Process stopped (exit ${msg.exit_code || 0})`, 'info');
+            }
+            break;
+
+        case 'error':
+            showToast(`Process error: ${msg.message}`, 'error');
+            break;
+    }
+}
+
+/**
+ * Set terminal output content (replacing existing)
+ */
+function setTerminalOutput(processId, content) {
+    if (selectedProcessId !== processId) return;
+
+    const terminalEl = document.getElementById('mc-terminal-output');
+    const contentEl = terminalEl?.querySelector('.mc-terminal-content');
+
+    if (contentEl) {
+        contentEl.innerHTML = parseAnsiToHtml(content);
+
+        // Initialize sticky scroll if needed
+        if (!processOutputStickyScroll && terminalEl) {
+            processOutputStickyScroll = new StickyScroll(terminalEl, { showIndicator: true });
+            processOutputStickyScroll.attach();
+        }
+        processOutputStickyScroll?.scrollToBottom();
+    }
+}
+
+/**
+ * Append content to terminal output
+ */
+function appendTerminalOutput(processId, content) {
+    if (selectedProcessId !== processId) return;
+
+    const terminalEl = document.getElementById('mc-terminal-output');
+    const contentEl = terminalEl?.querySelector('.mc-terminal-content');
+
+    if (contentEl) {
+        contentEl.innerHTML += parseAnsiToHtml(content);
+        processOutputStickyScroll?.scrollToBottom();
+    }
+}
+
+/**
+ * Parse ANSI escape codes to HTML
+ */
+function parseAnsiToHtml(text) {
+    if (!text) return '';
+
+    // ANSI color code mapping
+    const ansiColors = {
+        '30': 'ansi-black', '31': 'ansi-red', '32': 'ansi-green', '33': 'ansi-yellow',
+        '34': 'ansi-blue', '35': 'ansi-magenta', '36': 'ansi-cyan', '37': 'ansi-white',
+        '90': 'ansi-bright-black', '91': 'ansi-bright-red', '92': 'ansi-bright-green',
+        '93': 'ansi-bright-yellow', '94': 'ansi-bright-blue', '95': 'ansi-bright-magenta',
+        '96': 'ansi-bright-cyan', '97': 'ansi-bright-white'
+    };
+
+    const ansiStyles = {
+        '1': 'ansi-bold', '2': 'ansi-dim', '3': 'ansi-italic', '4': 'ansi-underline'
+    };
+
+    let result = '';
+    let currentClasses = [];
+    let i = 0;
+
+    // Escape HTML first
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Parse ANSI sequences
+    const ansiRegex = /\x1b\[([0-9;]*)m/g;
+    let lastIndex = 0;
+    let match;
+
+    while ((match = ansiRegex.exec(text)) !== null) {
+        // Add text before this escape sequence
+        if (match.index > lastIndex) {
+            const segment = text.slice(lastIndex, match.index);
+            if (currentClasses.length > 0) {
+                result += `<span class="${currentClasses.join(' ')}">${segment}</span>`;
+            } else {
+                result += segment;
+            }
+        }
+
+        // Process the escape sequence
+        const codes = match[1].split(';');
+        for (const code of codes) {
+            if (code === '0' || code === '') {
+                // Reset
+                currentClasses = [];
+            } else if (ansiColors[code]) {
+                // Remove existing color class
+                currentClasses = currentClasses.filter(c => !c.startsWith('ansi-') || c.includes('bold') || c.includes('dim') || c.includes('italic') || c.includes('underline'));
+                currentClasses.push(ansiColors[code]);
+            } else if (ansiStyles[code]) {
+                currentClasses.push(ansiStyles[code]);
+            }
+        }
+
+        lastIndex = ansiRegex.lastIndex;
+    }
+
+    // Add remaining text
+    if (lastIndex < text.length) {
+        const segment = text.slice(lastIndex);
+        if (currentClasses.length > 0) {
+            result += `<span class="${currentClasses.join(' ')}">${segment}</span>`;
+        } else {
+            result += segment;
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Update UI for a managed process
+ */
+function updateProcessUI(processId) {
+    refreshManagedProcessList();
+
+    // Update kill button visibility
+    if (selectedProcessId === processId) {
+        const killBtn = document.getElementById('mc-kill-btn');
+        const process = managedProcesses.get(processId);
+        if (killBtn && process) {
+            killBtn.classList.toggle('hidden', process.state === 'stopped');
+        }
+    }
+}
+
+/**
+ * Refresh the managed processes in the session list
+ */
+async function refreshManagedProcessList() {
+    try {
+        const response = await fetch('/api/processes');
+        if (!response.ok) return;
+
+        const processes = await response.json();
+
+        // Update local tracking
+        for (const p of processes) {
+            if (!managedProcesses.has(p.id)) {
+                managedProcesses.set(p.id, {
+                    id: p.id,
+                    cwd: p.cwd,
+                    state: p.state,
+                    ws: null
+                });
+            } else {
+                const existing = managedProcesses.get(p.id);
+                existing.state = p.state;
+                existing.exitCode = p.exit_code;
+            }
+        }
+
+        // Clean up stopped processes not in the list
+        const activeIds = new Set(processes.map(p => p.id));
+        for (const [id, process] of managedProcesses) {
+            if (!activeIds.has(id) && process.state === 'stopped') {
+                managedProcesses.delete(id);
+            }
+        }
+
+    } catch (error) {
+        console.error('Failed to refresh managed processes:', error);
+    }
+}
+
+/**
+ * Select a managed process in Mission Control
+ */
+function selectManagedProcess(processId) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    // Deselect detected session
+    mcSelectedSessionId = null;
+    selectedProcessId = processId;
+
+    // Update session list selection
+    document.querySelectorAll('.mc-session-item').forEach(el => {
+        el.classList.toggle('selected', el.dataset.processId === processId);
+    });
+
+    // Update panel header
+    const labelEl = document.getElementById('mc-selected-session');
+    const typeEl = document.getElementById('mc-session-type');
+    const titleEl = document.getElementById('mc-panel-title');
+    const killBtn = document.getElementById('mc-kill-btn');
+
+    if (labelEl) {
+        const dirName = process.cwd.split('/').pop() || process.cwd;
+        labelEl.textContent = dirName;
+    }
+
+    if (typeEl) {
+        typeEl.textContent = 'Managed';
+        typeEl.className = 'mc-session-type-badge managed';
+    }
+
+    if (titleEl) {
+        titleEl.textContent = 'Terminal Output';
+    }
+
+    if (killBtn) {
+        killBtn.classList.toggle('hidden', process.state === 'stopped');
+    }
+
+    // Show terminal output, hide conversation stream
+    const streamEl = document.getElementById('mc-conversation-stream');
+    const terminalEl = document.getElementById('mc-terminal-output');
+
+    if (streamEl) streamEl.classList.add('hidden');
+    if (terminalEl) {
+        terminalEl.classList.remove('hidden');
+        // Clear and reconnect
+        const contentEl = terminalEl.querySelector('.mc-terminal-content');
+        if (contentEl) contentEl.innerHTML = '';
+    }
+
+    // Show input for managed processes
+    showMCInput();
+
+    // Connect to WebSocket if not already
+    if (!process.ws || process.ws.readyState !== WebSocket.OPEN) {
+        connectToProcess(processId);
+    }
+}
+
+/**
+ * Send input to a managed process
+ */
+async function sendProcessInput() {
+    if (!selectedProcessId) return;
+
+    const inputEl = document.getElementById('mc-input');
+    const statusEl = document.getElementById('mc-input-status');
+    const text = inputEl?.innerText?.trim();
+
+    if (!text) return;
+
+    try {
+        const response = await fetch(`/api/process/${selectedProcessId}/stdin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, newline: true })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        // Clear input on success
+        if (inputEl) inputEl.innerHTML = '';
+        if (statusEl) {
+            statusEl.textContent = 'Sent!';
+            setTimeout(() => { statusEl.textContent = ''; }, 1000);
+        }
+
+    } catch (error) {
+        console.error('Failed to send process input:', error);
+        if (statusEl) {
+            statusEl.textContent = error.message;
+            statusEl.className = 'error';
+            setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 3000);
+        }
+    }
+}
+
+/**
+ * Kill the currently selected managed process
+ */
+async function killSelectedProcess() {
+    if (!selectedProcessId) return;
+
+    const process = managedProcesses.get(selectedProcessId);
+    if (!process || process.state === 'stopped') return;
+
+    if (!confirm(`Stop process in ${process.cwd}?`)) return;
+
+    try {
+        const response = await fetch(`/api/process/${selectedProcessId}/kill`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        showToast('Process stopped', 'success');
+        refreshManagedProcessList();
+
+    } catch (error) {
+        console.error('Failed to kill process:', error);
+        showToast(`Failed to stop: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Override sendMCMessage to handle both detected and managed sessions
+ */
+const originalSendMCMessage = sendMCMessage;
+sendMCMessage = async function() {
+    if (selectedProcessId) {
+        // Send to managed process
+        await sendProcessInput();
+    } else if (mcSelectedSessionId) {
+        // Send to detected session (original behavior)
+        await originalSendMCMessage();
+    }
+};
+
+/**
+ * Override selectMissionControlSession to handle session type switching
+ */
+const originalSelectMissionControlSession = selectMissionControlSession;
+selectMissionControlSession = function(sessionId) {
+    // Deselect managed process
+    selectedProcessId = null;
+
+    // Update type badge to detected
+    const typeEl = document.getElementById('mc-session-type');
+    const titleEl = document.getElementById('mc-panel-title');
+    const killBtn = document.getElementById('mc-kill-btn');
+
+    if (typeEl) {
+        typeEl.textContent = 'Detected';
+        typeEl.className = 'mc-session-type-badge detected';
+    }
+
+    if (titleEl) {
+        titleEl.textContent = 'Live Conversation';
+    }
+
+    if (killBtn) {
+        killBtn.classList.add('hidden');
+    }
+
+    // Show conversation stream, hide terminal output
+    const streamEl = document.getElementById('mc-conversation-stream');
+    const terminalEl = document.getElementById('mc-terminal-output');
+
+    if (streamEl) streamEl.classList.remove('hidden');
+    if (terminalEl) terminalEl.classList.add('hidden');
+
+    // Call original function
+    originalSelectMissionControlSession(sessionId);
+};
+
+/**
+ * Render managed processes in the session list
+ */
+function renderManagedProcessesInList(container) {
+    if (managedProcesses.size === 0) return '';
+
+    let html = '<div class="mc-managed-section">';
+    html += '<div class="mc-section-header">🖥️ Managed Sessions</div>';
+
+    for (const [id, process] of managedProcesses) {
+        const stateEmoji = process.state === 'running' ? '🟢' :
+                          process.state === 'stopped' ? '⚫' : '🟡';
+        const dirName = process.cwd.split('/').pop() || process.cwd;
+        const isSelected = selectedProcessId === id;
+
+        html += `
+            <div class="mc-session-item managed ${isSelected ? 'selected' : ''}"
+                 data-process-id="${id}"
+                 onclick="selectManagedProcess('${id}')">
+                <div class="mc-session-name">${stateEmoji} ${escapeHtml(dirName)}<span class="managed-badge">MC</span></div>
+                <div class="mc-session-meta">${escapeHtml(process.cwd)}</div>
+            </div>
+        `;
+    }
+
+    html += '</div>';
+    return html;
+}
+
+// Patch renderMissionControlSessions to include managed processes
+const originalRenderMissionControlSessions = renderMissionControlSessions;
+renderMissionControlSessions = function(sessions) {
+    // Call original to render detected sessions
+    originalRenderMissionControlSessions(sessions);
+
+    // Add managed processes section
+    const container = document.getElementById('mc-sessions-list');
+    if (container && managedProcesses.size > 0) {
+        // Insert managed processes at the top
+        const managedHtml = renderManagedProcessesInList(container);
+        container.insertAdjacentHTML('afterbegin', managedHtml);
+
+        // Add click handlers for managed process items
+        container.querySelectorAll('.mc-session-item[data-process-id]').forEach(el => {
+            el.onclick = () => selectManagedProcess(el.dataset.processId);
+        });
+    }
+
+    // Update count to include managed processes
+    const countEl = document.getElementById('mc-active-count');
+    if (countEl) {
+        const runningManaged = Array.from(managedProcesses.values()).filter(p => p.state === 'running').length;
+        const total = sessions.length + runningManaged;
+        countEl.textContent = total;
+    }
+};
+
+// ============================================================================
 // Session Graveyard - View dead/ended sessions
 // ============================================================================
 

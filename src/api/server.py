@@ -40,7 +40,9 @@ from .routes import (
     machines_router,
     templates_router,
     sharing_router,
+    processes_router,
 )
+from .process_manager import get_process_manager
 
 # Export for use by routes
 _summary_cache = get_summary_cache()
@@ -65,6 +67,7 @@ app.include_router(analytics_router)
 app.include_router(machines_router)
 app.include_router(templates_router)
 app.include_router(sharing_router)
+app.include_router(processes_router)
 
 # Global WebSocket manager
 ws_manager = ConnectionManager()
@@ -264,6 +267,16 @@ def get_ws_status():
     }
 
 
+# WebSocket endpoint for process output streaming
+@app.websocket("/ws/process/{process_id}")
+async def websocket_process(websocket: WebSocket, process_id: str):
+    """Stream process output to WebSocket client."""
+    await websocket.accept()
+
+    process_manager = get_process_manager()
+    await process_manager.stream_output(process_id, websocket)
+
+
 # Background tasks
 async def watch_sessions_loop(interval: float = 2.0):
     """Background task that watches for session changes and broadcasts updates."""
@@ -348,6 +361,10 @@ async def shutdown_event():
 
     if _file_watcher_task:
         _file_watcher_task.cancel()
+
+    # Clean up managed processes
+    process_manager = get_process_manager()
+    await process_manager.cleanup()
 
     manager = get_tunnel_manager()
     manager.stop_monitor()

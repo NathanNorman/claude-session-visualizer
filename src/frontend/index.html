@@ -131,7 +131,12 @@
             <div class="mc-panel mc-sessions-panel">
                 <div class="mc-panel-header">
                     <h3>Active Sessions</h3>
-                    <span id="mc-active-count" class="mc-count">0</span>
+                    <div class="mc-panel-header-actions">
+                        <span id="mc-active-count" class="mc-count">0</span>
+                        <button id="mc-spawn-btn" class="mc-spawn-btn" onclick="showSpawnModal()" title="Spawn new Claude session">
+                            + New
+                        </button>
+                    </div>
                 </div>
                 <div id="mc-sessions-list" class="mc-panel-content">
                     <div class="mc-empty">No active sessions</div>
@@ -139,11 +144,20 @@
             </div>
             <div class="mc-panel mc-conversation-panel">
                 <div class="mc-panel-header">
-                    <h3>Live Conversation</h3>
-                    <span id="mc-selected-session" class="mc-selected-label">Select a session</span>
+                    <h3 id="mc-panel-title">Live Conversation</h3>
+                    <div class="mc-panel-header-right">
+                        <span id="mc-session-type" class="mc-session-type-badge hidden"></span>
+                        <span id="mc-selected-session" class="mc-selected-label">Select a session</span>
+                        <button id="mc-kill-btn" class="mc-kill-btn hidden" onclick="killSelectedProcess()" title="Stop process">
+                            Stop
+                        </button>
+                    </div>
                 </div>
                 <div id="mc-conversation-stream" class="mc-panel-content mc-conversation-stream">
                     <div class="mc-empty">Select a session to view conversation</div>
+                </div>
+                <div id="mc-terminal-output" class="mc-panel-content mc-terminal-output hidden">
+                    <div class="mc-terminal-content"></div>
                 </div>
                 <div id="mc-input-container" class="mc-input-container hidden">
                     <div class="mc-input-wrapper">
@@ -156,6 +170,38 @@
                         <span id="mc-input-status"></span>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Spawn Session Modal -->
+    <div id="spawn-modal" class="spawn-modal hidden">
+        <div class="spawn-modal-content">
+            <div class="spawn-modal-header">
+                <h3>Spawn New Claude Session</h3>
+                <button class="spawn-modal-close" onclick="hideSpawnModal()">&times;</button>
+            </div>
+            <div class="spawn-modal-body">
+                <div class="spawn-input-group">
+                    <label for="spawn-directory">Working Directory</label>
+                    <div class="spawn-directory-input">
+                        <input type="text" id="spawn-directory" placeholder="/path/to/project"
+                               onkeydown="if(event.key==='Enter') spawnSession()">
+                        <button class="spawn-browse-btn" onclick="document.getElementById('spawn-directory').focus()" title="Type or paste path">
+                            📁
+                        </button>
+                    </div>
+                </div>
+                <div class="spawn-recent-dirs">
+                    <label>Recent Directories</label>
+                    <div id="spawn-recent-list" class="spawn-recent-list">
+                        <div class="spawn-loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="spawn-modal-footer">
+                <button class="spawn-cancel-btn" onclick="hideSpawnModal()">Cancel</button>
+                <button class="spawn-confirm-btn" onclick="spawnSession()">Spawn Session</button>
             </div>
         </div>
     </div>
