@@ -34,9 +34,6 @@ export async function init() {
     // Set up view switching
     setupViewSwitching();
 
-    // Set up keyboard shortcuts
-    setupKeyboardShortcuts();
-
     // Set up search/filter
     setupFilters();
 
@@ -230,45 +227,6 @@ function switchView(view) {
     }
 
     state.currentView = view;
-}
-
-/**
- * Set up keyboard shortcuts.
- */
-function setupKeyboardShortcuts() {
-    document.addEventListener('keydown', (e) => {
-        // Ignore if typing in an input
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-            return;
-        }
-
-        switch (e.key) {
-            case 'r':
-                if (!e.ctrlKey && !e.metaKey) {
-                    fetchAndRenderSessions();
-                    showToast('Refreshed');
-                }
-                break;
-            case 'c':
-                if (!e.ctrlKey && !e.metaKey) {
-                    toggleCardMode();
-                }
-                break;
-            case 'g':
-                if (!e.ctrlKey && !e.metaKey) {
-                    toggleGroupByProject();
-                    renderSessions(state.allVisibleSessions);
-                }
-                break;
-            case '/':
-                e.preventDefault();
-                document.getElementById('search-input')?.focus();
-                break;
-            case 'Escape':
-                document.getElementById('search-input')?.blur();
-                break;
-        }
-    });
 }
 
 /**

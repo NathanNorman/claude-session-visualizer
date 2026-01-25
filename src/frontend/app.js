@@ -82,9 +82,8 @@ function saveNotificationSettings() {
     }
 }
 
-// Feature 13: Keyboard shortcuts state
+// Session selection state
 let selectedIndex = -1;
-let keyboardMode = false;
 let allVisibleSessions = [];
 
 // Feature 15: AI Summary state
@@ -2947,167 +2946,6 @@ function checkStateChanges(oldSessions, newSessions) {
     // State change detection disabled - kept as no-op for API compatibility
 }
 
-// ============================================================================
-// Feature 13: Keyboard Shortcuts Implementation
-// ============================================================================
-
-function initializeKeyboardShortcuts() {
-    const helpButton = document.getElementById('help-button');
-    helpButton.addEventListener('click', showShortcutsHelp);
-    document.addEventListener('keydown', handleKeyPress);
-    document.addEventListener('keydown', () => {
-        document.body.classList.add('keyboard-mode');
-    });
-    document.addEventListener('mousedown', () => {
-        document.body.classList.remove('keyboard-mode');
-        clearSelection();
-    });
-}
-
-function handleKeyPress(e) {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-        if (e.key === 'Escape') {
-            e.target.blur();
-            clearSelection();
-        }
-        return;
-    }
-    const modalOpen = !document.getElementById('modal-overlay').classList.contains('hidden');
-    if (modalOpen) {
-        if (e.key === 'Escape' || e.key === '?') {
-            closeModal();
-            e.preventDefault();
-        }
-        return;
-    }
-    const shortcuts = {
-        'ArrowUp': () => selectSession(selectedIndex - 1),
-        'ArrowDown': () => selectSession(selectedIndex + 1),
-        'k': () => selectSession(selectedIndex - 1),
-        'j': () => selectSession(selectedIndex + 1),
-        '1': () => selectSession(0),
-        '2': () => selectSession(1),
-        '3': () => selectSession(2),
-        '4': () => selectSession(3),
-        '5': () => selectSession(4),
-        '6': () => selectSession(5),
-        '7': () => selectSession(6),
-        '8': () => selectSession(7),
-        '9': () => selectSession(8),
-        'Enter': () => focusSelectedTerminal(),
-        'c': () => copySelectedSessionId(),
-        '/': () => focusSearch(),
-        'r': () => fetchSessions(),
-        'n': () => showNotificationSettings(),
-        'm': () => { soundManager.toggle(); soundManager.updateMuteIndicator(); showToast(soundManager.enabled ? 'Sound enabled' : 'Sound muted'); },
-        'v': () => toggleCardMode(),
-        'f': () => toggleFocusMode(),
-        '?': () => showShortcutsHelp(),
-        'Escape': () => clearSelection(),
-        // View navigation shortcuts (Mission Control)
-        's': () => { switchView('sessions'); showToast('Sessions view'); },
-        'g': () => { switchView('gastown'); showToast('Gastown view'); },
-        't': () => { switchView('timeline'); showToast('Timeline view'); },
-        'a': () => { switchView('analytics'); showToast('Analytics view'); },
-        'c': () => { switchView('mission-control'); showToast('Mission Control'); },
-        'Tab': () => { const next = missionControl.cycleView(1); switchView(next); showToast(`${missionControl.getViewDisplayName(next)} view`); }
-    };
-    const handler = shortcuts[e.key];
-    if (handler) {
-        e.preventDefault();
-        keyboardMode = true;
-        handler();
-    }
-}
-
-function selectSession(index) {
-    if (allVisibleSessions.length === 0) return;
-    const maxIndex = allVisibleSessions.length - 1;
-    if (index < 0) index = maxIndex;
-    if (index > maxIndex) index = 0;
-    selectedIndex = index;
-    const cards = document.querySelectorAll('.session-card');
-    cards.forEach((card, i) => {
-        card.classList.toggle('keyboard-selected', i === selectedIndex);
-    });
-    cards[selectedIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-
-function clearSelection() {
-    selectedIndex = -1;
-    keyboardMode = false;
-    document.querySelectorAll('.keyboard-selected').forEach(el => {
-        el.classList.remove('keyboard-selected');
-    });
-}
-
-function getSelectedSession() {
-    if (selectedIndex < 0 || selectedIndex >= allVisibleSessions.length) return null;
-    return allVisibleSessions[selectedIndex];
-}
-
-function focusSelectedTerminal() {
-    const session = getSelectedSession();
-    if (session) focusWarpTab(session);
-}
-
-function copySelectedSessionId() {
-    const session = getSelectedSession();
-    if (session) {
-        navigator.clipboard.writeText(session.sessionId);
-        showToast('Session ID copied');
-    }
-}
-
-function focusSearch() {
-    const searchInput = document.getElementById('search');
-    if (searchInput) searchInput.focus();
-}
-
-function showShortcutsHelp() {
-    showModal(`
-        <h2>Keyboard Shortcuts</h2>
-        <div class="shortcuts-grid">
-            <div class="shortcut-section">
-                <h4>Views</h4>
-                <dl>
-                    <dt>s</dt><dd>Sessions view</dd>
-                    <dt>g</dt><dd>Gastown view</dd>
-                    <dt>t</dt><dd>Timeline view</dd>
-                    <dt>a</dt><dd>Analytics view</dd>
-                    <dt>Tab</dt><dd>Cycle views</dd>
-                </dl>
-            </div>
-            <div class="shortcut-section">
-                <h4>Navigation</h4>
-                <dl>
-                    <dt>↑/↓</dt><dd>Select session</dd>
-                    <dt>j/k</dt><dd>Select session (vim)</dd>
-                    <dt>1-9</dt><dd>Jump to session</dd>
-                    <dt>/</dt><dd>Focus search</dd>
-                    <dt>Esc</dt><dd>Clear selection</dd>
-                </dl>
-            </div>
-            <div class="shortcut-section">
-                <h4>Actions</h4>
-                <dl>
-                    <dt>Enter</dt><dd>Focus terminal</dd>
-                    <dt>c</dt><dd>Copy session ID</dd>
-                    <dt>r</dt><dd>Refresh</dd>
-                </dl>
-            </div>
-            <div class="shortcut-section">
-                <h4>Settings</h4>
-                <dl>
-                    <dt>n</dt><dd>Notification settings</dd>
-                    <dt>m</dt><dd>Toggle sound</dd>
-                    <dt>?</dt><dd>Show this help</dd>
-                </dl>
-            </div>
-        </div>
-    `);
-}
-
 // Initialize UX enhancements
 function initializeUXEnhancements() {
     // Apply saved focus mode state
@@ -3123,8 +2961,21 @@ function initializeUXEnhancements() {
 document.addEventListener('DOMContentLoaded', () => {
     initializeFilters();
     initializeNotifications();
-    initializeKeyboardShortcuts();
     initializeUXEnhancements();
+
+    // Initialize sliding tab indicator position
+    const activeTab = document.querySelector('.tab-button.active');
+    if (activeTab) {
+        updateTabIndicator(activeTab);
+    }
+
+    // Update indicator on window resize
+    window.addEventListener('resize', () => {
+        const currentActiveTab = document.querySelector('.tab-button.active');
+        if (currentActiveTab) {
+            updateTabIndicator(currentActiveTab);
+        }
+    });
 });
 
 // ============================================================================
@@ -3535,6 +3386,19 @@ function hideTimelinePopover() {
     }, 150);
 }
 
+// Update tab indicator position
+function updateTabIndicator(activeButton) {
+    const indicator = document.querySelector('.tab-indicator');
+    if (!indicator || !activeButton) return;
+
+    const tabsContainer = document.querySelector('.view-tabs');
+    const containerRect = tabsContainer.getBoundingClientRect();
+    const buttonRect = activeButton.getBoundingClientRect();
+
+    indicator.style.left = (buttonRect.left - containerRect.left) + 'px';
+    indicator.style.width = buttonRect.width + 'px';
+}
+
 // View switching
 function switchView(viewName) {
     // Track view in MissionControlManager
@@ -3544,6 +3408,10 @@ function switchView(viewName) {
     document.querySelectorAll('.tab-button').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.view === viewName);
     });
+
+    // Update sliding indicator position
+    const activeButton = document.querySelector(`.tab-button[data-view="${viewName}"]`);
+    updateTabIndicator(activeButton);
 
     // Update view visibility
     document.querySelectorAll('.view').forEach(view => {
@@ -4489,6 +4357,225 @@ function initMissionControl() {
     if (streamEl) {
         mcStickyScroll = new StickyScroll(streamEl, { showIndicator: true }).attach();
     }
+
+    // Initialize message input
+    initMCInput();
+}
+
+/**
+ * Initialize Mission Control message input
+ */
+function initMCInput() {
+    const inputEl = document.getElementById('mc-input');
+    const sendBtn = document.getElementById('mc-send-btn');
+
+    if (!inputEl || !sendBtn) return;
+
+    // Handle input for syntax highlighting
+    inputEl.addEventListener('input', () => {
+        highlightMCInput(inputEl);
+    });
+
+    // Handle Cmd+Enter to send
+    inputEl.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            sendMCMessage();
+        }
+    });
+
+    // Handle paste - strip formatting
+    inputEl.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const text = e.clipboardData.getData('text/plain');
+        document.execCommand('insertText', false, text);
+    });
+
+    // Send button click
+    sendBtn.addEventListener('click', () => {
+        sendMCMessage();
+    });
+}
+
+/**
+ * Apply syntax highlighting for backtick code in the input
+ */
+function highlightMCInput(el) {
+    // Get current text and cursor position
+    const sel = window.getSelection();
+    const range = sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+    let cursorOffset = 0;
+
+    if (range && el.contains(range.startContainer)) {
+        // Calculate cursor offset in plain text
+        const preCaretRange = range.cloneRange();
+        preCaretRange.selectNodeContents(el);
+        preCaretRange.setEnd(range.startContainer, range.startOffset);
+        cursorOffset = preCaretRange.toString().length;
+    }
+
+    // Get plain text
+    const text = el.innerText || '';
+
+    // If no backticks, no highlighting needed
+    if (!text.includes('`')) {
+        return;
+    }
+
+    // Highlight code blocks (```...```) and inline code (`...`)
+    let html = escapeHtml(text);
+
+    // Code blocks first (triple backticks)
+    html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+
+    // Then inline code (single backticks)
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Only update if changed
+    if (el.innerHTML !== html) {
+        el.innerHTML = html;
+
+        // Restore cursor position
+        if (cursorOffset > 0) {
+            restoreCursor(el, cursorOffset);
+        }
+    }
+}
+
+/**
+ * Restore cursor position after HTML modification
+ */
+function restoreCursor(el, offset) {
+    const range = document.createRange();
+    const sel = window.getSelection();
+
+    let charCount = 0;
+    let found = false;
+
+    function walkNodes(node) {
+        if (found) return;
+
+        if (node.nodeType === Node.TEXT_NODE) {
+            const nextCount = charCount + node.textContent.length;
+            if (offset <= nextCount) {
+                range.setStart(node, offset - charCount);
+                range.collapse(true);
+                found = true;
+            }
+            charCount = nextCount;
+        } else {
+            for (const child of node.childNodes) {
+                walkNodes(child);
+                if (found) break;
+            }
+        }
+    }
+
+    walkNodes(el);
+
+    if (found) {
+        sel.removeAllRanges();
+        sel.addRange(range);
+    } else {
+        // Put cursor at end if offset not found
+        range.selectNodeContents(el);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+    }
+}
+
+/**
+ * Send message to the selected session
+ */
+async function sendMCMessage() {
+    const inputEl = document.getElementById('mc-input');
+    const sendBtn = document.getElementById('mc-send-btn');
+    const statusEl = document.getElementById('mc-input-status');
+
+    if (!inputEl || !mcSelectedSessionId) return;
+
+    // Get plain text content
+    const message = inputEl.innerText.trim();
+    if (!message) return;
+
+    // Disable input during send
+    sendBtn.disabled = true;
+    inputEl.contentEditable = 'false';
+    if (statusEl) {
+        statusEl.textContent = 'Sending...';
+        statusEl.className = 'sending';
+    }
+
+    try {
+        const response = await fetch(`/api/session/${mcSelectedSessionId}/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, submit: true })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        // Success - clear input
+        inputEl.innerHTML = '';
+        if (statusEl) {
+            statusEl.textContent = 'Sent!';
+            statusEl.className = '';
+            setTimeout(() => { statusEl.textContent = ''; }, 2000);
+        }
+
+        // Refresh conversation after a short delay
+        setTimeout(() => {
+            loadConversationHistory(mcSelectedSessionId, true);
+        }, 500);
+
+    } catch (error) {
+        console.error('Failed to send message:', error);
+        if (statusEl) {
+            statusEl.textContent = error.message;
+            statusEl.className = 'error';
+            setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 3000);
+        }
+        showToast(`Failed to send: ${error.message}`, 'error');
+    } finally {
+        // Re-enable input
+        sendBtn.disabled = false;
+        inputEl.contentEditable = 'true';
+        inputEl.focus();
+    }
+}
+
+/**
+ * Show the Mission Control message input
+ */
+function showMCInput() {
+    const container = document.getElementById('mc-input-container');
+    if (container) {
+        container.classList.remove('hidden');
+    }
+}
+
+/**
+ * Hide the Mission Control message input
+ */
+function hideMCInput() {
+    const container = document.getElementById('mc-input-container');
+    const inputEl = document.getElementById('mc-input');
+    const statusEl = document.getElementById('mc-input-status');
+
+    if (container) {
+        container.classList.add('hidden');
+    }
+    if (inputEl) {
+        inputEl.innerHTML = '';
+    }
+    if (statusEl) {
+        statusEl.textContent = '';
+        statusEl.className = '';
+    }
 }
 
 /**
@@ -4751,6 +4838,13 @@ function selectMissionControlSession(sessionId) {
         labelEl.textContent = displayName;
     }
 
+    // Show/hide message input based on session state
+    if (session && (session.state === 'active' || session.state === 'waiting')) {
+        showMCInput();
+    } else {
+        hideMCInput();
+    }
+
     // Load conversation
     loadConversationHistory(sessionId);
 }
@@ -4896,6 +4990,9 @@ function clearMissionControlConversation() {
     if (labelEl) {
         labelEl.textContent = 'Select a session';
     }
+
+    // Hide message input
+    hideMCInput();
 }
 
 /**

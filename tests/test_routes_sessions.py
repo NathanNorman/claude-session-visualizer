@@ -1,7 +1,7 @@
 """Tests for session routes."""
 
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import signal
 
 import pytest
@@ -342,3 +342,214 @@ class TestGetActivitySummaries:
         assert response.status_code == 200
         data = response.json()
         assert data['entries'] == []
+
+
+class TestSendMessageToSession:
+    """Tests for POST /api/session/{session_id}/send endpoint."""
+
+    @patch('src.api.routes.sessions.write_to_tty')
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_successful_send(self, mock_sessions, mock_write, client):
+        """Test successful message send to session."""
+        mock_sessions.return_value = [
+            {'sessionId': 'test-1', 'state': 'active', 'tty': 's000'}
+        ]
+        mock_write.return_value = {'success': True, 'tty_path': '/dev/ttys000'}
+
+        response = client.post('/api/session/test-1/send', json={
+            'message': 'Hello Claude',
+            'submit': True
+        })
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data['success'] is True
+        assert data['sessionId'] == 'test-1'
+        assert data['tty'] == '/dev/ttys000'
+        assert data['submitted'] is True
+        mock_write.assert_called_once_with('s000', 'Hello Claude', True)
+
+    @patch('src.api.routes.sessions.write_to_tty')
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_send_without_submit(self, mock_sessions, mock_write, client):
+        """Test sending message without auto-submit (no newline)."""
+        mock_sessions.return_value = [
+            {'sessionId': 'test-1', 'state': 'waiting', 'tty': 's001'}
+        ]
+        mock_write.return_value = {'success': True, 'tty_path': '/dev/ttys001'}
+
+        response = client.post('/api/session/test-1/send', json={
+            'message': 'partial text',
+            'submit': False
+        })
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data['submitted'] is False
+        mock_write.assert_called_once_with('s001', 'partial text', False)
+
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_session_not_found(self, mock_sessions, client):
+        """Test 404 when session doesn't exist."""
+        mock_sessions.return_value = []
+
+        response = client.post('/api/session/nonexistent/send', json={
+            'message': 'Hello'
+        })
+
+        assert response.status_code == 404
+        assert 'not found' in response.json()['detail'].lower()
+
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_session_is_dead(self, mock_sessions, client):
+        """Test 400 when session is not running."""
+        mock_sessions.return_value = [
+            {'sessionId': 'dead-1', 'state': 'dead', 'tty': 's000'}
+        ]
+
+        response = client.post('/api/session/dead-1/send', json={
+            'message': 'Hello'
+        })
+
+        assert response.status_code == 400
+        assert 'not running' in response.json()['detail'].lower()
+
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_session_no_tty(self, mock_sessions, client):
+        """Test 400 when session has no TTY."""
+        mock_sessions.return_value = [
+            {'sessionId': 'test-1', 'state': 'active', 'tty': None}
+        ]
+
+        response = client.post('/api/session/test-1/send', json={
+            'message': 'Hello'
+        })
+
+        assert response.status_code == 400
+        assert 'no tty' in response.json()['detail'].lower()
+
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_message_too_long(self, mock_sessions, client):
+        """Test 400 when message exceeds 10KB limit."""
+        mock_sessions.return_value = [
+            {'sessionId': 'test-1', 'state': 'active', 'tty': 's000'}
+        ]
+
+        # Create a message > 10KB
+        long_message = 'x' * 11000
+
+        response = client.post('/api/session/test-1/send', json={
+            'message': long_message
+        })
+
+        assert response.status_code == 400
+        assert 'too long' in response.json()['detail'].lower()
+
+    @patch('src.api.routes.sessions.write_to_tty')
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_tty_not_found(self, mock_sessions, mock_write, client):
+        """Test 400 when TTY device doesn't exist."""
+        mock_sessions.return_value = [
+            {'sessionId': 'test-1', 'state': 'active', 'tty': 's999'}
+        ]
+        mock_write.side_effect = FileNotFoundError('TTY device not found: /dev/ttys999')
+
+        response = client.post('/api/session/test-1/send', json={
+            'message': 'Hello'
+        })
+
+        assert response.status_code == 400
+        assert 'not found' in response.json()['detail'].lower()
+
+    @patch('src.api.routes.sessions.write_to_tty')
+    @patch('src.api.routes.sessions.get_sessions')
+    def test_tty_permission_denied(self, mock_sessions, mock_write, client):
+        """Test 500 when TTY write permission denied."""
+        mock_sessions.return_value = [
+            {'sessionId': 'test-1', 'state': 'active', 'tty': 's000'}
+        ]
+        mock_write.side_effect = PermissionError()
+
+        response = client.post('/api/session/test-1/send', json={
+            'message': 'Hello'
+        })
+
+        assert response.status_code == 500
+        assert 'permission denied' in response.json()['detail'].lower()
+
+
+class TestWriteToTty:
+    """Tests for write_to_tty helper function (AppleScript-based implementation)."""
+
+    def test_tty_path_conversion_short_format(self):
+        """Test TTY path conversion from 's000' format."""
+        from src.api.routes.sessions import write_to_tty
+
+        # Mock subprocess.run for AppleScript execution
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = 'sent'
+        mock_result.stderr = ''
+
+        with patch('subprocess.run', return_value=mock_result) as mock_run:
+            result = write_to_tty('s000', 'test message', submit=True)
+
+            # Verify subprocess was called with osascript
+            mock_run.assert_called_once()
+            call_args = mock_run.call_args
+            assert call_args[0][0][0] == 'osascript'
+            assert call_args[0][0][1] == '-e'
+
+            # Verify script contains keystroke and return
+            script = call_args[0][0][2]
+            assert 'keystroke "test message"' in script
+            assert 'keystroke return' in script
+
+            assert result['success'] is True
+            assert result['tty_path'] == '/dev/ttys000'
+
+    def test_tty_path_conversion_full_format(self):
+        """Test TTY path when already in full /dev/ format."""
+        from src.api.routes.sessions import write_to_tty
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = 'sent'
+        mock_result.stderr = ''
+
+        with patch('subprocess.run', return_value=mock_result):
+            result = write_to_tty('/dev/ttys001', 'test', submit=False)
+
+            assert result['tty_path'] == '/dev/ttys001'
+
+    def test_no_newline_when_submit_false(self):
+        """Test no keystroke return when submit=False."""
+        from src.api.routes.sessions import write_to_tty
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = 'sent'
+        mock_result.stderr = ''
+
+        with patch('subprocess.run', return_value=mock_result) as mock_run:
+            write_to_tty('s000', 'test', submit=False)
+
+            # Verify script does NOT contain keystroke return
+            script = mock_run.call_args[0][0][2]
+            assert 'keystroke "test"' in script
+            assert 'keystroke return' not in script
+
+    def test_raises_when_applescript_fails(self):
+        """Test RuntimeError when AppleScript execution fails."""
+        from src.api.routes.sessions import write_to_tty
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ''
+        mock_result.stderr = 'AppleScript error: access not allowed'
+
+        with patch('subprocess.run', return_value=mock_result):
+            with pytest.raises(RuntimeError) as exc_info:
+                write_to_tty('s999', 'test')
+
+            assert 'AppleScript error' in str(exc_info.value)

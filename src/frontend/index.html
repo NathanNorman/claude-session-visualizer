@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="styles.css?v=8">
 </head>
 <body>
+    <a href="#main-content" class="skip-link">Skip to main content</a>
     <header>
         <h1>Claude Code Sessions</h1>
         <div id="status">
@@ -28,13 +29,11 @@
             <button id="notification-toggle" class="icon-button" title="Toggle notifications">
                 🔔
             </button>
-            <button id="help-button" class="icon-button" title="Keyboard shortcuts (?)">
-                ?
-            </button>
         </div>
     </header>
 
     <nav class="view-tabs">
+        <div class="tab-indicator"></div>
         <button class="tab-button active" onclick="switchView('sessions')" data-view="sessions">
             Sessions
         </button>
@@ -55,6 +54,7 @@
         </button>
     </nav>
 
+    <div id="main-content" role="main">
     <div id="sessions-view" class="view active">
         <div id="filters">
             <input type="text" id="search" placeholder="🔍 Search sessions...">
@@ -145,6 +145,17 @@
                 <div id="mc-conversation-stream" class="mc-panel-content mc-conversation-stream">
                     <div class="mc-empty">Select a session to view conversation</div>
                 </div>
+                <div id="mc-input-container" class="mc-input-container hidden">
+                    <div class="mc-input-wrapper">
+                        <div id="mc-input" class="mc-input" contenteditable="true"
+                             data-placeholder="Type a message..." spellcheck="false"></div>
+                        <button id="mc-send-btn" class="mc-send-btn" title="Send (Cmd+Enter)">➤</button>
+                    </div>
+                    <div class="mc-input-hints">
+                        <span>Cmd+Enter to send</span>
+                        <span id="mc-input-status"></span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -182,6 +193,7 @@
             <div class="graveyard-loading">Loading dead sessions...</div>
         </div>
     </div>
+    </div> <!-- end main-content -->
 
     <!-- Modal for keyboard shortcuts and other dialogs -->
     <div id="modal-overlay" class="modal-overlay hidden">

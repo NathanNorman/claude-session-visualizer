@@ -37,6 +37,74 @@ class KillRequest(BaseModel):
     pid: int
 
 
+class SendMessageRequest(BaseModel):
+    message: str
+    submit: bool = True
+
+
+def write_to_tty(tty: str, message: str, submit: bool = True) -> dict:
+    """Send text to a terminal session using AppleScript System Events.
+
+    This activates Warp and uses System Events to type text and optionally press Enter.
+    Works with Warp terminal (and can be adapted for other terminals).
+
+    Args:
+        tty: TTY identifier (e.g., 's000' or '/dev/ttys000') - used for logging
+        message: Text to send to the session
+        submit: If True, press Enter after typing the text
+
+    Returns:
+        dict with success status
+    """
+    import subprocess
+
+    # Normalize TTY format
+    if tty.startswith('s') and tty[1:].isdigit():
+        tty_match = f"/dev/tty{tty}"
+    elif not tty.startswith('/dev/'):
+        tty_match = f"/dev/{tty}"
+    else:
+        tty_match = tty
+
+    # Escape message for AppleScript (escape backslashes and quotes)
+    escaped_message = message.replace('\\', '\\\\').replace('"', '\\"')
+
+    # Build keystroke command - type text then optionally press Enter
+    if submit:
+        keystroke_cmd = f'''
+            keystroke "{escaped_message}"
+            keystroke return
+        '''
+    else:
+        keystroke_cmd = f'keystroke "{escaped_message}"'
+
+    # Use System Events to send keystrokes to Warp
+    script = f'''
+tell application "Warp"
+    activate
+end tell
+delay 0.1
+tell application "System Events"
+    tell process "Warp"
+        {keystroke_cmd}
+    end tell
+end tell
+return "sent"
+'''
+
+    result = subprocess.run(
+        ['osascript', '-e', script],
+        capture_output=True,
+        text=True
+    )
+
+    output = result.stdout.strip()
+    if result.returncode == 0:
+        return {"success": True, "tty_path": tty_match}
+    else:
+        raise RuntimeError(f"AppleScript error: {result.stderr or output}")
+
+
 @router.get("/sessions")
 async def api_get_sessions(include_summaries: bool = False):
     """Get sessions, optionally with AI summaries."""
@@ -275,3 +343,48 @@ def api_get_activity_summaries(session_id: str):
         'sessionId': session_id,
         'entries': entries
     }
+
+
+@router.post("/session/{session_id}/send")
+def send_message_to_session(session_id: str, request: SendMessageRequest):
+    """Send a message to a Claude session via TTY.
+
+    This writes directly to the session's TTY device to inject text
+    into the terminal input.
+    """
+    # Validate message length
+    if len(request.message) > 10240:  # 10KB limit
+        raise HTTPException(400, "Message too long (max 10KB)")
+
+    # Find the session
+    sessions = get_sessions()
+    session = next((s for s in sessions if s['sessionId'] == session_id), None)
+
+    if not session:
+        raise HTTPException(404, f"Session {session_id} not found")
+
+    # Check if session is alive
+    state = session.get('state', 'unknown')
+    if state == 'dead':
+        raise HTTPException(400, "Session is not running")
+
+    # Get TTY
+    tty = session.get('tty')
+    if not tty:
+        raise HTTPException(400, "Session has no TTY")
+
+    # Write to TTY
+    try:
+        result = write_to_tty(tty, request.message, request.submit)
+        return {
+            "success": True,
+            "sessionId": session_id,
+            "tty": result["tty_path"],
+            "submitted": request.submit
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+    except PermissionError:
+        raise HTTPException(500, f"Permission denied writing to TTY: {tty}")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to write to TTY: {str(e)}")
