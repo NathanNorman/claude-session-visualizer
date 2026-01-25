@@ -5074,8 +5074,8 @@ async function loadRecentDirectories() {
             return;
         }
 
-        listEl.innerHTML = directories.map(dir => `
-            <div class="spawn-recent-item" onclick="selectSpawnDirectory('${escapeHtml(dir.path)}')">
+        listEl.innerHTML = directories.map((dir, idx) => `
+            <div class="spawn-recent-item" data-path-idx="${idx}">
                 <span class="dir-icon">📁</span>
                 <div class="dir-info">
                     <div class="dir-name">${escapeHtml(dir.name)}</div>
@@ -5083,6 +5083,19 @@ async function loadRecentDirectories() {
                 </div>
             </div>
         `).join('');
+
+        // Store paths and attach click handlers via event delegation
+        listEl._directories = directories;
+        listEl.onclick = (e) => {
+            const item = e.target.closest('.spawn-recent-item');
+            if (item) {
+                const idx = parseInt(item.dataset.pathIdx, 10);
+                const dir = listEl._directories[idx];
+                if (dir) {
+                    selectSpawnDirectory(dir.path);
+                }
+            }
+        };
     } catch (error) {
         console.error('Failed to load recent directories:', error);
         listEl.innerHTML = '<div class="spawn-loading">Failed to load directories</div>';
