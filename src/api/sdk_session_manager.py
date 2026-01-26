@@ -157,26 +157,22 @@ class SDKSessionManager:
         })
 
         try:
-            # Build options
+            # Build options - use acceptEdits to auto-approve tools for now
             options = ClaudeAgentOptions(
                 cwd=session.cwd,
-                can_use_tool=session._can_use_tool,
+                permission_mode='acceptEdits',
             )
 
             # If we have a previous session ID, resume it
             if session.session_id:
                 options = ClaudeAgentOptions(
                     cwd=session.cwd,
-                    can_use_tool=session._can_use_tool,
+                    permission_mode='acceptEdits',
                     resume=session.session_id,
                 )
 
-            # can_use_tool requires streaming mode - wrap prompt in async generator
-            async def prompt_stream():
-                yield {"type": "text", "text": text}
-
-            # Use query() async generator - this is the correct API
-            async for message in query(prompt=prompt_stream(), options=options):
+            # Use query() with simple string prompt
+            async for message in query(prompt=text, options=options):
                 # Capture session ID from init message for future resume
                 if hasattr(message, 'subtype') and message.subtype == 'init':
                     if hasattr(message, 'session_id'):
