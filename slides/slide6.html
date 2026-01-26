@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #0d1117; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #0d1117;
+  font-family: Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  background: #161b22;
+  padding: 12pt 40pt;
+}
+h1 {
+  color: #f0883e;
+  font-size: 28pt;
+  margin: 0;
+  font-weight: bold;
+}
+.content {
+  padding: 15pt 40pt;
+  display: flex;
+  gap: 25pt;
+}
+.flow-section {
+  flex: 1;
+}
+.flow-title {
+  color: #8b949e;
+  font-size: 12pt;
+  margin: 0 0 15pt 0;
+  text-transform: uppercase;
+}
+.approval-card {
+  background: #21262d;
+  border: 2pt solid #f0883e;
+  border-radius: 8pt;
+  padding: 15pt;
+  margin-bottom: 15pt;
+}
+.approval-header {
+  color: #f0883e;
+  font-size: 12pt;
+  font-weight: bold;
+  margin: 0 0 10pt 0;
+}
+.approval-tool {
+  background: #0d1117;
+  border-radius: 4pt;
+  padding: 10pt;
+  margin-bottom: 12pt;
+}
+.approval-tool p {
+  color: #7ee787;
+  font-size: 9pt;
+  font-family: Courier New, monospace;
+  margin: 0;
+  line-height: 1.5;
+}
+.approval-buttons {
+  display: flex;
+  gap: 10pt;
+}
+.btn {
+  padding: 8pt 20pt;
+  border-radius: 4pt;
+  font-size: 11pt;
+  font-weight: bold;
+}
+.btn.allow {
+  background: #238636;
+  color: #ffffff;
+}
+.btn.allow p {
+  margin: 0;
+}
+.btn.deny {
+  background: transparent;
+  border: 1pt solid #30363d;
+  color: #8b949e;
+}
+.btn.deny p {
+  margin: 0;
+}
+.callback-code {
+  background: #161b22;
+  border-radius: 8pt;
+  padding: 15pt;
+  border: 1pt solid #30363d;
+}
+.callback-code h3 {
+  color: #8b949e;
+  font-size: 10pt;
+  margin: 0 0 10pt 0;
+}
+.callback-code p {
+  color: #c9d1d9;
+  font-size: 9pt;
+  font-family: Courier New, monospace;
+  margin: 0 0 4pt 0;
+  line-height: 1.5;
+}
+.highlight {
+  color: #ffa657;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>New Feature: Tool Approval Flow</h1>
+</div>
+<div class="content">
+  <div class="flow-section">
+    <p class="flow-title">User sees in browser</p>
+    <div class="approval-card">
+      <p class="approval-header">Tool: Bash</p>
+      <div class="approval-tool">
+        <p>{"command": "rm -rf /tmp/test",</p>
+        <p> "description": "Delete temp files"}</p>
+      </div>
+      <div class="approval-buttons">
+        <div class="btn allow"><p>Allow</p></div>
+        <div class="btn deny"><p>Deny</p></div>
+      </div>
+    </div>
+    <div class="callback-code">
+      <h3>WebSocket Message</h3>
+      <p>{"type": "tool_approval",</p>
+      <p> "tool_use_id": "abc123",</p>
+      <p> "name": "Bash",</p>
+      <p> "input": {...}}</p>
+    </div>
+  </div>
+  <div class="flow-section">
+    <p class="flow-title">Backend callback</p>
+    <div class="callback-code">
+      <h3>can_use_tool callback</h3>
+      <p>async def can_use_tool(</p>
+      <p>    tool_name, tool_input, ctx):</p>
+      <p>  </p>
+      <p>  # Broadcast to WebSocket</p>
+      <p>  await broadcast(approval_msg)</p>
+      <p>  </p>
+      <p>  # Wait for user response</p>
+      <p>  approved = await future</p>
+      <p>  </p>
+      <p>  if approved:</p>
+      <p>    return <span class="highlight">PermissionResultAllow</span>(</p>
+      <p>      updated_input=tool_input)</p>
+      <p>  else:</p>
+      <p>    return <span class="highlight">PermissionResultDeny</span>(</p>
+      <p>      message="User denied")</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>

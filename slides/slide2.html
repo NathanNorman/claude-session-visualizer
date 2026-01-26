@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #0d1117; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #0d1117;
+  font-family: Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  background: #161b22;
+  padding: 15pt 40pt;
+  border-bottom: 1pt solid #30363d;
+}
+h1 {
+  color: #f85149;
+  font-size: 28pt;
+  margin: 0;
+  font-weight: bold;
+}
+.content {
+  padding: 20pt 40pt;
+  display: flex;
+  gap: 25pt;
+}
+.problem-list {
+  flex: 1;
+}
+.problem-item {
+  background: #21262d;
+  border-left: 4pt solid #f85149;
+  padding: 10pt 15pt;
+  margin-bottom: 10pt;
+  border-radius: 0 6pt 6pt 0;
+}
+.problem-item h3 {
+  color: #f0f6fc;
+  font-size: 12pt;
+  margin: 0 0 4pt 0;
+}
+.problem-item p {
+  color: #8b949e;
+  font-size: 10pt;
+  margin: 0;
+}
+.code-sample {
+  flex: 0.8;
+  background: #161b22;
+  border-radius: 8pt;
+  padding: 20pt;
+  border: 1pt solid #30363d;
+}
+.code-sample h3 {
+  color: #8b949e;
+  font-size: 11pt;
+  margin: 0 0 12pt 0;
+  text-transform: uppercase;
+}
+.code-sample p {
+  color: #f85149;
+  font-size: 10pt;
+  font-family: Courier New, monospace;
+  margin: 0 0 8pt 0;
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>The Problem: PTY Spawning</h1>
+</div>
+<div class="content">
+  <div class="problem-list">
+    <div class="problem-item">
+      <h3>Fragile Input Handling</h3>
+      <p>100ms delay hack required before sending carriage return</p>
+    </div>
+    <div class="problem-item">
+      <h3>ANSI Escape Codes</h3>
+      <p>Raw terminal output requires complex parsing and filtering</p>
+    </div>
+    <div class="problem-item">
+      <h3>No Tool Approval</h3>
+      <p>Cannot intercept or approve tool calls programmatically</p>
+    </div>
+    <div class="problem-item">
+      <h3>Terminal Dependencies</h3>
+      <p>Size, mode, and environment coupling causes issues</p>
+    </div>
+  </div>
+  <div class="code-sample">
+    <h3>Current Approach</h3>
+    <p>pty.openpty()</p>
+    <p>os.fork()</p>
+    <p>os.execvpe("claude")</p>
+    <p>os.write(fd, text)</p>
+    <p>time.sleep(0.1)  # hack</p>
+    <p>os.write(fd, "\r")</p>
+  </div>
+</div>
+</body>
+</html>

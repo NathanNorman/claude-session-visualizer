@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #0d1117; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #0d1117;
+  font-family: Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  background: #161b22;
+  padding: 15pt 40pt;
+}
+h1 {
+  color: #58a6ff;
+  font-size: 28pt;
+  margin: 0;
+  font-weight: bold;
+}
+.content {
+  padding: 20pt 40pt;
+  display: flex;
+  gap: 25pt;
+}
+.flow-box {
+  flex: 1;
+  background: #161b22;
+  border-radius: 8pt;
+  padding: 15pt;
+}
+.flow-title {
+  color: #f85149;
+  font-size: 13pt;
+  margin: 0 0 12pt 0;
+  font-weight: bold;
+}
+.flow-box.new .flow-title {
+  color: #3fb950;
+}
+.flow-step {
+  display: flex;
+  align-items: flex-start;
+  margin-bottom: 8pt;
+}
+.step-num {
+  background: #30363d;
+  color: #8b949e;
+  font-size: 9pt;
+  width: 14pt;
+  height: 14pt;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 8pt;
+  flex-shrink: 0;
+}
+.step-text {
+  color: #c9d1d9;
+  font-size: 9pt;
+  line-height: 1.3;
+}
+.step-text p {
+  margin: 0;
+}
+.arrow {
+  color: #30363d;
+  font-size: 10pt;
+  text-align: center;
+  margin: 4pt 0;
+}
+.arrow p {
+  margin: 0;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Architecture Comparison</h1>
+</div>
+<div class="content">
+  <div class="flow-box">
+    <p class="flow-title">PTY Flow (Old)</p>
+    <div class="flow-step">
+      <div class="step-num"><p>1</p></div>
+      <div class="step-text"><p>POST /api/spawn</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>2</p></div>
+      <div class="step-text"><p>pty.openpty() + os.fork()</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>3</p></div>
+      <div class="step-text"><p>execvpe("claude")</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>4</p></div>
+      <div class="step-text"><p>POST /stdin + sleep(0.1)</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>5</p></div>
+      <div class="step-text"><p>WS broadcast raw bytes</p></div>
+    </div>
+  </div>
+  <div class="flow-box new">
+    <p class="flow-title">SDK Flow (New)</p>
+    <div class="flow-step">
+      <div class="step-num"><p>1</p></div>
+      <div class="step-text"><p>POST /api/spawn</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>2</p></div>
+      <div class="step-text"><p>SDKSessionManager.create()</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>3</p></div>
+      <div class="step-text"><p>ClaudeSDKClient.connect()</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>4</p></div>
+      <div class="step-text"><p>POST /message + query()</p></div>
+    </div>
+    <div class="arrow"><p>v</p></div>
+    <div class="flow-step">
+      <div class="step-num"><p>5</p></div>
+      <div class="step-text"><p>WS broadcast structured msgs</p></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

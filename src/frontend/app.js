@@ -94,6 +94,48 @@ let lastSummaryRefresh = 0;
 let cardDisplayMode = localStorage.getItem('cardDisplayMode') || 'compact'; // 'compact' or 'detailed'
 let focusMode = JSON.parse(localStorage.getItem('focusMode') || 'false');
 
+// SDK Mode state - whether to use claude-agent-sdk or PTY
+window.mcSDKMode = false;
+
+/**
+ * Initialize SDK mode status on page load
+ */
+async function initSDKMode() {
+    try {
+        const response = await fetch('/api/sdk-mode');
+        const data = await response.json();
+
+        window.mcSDKMode = data.mode === 'sdk';
+
+        const checkbox = document.getElementById('mc-sdk-mode');
+        const status = document.getElementById('mc-sdk-status');
+
+        if (checkbox) checkbox.checked = window.mcSDKMode;
+        if (status) {
+            status.textContent = data.sdk_available
+                ? (window.mcSDKMode ? 'SDK Active' : 'PTY Mode')
+                : 'SDK Unavailable';
+            status.className = 'sdk-status' + (window.mcSDKMode ? ' active' : '');
+        }
+    } catch (error) {
+        console.error('Failed to get SDK mode:', error);
+    }
+}
+
+/**
+ * Toggle SDK mode (requires server restart to take effect for new sessions)
+ */
+function toggleSDKMode(enabled) {
+    window.mcSDKMode = enabled;
+    const status = document.getElementById('mc-sdk-status');
+    if (status) {
+        status.textContent = enabled ? 'SDK (new sessions)' : 'PTY Mode';
+        status.className = 'sdk-status' + (enabled ? ' active' : '');
+    }
+    // Note: This only affects client-side routing. Server-side requires env var.
+    console.log('[MC] SDK mode toggled:', enabled);
+}
+
 // ============================================================================
 // StickyScroll - Unified sticky scroll behavior for activity windows
 // ============================================================================
@@ -169,7 +211,7 @@ class StickyScroll {
                 indicator.className = 'sticky-scroll-indicator';
                 indicator.innerHTML = `
                     <span class="indicator-text">Scroll paused</span>
-                    <button class="indicator-resume" onclick="StickyScroll.resumeById('${this.id}')">Resume</button>
+                    <button class="indicator-resume" onclick="StickyScroll.resumeById('${escapeJsString(this.id)}')">Resume</button>
                 `;
                 this.element.appendChild(indicator);
             }
@@ -438,6 +480,365 @@ class SoundManager {
 
 const soundManager = new SoundManager();
 
+// ============================================================================
+// Logger - Structured logging utility for debugging
+// ============================================================================
+
+class Logger {
+    static LEVELS = {
+        DEBUG: 0,
+        INFO: 1,
+        WARN: 2,
+        ERROR: 3,
+        OFF: 4
+    };
+
+    static _instance = null;
+    static buffer = [];
+    static BUFFER_SIZE = 500;
+    static serverLogsEnabled = false;
+    static showTimestamps = true;
+    static level = Logger.LEVELS.INFO;
+    static enabledNamespaces = new Set(); // Empty = all enabled
+    static debugPanelVisible = false;
+
+    static init() {
+        // Load config from localStorage
+        const config = Logger._loadConfig();
+        Logger.level = config.level ?? Logger.LEVELS.INFO;
+        Logger.serverLogsEnabled = config.serverLogs ?? false;
+        Logger.showTimestamps = config.timestamps ?? true;
+        Logger.enabledNamespaces = new Set(config.namespaces ?? []);
+
+        // Check URL for debug mode
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('debug') === 'true') {
+            Logger.level = Logger.LEVELS.DEBUG;
+            Logger.debugPanelVisible = true;
+        }
+    }
+
+    static _loadConfig() {
+        try {
+            const saved = localStorage.getItem('csv_debug_config');
+            return saved ? JSON.parse(saved) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    static _saveConfig() {
+        try {
+            localStorage.setItem('csv_debug_config', JSON.stringify({
+                level: Logger.level,
+                serverLogs: Logger.serverLogsEnabled,
+                timestamps: Logger.showTimestamps,
+                namespaces: Array.from(Logger.enabledNamespaces)
+            }));
+        } catch (e) {
+            // Ignore storage errors
+        }
+    }
+
+    static _formatTimestamp() {
+        const now = new Date();
+        return now.toISOString().split('T')[1].slice(0, 12);
+    }
+
+    static _log(level, namespace, message, data = null) {
+        if (level < Logger.level) return;
+
+        const levelName = Object.keys(Logger.LEVELS).find(k => Logger.LEVELS[k] === level);
+        const timestamp = Logger._formatTimestamp();
+
+        // Add to buffer
+        const entry = {
+            timestamp,
+            level: levelName,
+            namespace,
+            message,
+            data,
+            source: 'client'
+        };
+        Logger.buffer.push(entry);
+        if (Logger.buffer.length > Logger.BUFFER_SIZE) {
+            Logger.buffer.shift();
+        }
+
+        // Console output
+        const prefix = Logger.showTimestamps ? `[${timestamp}]` : '';
+        const fullMessage = `${prefix}[${namespace}] ${message}`;
+
+        switch (level) {
+            case Logger.LEVELS.DEBUG:
+                data ? console.debug(fullMessage, data) : console.debug(fullMessage);
+                break;
+            case Logger.LEVELS.INFO:
+                data ? console.info(fullMessage, data) : console.info(fullMessage);
+                break;
+            case Logger.LEVELS.WARN:
+                data ? console.warn(fullMessage, data) : console.warn(fullMessage);
+                break;
+            case Logger.LEVELS.ERROR:
+                data ? console.error(fullMessage, data) : console.error(fullMessage);
+                break;
+        }
+
+        // Update debug panel if visible
+        if (Logger.debugPanelVisible) {
+            Logger._appendToDebugPanel(entry);
+        }
+    }
+
+    static handleServerLog(logData) {
+        if (!Logger.serverLogsEnabled) return;
+
+        const entry = {
+            timestamp: logData.timestamp?.split('T')[1]?.slice(0, 12) || Logger._formatTimestamp(),
+            level: logData.level || 'INFO',
+            namespace: logData.namespace || 'server',
+            message: logData.message,
+            data: null,
+            source: 'server'
+        };
+
+        // Check namespace filter
+        if (Logger.enabledNamespaces.size > 0 && !Logger.enabledNamespaces.has(entry.namespace)) {
+            return;
+        }
+
+        Logger.buffer.push(entry);
+        if (Logger.buffer.length > Logger.BUFFER_SIZE) {
+            Logger.buffer.shift();
+        }
+
+        if (Logger.debugPanelVisible) {
+            Logger._appendToDebugPanel(entry);
+        }
+    }
+
+    static handleLogHistory(logs) {
+        for (const log of logs) {
+            Logger.handleServerLog(log);
+        }
+    }
+
+    static _appendToDebugPanel(entry) {
+        const container = document.getElementById('debug-log-container');
+        if (!container) return;
+
+        const line = document.createElement('div');
+        line.className = `debug-log-line debug-log-${entry.level.toLowerCase()} debug-log-${entry.source}`;
+
+        const timestamp = Logger.showTimestamps ? `<span class="debug-timestamp">${entry.timestamp}</span>` : '';
+        const namespace = `<span class="debug-namespace">[${entry.namespace}]</span>`;
+        const level = `<span class="debug-level">${entry.level}</span>`;
+
+        line.innerHTML = `${timestamp}${level}${namespace} ${escapeHtml(entry.message)}`;
+        container.appendChild(line);
+
+        // Auto-scroll to bottom
+        container.scrollTop = container.scrollHeight;
+    }
+
+    static setLevel(level) {
+        if (typeof level === 'string') {
+            Logger.level = Logger.LEVELS[level.toUpperCase()] ?? Logger.LEVELS.INFO;
+        } else {
+            Logger.level = level;
+        }
+        Logger._saveConfig();
+    }
+
+    static setServerLogs(enabled) {
+        Logger.serverLogsEnabled = enabled;
+        Logger._saveConfig();
+    }
+
+    static setTimestamps(show) {
+        Logger.showTimestamps = show;
+        Logger._saveConfig();
+    }
+
+    static setNamespaceFilter(namespaces) {
+        Logger.enabledNamespaces = new Set(namespaces);
+        Logger._saveConfig();
+    }
+
+    static clearBuffer() {
+        Logger.buffer = [];
+        const container = document.getElementById('debug-log-container');
+        if (container) container.innerHTML = '';
+    }
+
+    static exportLogs() {
+        const content = Logger.buffer.map(e => {
+            const ts = e.timestamp || '';
+            const src = e.source === 'server' ? '[S]' : '[C]';
+            return `${ts} ${src} [${e.level}] [${e.namespace}] ${e.message}`;
+        }).join('\n');
+
+        const blob = new Blob([content], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `csv-debug-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    static togglePanel() {
+        Logger.debugPanelVisible = !Logger.debugPanelVisible;
+        const panel = document.getElementById('debug-panel');
+        if (panel) {
+            panel.classList.toggle('hidden', !Logger.debugPanelVisible);
+            if (Logger.debugPanelVisible) {
+                Logger._refreshDebugPanel();
+            }
+        }
+    }
+
+    static _refreshDebugPanel() {
+        const container = document.getElementById('debug-log-container');
+        if (!container) return;
+        container.innerHTML = '';
+        for (const entry of Logger.buffer) {
+            Logger._appendToDebugPanel(entry);
+        }
+    }
+
+    // Namespace-specific loggers
+    static ws = {
+        debug: (msg, data) => Logger._log(Logger.LEVELS.DEBUG, 'ws', msg, data),
+        info: (msg, data) => Logger._log(Logger.LEVELS.INFO, 'ws', msg, data),
+        warn: (msg, data) => Logger._log(Logger.LEVELS.WARN, 'ws', msg, data),
+        error: (msg, data) => Logger._log(Logger.LEVELS.ERROR, 'ws', msg, data),
+    };
+
+    static mc = {
+        debug: (msg, data) => Logger._log(Logger.LEVELS.DEBUG, 'mc', msg, data),
+        info: (msg, data) => Logger._log(Logger.LEVELS.INFO, 'mc', msg, data),
+        warn: (msg, data) => Logger._log(Logger.LEVELS.WARN, 'mc', msg, data),
+        error: (msg, data) => Logger._log(Logger.LEVELS.ERROR, 'mc', msg, data),
+    };
+
+    static sessions = {
+        debug: (msg, data) => Logger._log(Logger.LEVELS.DEBUG, 'sessions', msg, data),
+        info: (msg, data) => Logger._log(Logger.LEVELS.INFO, 'sessions', msg, data),
+        warn: (msg, data) => Logger._log(Logger.LEVELS.WARN, 'sessions', msg, data),
+        error: (msg, data) => Logger._log(Logger.LEVELS.ERROR, 'sessions', msg, data),
+    };
+
+    static timeline = {
+        debug: (msg, data) => Logger._log(Logger.LEVELS.DEBUG, 'timeline', msg, data),
+        info: (msg, data) => Logger._log(Logger.LEVELS.INFO, 'timeline', msg, data),
+        warn: (msg, data) => Logger._log(Logger.LEVELS.WARN, 'timeline', msg, data),
+        error: (msg, data) => Logger._log(Logger.LEVELS.ERROR, 'timeline', msg, data),
+    };
+
+    static analytics = {
+        debug: (msg, data) => Logger._log(Logger.LEVELS.DEBUG, 'analytics', msg, data),
+        info: (msg, data) => Logger._log(Logger.LEVELS.INFO, 'analytics', msg, data),
+        warn: (msg, data) => Logger._log(Logger.LEVELS.WARN, 'analytics', msg, data),
+        error: (msg, data) => Logger._log(Logger.LEVELS.ERROR, 'analytics', msg, data),
+    };
+
+    static app = {
+        debug: (msg, data) => Logger._log(Logger.LEVELS.DEBUG, 'app', msg, data),
+        info: (msg, data) => Logger._log(Logger.LEVELS.INFO, 'app', msg, data),
+        warn: (msg, data) => Logger._log(Logger.LEVELS.WARN, 'app', msg, data),
+        error: (msg, data) => Logger._log(Logger.LEVELS.ERROR, 'app', msg, data),
+    };
+}
+
+// Initialize Logger on load
+Logger.init();
+
+// WebSocket connection for log streaming
+let logWebSocket = null;
+
+function connectLogWebSocket() {
+    if (logWebSocket && logWebSocket.readyState === WebSocket.OPEN) {
+        return; // Already connected
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    logWebSocket = new WebSocket(`${protocol}//${window.location.host}/ws/sessions`);
+
+    logWebSocket.onopen = () => {
+        Logger.ws.info('Log WebSocket connected');
+        // Subscribe to logs if server logs are enabled
+        if (Logger.serverLogsEnabled) {
+            logWebSocket.send(JSON.stringify({
+                type: 'subscribe_logs',
+                enabled: true,
+                namespaces: Logger.enabledNamespaces.size > 0 ? Array.from(Logger.enabledNamespaces) : null
+            }));
+        }
+    };
+
+    logWebSocket.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            switch (msg.type) {
+                case 'log':
+                    Logger.handleServerLog(msg.log);
+                    break;
+                case 'log_history':
+                    Logger.handleLogHistory(msg.logs || []);
+                    break;
+                case 'pong':
+                    // Keep-alive response, ignore
+                    break;
+                default:
+                    // Other session messages - ignore for log streaming
+                    break;
+            }
+        } catch (e) {
+            // Ignore parse errors
+        }
+    };
+
+    logWebSocket.onclose = () => {
+        Logger.ws.debug('Log WebSocket closed');
+        logWebSocket = null;
+        // Reconnect after delay if server logs enabled
+        if (Logger.serverLogsEnabled) {
+            setTimeout(connectLogWebSocket, 5000);
+        }
+    };
+
+    logWebSocket.onerror = (error) => {
+        Logger.ws.error('Log WebSocket error');
+    };
+
+    // Keep-alive ping every 30 seconds
+    setInterval(() => {
+        if (logWebSocket && logWebSocket.readyState === WebSocket.OPEN) {
+            logWebSocket.send(JSON.stringify({ type: 'ping' }));
+        }
+    }, 30000);
+}
+
+// Subscribe/unsubscribe from server logs
+function setServerLogsEnabled(enabled) {
+    Logger.setServerLogs(enabled);
+    if (enabled && (!logWebSocket || logWebSocket.readyState !== WebSocket.OPEN)) {
+        connectLogWebSocket();
+    } else if (logWebSocket && logWebSocket.readyState === WebSocket.OPEN) {
+        logWebSocket.send(JSON.stringify({
+            type: 'subscribe_logs',
+            enabled: enabled,
+            namespaces: Logger.enabledNamespaces.size > 0 ? Array.from(Logger.enabledNamespaces) : null
+        }));
+    }
+}
+
+// Auto-connect if debug mode is enabled
+if (Logger.debugPanelVisible || Logger.serverLogsEnabled) {
+    connectLogWebSocket();
+}
+
 // MissionControlManager - centralized view state and navigation
 class MissionControlManager {
     constructor() {
@@ -578,8 +979,8 @@ async function showTemplateLibrary() {
                         <h3>${escapeHtml(t.name)}</h3>
                         <p>${escapeHtml(t.description)}</p>
                         <div class="template-actions">
-                            <button onclick="useTemplate('${t.id}')">Use</button>
-                            <button onclick="deleteTemplate('${t.id}')">Delete</button>
+                            <button onclick="useTemplate('${escapeJsString(t.id)}')">Use</button>
+                            <button onclick="deleteTemplate('${escapeJsString(t.id)}')">Delete</button>
                         </div>
                     </div>
                 `).join('')}
@@ -872,7 +1273,7 @@ function createCard(session, index = 0) {
 
     // Feature 20: Git Status display
     const gitHtml = session.git ? `
-        <div class="git-status" onclick="event.stopPropagation(); showGitDetails('${session.sessionId}')">
+        <div class="git-status" onclick="event.stopPropagation(); showGitDetails('${escapeJsString(session.sessionId)}')">
             <span class="git-branch">🌿 ${escapeHtml(session.git.branch)}</span>
             ${session.git.uncommitted ? `
                 <span class="git-uncommitted">
@@ -912,17 +1313,17 @@ function createCard(session, index = 0) {
         <div class="card-header">
             <div class="slug">${stateEmoji} ${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</div>
             <div class="card-actions">
-                <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${session.sessionId}')">⋮</button>
+                <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${escapeJsString(session.sessionId)}')">⋮</button>
                 <div class="action-menu hidden" id="menu-${session.sessionId}">
-                    <button onclick="event.stopPropagation(); copySessionId('${session.sessionId}')">📋 Copy Session ID</button>
-                    <button onclick="event.stopPropagation(); openJsonl('${session.sessionId}')">📂 Open JSONL File</button>
-                    <button onclick="event.stopPropagation(); copyResumeCmd('${session.sessionId}')">🔗 Copy Resume Command</button>
+                    <button onclick="event.stopPropagation(); copySessionId('${escapeJsString(session.sessionId)}')">📋 Copy Session ID</button>
+                    <button onclick="event.stopPropagation(); openJsonl('${escapeJsString(session.sessionId)}')">📂 Open JSONL File</button>
+                    <button onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}')">🔗 Copy Resume Command</button>
                     <hr class="menu-divider">
-                    <button onclick="event.stopPropagation(); refreshSummary('${session.sessionId}')">🤖 Generate AI Summary</button>
-                    <button onclick="event.stopPropagation(); shareSession('${session.sessionId}')">📤 Share Session</button>
-                    <button onclick="event.stopPropagation(); exportSession('${session.sessionId}')">📄 Export Markdown</button>
+                    <button onclick="event.stopPropagation(); refreshSummary('${escapeJsString(session.sessionId)}')">🤖 Generate AI Summary</button>
+                    <button onclick="event.stopPropagation(); shareSession('${escapeJsString(session.sessionId)}')">📤 Share Session</button>
+                    <button onclick="event.stopPropagation(); exportSession('${escapeJsString(session.sessionId)}')">📄 Export Markdown</button>
                     <hr class="menu-divider">
-                    <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeHtml(session.slug)}')">⚠️ Kill Session</button>
+                    <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeJsString(session.slug)}')">⚠️ Kill Session</button>
                 </div>
             </div>
         </div>
@@ -943,7 +1344,7 @@ function createCard(session, index = 0) {
             <div class="footer-right">
                 <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
                 ${activityBadgeHtml}
-                <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')" title="View Metrics">📊</button>
+                <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${escapeJsString(session.sessionId)}')" title="View Metrics">📊</button>
             </div>
             </div>
         </div>`;
@@ -1003,7 +1404,7 @@ function createCompactCard(session, index = 0) {
             <span>${duration}</span>
             <span>${Math.round(tokenPct)}% ctx</span>
             ${activityHtml}
-            <button class="compact-expand" onclick="event.stopPropagation(); expandCard('${session.sessionId}')" title="Show details">▼</button>
+            <button class="compact-expand" onclick="event.stopPropagation(); expandCard('${escapeJsString(session.sessionId)}')" title="Show details">▼</button>
         </div>
     `;
 
@@ -1177,7 +1578,7 @@ async function shareSession(sessionId) {
                 <p>Share this link to let others view this session snapshot:</p>
                 <input type="text" class="share-url" value="${escapeHtml(shareUrl)}" readonly onclick="this.select()">
                 <div class="modal-actions">
-                    <button onclick="navigator.clipboard.writeText('${escapeHtml(shareUrl)}'); showToast('Link copied!');">Copy Link</button>
+                    <button onclick="navigator.clipboard.writeText('${escapeJsString(shareUrl)}'); showToast('Link copied!');">Copy Link</button>
                     <button onclick="closeModal()">Close</button>
                 </div>
                 <p class="share-expiry">⏱️ Expires: ${new Date(data.expires_at).toLocaleDateString()}</p>
@@ -1522,7 +1923,7 @@ function updateCard(card, session) {
         footerRight.innerHTML = `
             <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
             ${activityBadgeHtml}
-            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${session.sessionId}')" title="View Metrics">📊</button>`;
+            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${escapeJsString(session.sessionId)}')" title="View Metrics">📊</button>`;
     }
 
     // Update slug with state emoji
@@ -2162,6 +2563,22 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/**
+ * Escape a string for safe use inside JavaScript string literals (onclick handlers).
+ * Unlike escapeHtml() which escapes HTML entities, this escapes JS string delimiters.
+ * @param {string} str - The string to escape
+ * @returns {string} - The escaped string safe for JS string contexts
+ */
+function escapeJsString(str) {
+    return String(str)
+        .replace(/\\/g, '\\\\')     // Backslashes first
+        .replace(/'/g, "\\'")       // Single quotes
+        .replace(/"/g, '\\"')       // Double quotes
+        .replace(/\n/g, '\\n')      // Newlines
+        .replace(/\r/g, '\\r')      // Carriage returns
+        .replace(/\t/g, '\\t');     // Tabs
 }
 
 /**
@@ -3242,7 +3659,7 @@ function renderTimelineRow(session, periods, startTime, endTime) {
 
     return `
         <div class="timeline-row ${isZombie ? 'zombie' : ''} ${session.isGastown ? 'gastown-row' : ''}" data-session-id="${session.sessionId}">
-            <div class="timeline-label" onclick="focusWarpTab(previousSessions.get('${session.sessionId}'))">
+            <div class="timeline-label" onclick="focusWarpTab(previousSessions.get('${escapeJsString(session.sessionId)}'))">
                 <span class="session-slug">${session.isGastown ? '🤖 ' : ''}${escapeHtml(session.slug)}</span>
                 <span class="session-status ${statusClass}">${session.state}</span>
                 <span class="last-active ${isZombie ? 'zombie-warning' : ''}">
@@ -3973,9 +4390,9 @@ async function showMachinesModal() {
             </div>
             <div class="machine-actions">
                 ${!m.connected ? `
-                    <button onclick="handleReconnect('${escapeHtml(m.name)}')" class="btn-small">Reconnect</button>
+                    <button onclick="handleReconnect('${escapeJsString(m.name)}')" class="btn-small">Reconnect</button>
                 ` : ''}
-                <button onclick="handleRemoveMachine('${escapeHtml(m.name)}')" class="btn-small danger">Remove</button>
+                <button onclick="handleRemoveMachine('${escapeJsString(m.name)}')" class="btn-small danger">Remove</button>
             </div>
         </div>
     `).join('');
@@ -4343,6 +4760,9 @@ let mcLastMessageCount = 0;
  * Initialize Mission Control event listeners
  */
 function initMissionControl() {
+    // Initialize SDK mode status
+    initSDKMode();
+
     // Refresh button
     const refreshBtn = document.getElementById('mc-refresh');
     if (refreshBtn) {
@@ -5075,7 +5495,7 @@ async function loadRecentDirectories() {
         }
 
         listEl.innerHTML = directories.map((dir, idx) => `
-            <div class="spawn-recent-item" data-path-idx="${idx}">
+            <div class="spawn-recent-item" data-path-idx="${idx}" data-path="${escapeHtml(dir.path)}">
                 <span class="dir-icon">📁</span>
                 <div class="dir-info">
                     <div class="dir-name">${escapeHtml(dir.name)}</div>
@@ -5084,18 +5504,15 @@ async function loadRecentDirectories() {
             </div>
         `).join('');
 
-        // Store paths and attach click handlers via event delegation
-        listEl._directories = directories;
-        listEl.onclick = (e) => {
-            const item = e.target.closest('.spawn-recent-item');
-            if (item) {
-                const idx = parseInt(item.dataset.pathIdx, 10);
-                const dir = listEl._directories[idx];
-                if (dir) {
-                    selectSpawnDirectory(dir.path);
+        // Attach click handlers to each item
+        listEl.querySelectorAll('.spawn-recent-item').forEach((item, idx) => {
+            item.addEventListener('click', () => {
+                const path = directories[idx]?.path;
+                if (path) {
+                    selectSpawnDirectory(path);
                 }
-            }
-        };
+            });
+        });
     } catch (error) {
         console.error('Failed to load recent directories:', error);
         listEl.innerHTML = '<div class="spawn-loading">Failed to load directories</div>';
@@ -5110,6 +5527,40 @@ function selectSpawnDirectory(path) {
     if (input) {
         input.value = path;
         input.focus();
+    }
+}
+
+/**
+ * Open native folder picker dialog
+ */
+async function browseForFolder() {
+    const btn = document.querySelector('.spawn-browse-btn');
+    const originalText = btn?.innerHTML;
+
+    try {
+        // Show loading state
+        if (btn) {
+            btn.innerHTML = '⏳';
+            btn.disabled = true;
+        }
+
+        const response = await fetch('/api/browse-folder');
+        const data = await response.json();
+
+        if (data.path) {
+            selectSpawnDirectory(data.path);
+        } else if (data.error) {
+            console.log('Folder selection cancelled or failed:', data.error);
+        }
+    } catch (error) {
+        console.error('Failed to open folder picker:', error);
+        showToast('Failed to open folder picker', 'error');
+    } finally {
+        // Restore button
+        if (btn) {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
     }
 }
 
@@ -5140,16 +5591,28 @@ async function spawnSession() {
         const data = await response.json();
         const processId = data.process_id;
 
-        // Track the managed process
+        // Check if this is an SDK session
+        let isSDK = false;
+        try {
+            const sdkModeResponse = await fetch('/api/sdk-mode');
+            const sdkMode = await sdkModeResponse.json();
+            isSDK = sdkMode.mode === 'sdk';
+        } catch (e) {
+            console.warn('Could not detect SDK mode:', e);
+        }
+
+        // Track the managed process with SDK flag
         managedProcesses.set(processId, {
             id: processId,
             cwd: data.cwd,
             state: data.state,
-            ws: null
+            isSDK: isSDK,
+            ws: null,
+            outputBuffer: '' // Store all output even when not selected
         });
 
         hideSpawnModal();
-        showToast(`Spawned session in ${data.cwd}`, 'success');
+        showToast(`Spawned ${isSDK ? 'SDK' : 'PTY'} session in ${data.cwd}`, 'success');
 
         // Connect to process output stream
         connectToProcess(processId);
@@ -5210,19 +5673,28 @@ function connectToProcess(processId) {
  * Handle incoming process WebSocket message
  */
 function handleProcessMessage(processId, msg) {
+    console.log('[MC-DEBUG] handleProcessMessage:', { processId, type: msg.type, hasData: !!msg.data, dataLen: msg.data?.length });
+
     const process = managedProcesses.get(processId);
     if (!process) return;
 
     switch (msg.type) {
         case 'output':
-            appendTerminalOutput(processId, msg.data);
+            // Always store in buffer, display if selected
+            process.outputBuffer = (process.outputBuffer || '') + msg.data;
+            if (selectedProcessId === processId) {
+                appendTerminalOutputDirect(msg.data);
+            }
             break;
 
         case 'history':
-            // Received buffered history on connect
+            // Received buffered history on connect - replace buffer
             if (Array.isArray(msg.lines)) {
                 const content = msg.lines.join('');
-                setTerminalOutput(processId, content);
+                process.outputBuffer = content;
+                if (selectedProcessId === processId) {
+                    setTerminalOutputDirect(content);
+                }
             }
             break;
 
@@ -5240,15 +5712,28 @@ function handleProcessMessage(processId, msg) {
         case 'error':
             showToast(`Process error: ${msg.message}`, 'error');
             break;
+
+        case 'message':
+            // SDK: Structured message from Claude
+            appendStructuredMessage(processId, msg);
+            break;
+
+        case 'tool_use':
+            // SDK: Tool being invoked
+            appendToolUseBlock(processId, msg);
+            break;
+
+        case 'tool_approval':
+            // SDK: Tool requires user approval
+            showToolApprovalUI(processId, msg);
+            break;
     }
 }
 
 /**
- * Set terminal output content (replacing existing)
+ * Set terminal output content directly (no processId check)
  */
-function setTerminalOutput(processId, content) {
-    if (selectedProcessId !== processId) return;
-
+function setTerminalOutputDirect(content) {
     const terminalEl = document.getElementById('mc-terminal-output');
     const contentEl = terminalEl?.querySelector('.mc-terminal-content');
 
@@ -5265,10 +5750,10 @@ function setTerminalOutput(processId, content) {
 }
 
 /**
- * Append content to terminal output
+ * Append content to terminal output directly (no processId check)
  */
-function appendTerminalOutput(processId, content) {
-    if (selectedProcessId !== processId) return;
+function appendTerminalOutputDirect(content) {
+    console.log('[MC-DEBUG] appendTerminalOutputDirect:', { contentLen: content?.length, contentPreview: content?.substring(0, 100) });
 
     const terminalEl = document.getElementById('mc-terminal-output');
     const contentEl = terminalEl?.querySelector('.mc-terminal-content');
@@ -5280,10 +5765,39 @@ function appendTerminalOutput(processId, content) {
 }
 
 /**
+ * Display buffered output for a process (called when selecting)
+ */
+function displayProcessBuffer(processId) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    console.log('[MC-DEBUG] displayProcessBuffer:', { processId, bufferLen: process.outputBuffer?.length });
+
+    if (process.outputBuffer) {
+        setTerminalOutputDirect(process.outputBuffer);
+    }
+}
+
+/**
  * Parse ANSI escape codes to HTML
  */
 function parseAnsiToHtml(text) {
     if (!text) return '';
+
+    // First, strip ALL non-color ANSI escape sequences (cursor movement, screen control, etc.)
+    // These include: cursor movement (A,B,C,D,E,F,G,H,J,K), scroll (S,T), cursor save/restore, etc.
+    // Also handle private mode sequences like [?2026l and [?2026h
+    text = text
+        // Standard escape sequences: ESC [ ... <letter>
+        .replace(/\x1b\[\??[0-9;]*[ABCDEFGHJKSTfnsu]/g, '')
+        // OSC sequences (Operating System Command): ESC ] ... BEL or ESC ] ... ESC \
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+        // Other escape sequences we don't handle
+        .replace(/\x1b\[\?[0-9;]*[hl]/g, '')  // Private mode set/reset like [?2026l
+        // Raw escape codes that lost their ESC character (showing as literal [ sequences)
+        .replace(/\[\?[0-9]+[hl]/g, '')  // [?2026l, [?2026h
+        .replace(/\[[0-9]+[ABCDEFGJKST]/g, '')  // [2C, [4A, [1B, etc.
+        .replace(/\[[0-9]*[HJKfnsu]/g, '');  // [H, [2J, etc.
 
     // ANSI color code mapping
     const ansiColors = {
@@ -5300,12 +5814,11 @@ function parseAnsiToHtml(text) {
 
     let result = '';
     let currentClasses = [];
-    let i = 0;
 
     // Escape HTML first
     text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    // Parse ANSI sequences
+    // Parse color ANSI sequences (ending in 'm')
     const ansiRegex = /\x1b\[([0-9;]*)m/g;
     let lastIndex = 0;
     let match;
@@ -5352,6 +5865,132 @@ function parseAnsiToHtml(text) {
     return result;
 }
 
+// ============================================================================
+// SDK Message Handlers (claude-agent-sdk)
+// ============================================================================
+
+/**
+ * Append a structured message from the SDK to the terminal
+ */
+function appendStructuredMessage(processId, msg) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    const roleClass = msg.role === 'user' ? 'user-message' : 'assistant-message';
+    const html = `<div class="sdk-message ${roleClass}"><strong>${escapeHtml(msg.role)}:</strong> ${escapeHtml(msg.content)}</div>`;
+
+    process.outputBuffer = (process.outputBuffer || '') + html;
+    if (selectedProcessId === processId) {
+        appendTerminalOutputDirect(html);
+    }
+}
+
+/**
+ * Append a tool use block to the terminal
+ */
+function appendToolUseBlock(processId, msg) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    const inputStr = JSON.stringify(msg.input, null, 2);
+    const html = `
+        <div class="tool-use-block">
+            <div class="tool-use-header">Tool: ${escapeHtml(msg.name)}</div>
+            <pre class="tool-use-input">${escapeHtml(inputStr)}</pre>
+        </div>
+    `;
+
+    process.outputBuffer = (process.outputBuffer || '') + html;
+    if (selectedProcessId === processId) {
+        appendTerminalOutputDirect(html);
+    }
+}
+
+/**
+ * Show tool approval UI for pending tool use request
+ */
+function showToolApprovalUI(processId, msg) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    const inputStr = JSON.stringify(msg.input, null, 2);
+    const html = `
+        <div class="tool-approval" data-tool-id="${escapeHtml(msg.tool_use_id)}">
+            <div class="tool-header">Tool: ${escapeHtml(msg.name)}</div>
+            <pre class="tool-input">${escapeHtml(inputStr)}</pre>
+            <div class="tool-actions">
+                <button onclick="approveToolUse('${escapeHtml(processId)}', '${escapeHtml(msg.tool_use_id)}', true)">Allow</button>
+                <button onclick="approveToolUse('${escapeHtml(processId)}', '${escapeHtml(msg.tool_use_id)}', false)">Deny</button>
+            </div>
+        </div>
+    `;
+
+    // Store in buffer and display
+    process.outputBuffer = (process.outputBuffer || '') + html;
+    if (selectedProcessId === processId) {
+        appendTerminalOutputDirect(html);
+    }
+
+    // Also show a toast notification
+    showToast(`Tool "${msg.name}" requires approval`, 'warning');
+}
+
+/**
+ * Approve or deny a tool use request
+ */
+async function approveToolUse(processId, toolUseId, approved) {
+    try {
+        const response = await fetch(`/api/process/${processId}/tool-approval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool_use_id: toolUseId, approved })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        // Remove the approval UI from the terminal
+        const approvalEl = document.querySelector(`.tool-approval[data-tool-id="${toolUseId}"]`);
+        if (approvalEl) {
+            approvalEl.classList.add('resolved');
+            approvalEl.querySelector('.tool-actions').innerHTML =
+                `<span class="tool-resolved ${approved ? 'approved' : 'denied'}">${approved ? 'Allowed' : 'Denied'}</span>`;
+        }
+
+        showToast(`Tool ${approved ? 'allowed' : 'denied'}`, approved ? 'success' : 'info');
+
+    } catch (error) {
+        console.error('Failed to send tool approval:', error);
+        showToast(`Failed to send approval: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Send a message to an SDK session (alternative to stdin for SDK sessions)
+ */
+async function sendSDKMessage(processId, text) {
+    try {
+        const response = await fetch(`/api/process/${processId}/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        return true;
+    } catch (error) {
+        console.error('Failed to send SDK message:', error);
+        showToast(`Failed to send message: ${error.message}`, 'error');
+        return false;
+    }
+}
+
 /**
  * Update UI for a managed process
  */
@@ -5385,7 +6024,8 @@ async function refreshManagedProcessList() {
                     id: p.id,
                     cwd: p.cwd,
                     state: p.state,
-                    ws: null
+                    ws: null,
+                    outputBuffer: '' // Store all output even when not selected
                 });
             } else {
                 const existing = managedProcesses.get(p.id);
@@ -5454,10 +6094,10 @@ function selectManagedProcess(processId) {
     if (streamEl) streamEl.classList.add('hidden');
     if (terminalEl) {
         terminalEl.classList.remove('hidden');
-        // Clear and reconnect
-        const contentEl = terminalEl.querySelector('.mc-terminal-content');
-        if (contentEl) contentEl.innerHTML = '';
     }
+
+    // Display buffered output for this process
+    displayProcessBuffer(processId);
 
     // Show input for managed processes
     showMCInput();
@@ -5469,7 +6109,8 @@ function selectManagedProcess(processId) {
 }
 
 /**
- * Send input to a managed process
+ * Send input to a managed process.
+ * Uses /message endpoint for SDK sessions, /stdin for PTY sessions.
  */
 async function sendProcessInput() {
     if (!selectedProcessId) return;
@@ -5480,12 +6121,29 @@ async function sendProcessInput() {
 
     if (!text) return;
 
+    console.log('[MC-DEBUG] sendProcessInput:', { processId: selectedProcessId, text: text.substring(0, 50) });
+
+    const process = managedProcesses.get(selectedProcessId);
+    const isSDKSession = process?.isSDK || window.mcSDKMode;
+
     try {
-        const response = await fetch(`/api/process/${selectedProcessId}/stdin`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, newline: true })
-        });
+        let response;
+
+        if (isSDKSession) {
+            // SDK mode: use /message endpoint
+            response = await fetch(`/api/process/${selectedProcessId}/message`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text })
+            });
+        } else {
+            // PTY mode: use /stdin endpoint
+            response = await fetch(`/api/process/${selectedProcessId}/stdin`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, newline: true })
+            });
+        }
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
@@ -5607,8 +6265,8 @@ function renderManagedProcessesInList(container) {
 
         html += `
             <div class="mc-session-item managed ${isSelected ? 'selected' : ''}"
-                 data-process-id="${id}"
-                 onclick="selectManagedProcess('${id}')">
+                 data-process-id="${escapeHtml(id)}"
+                 onclick="selectManagedProcess('${escapeJsString(id)}')">
                 <div class="mc-session-name">${stateEmoji} ${escapeHtml(dirName)}<span class="managed-badge">MC</span></div>
                 <div class="mc-session-meta">${escapeHtml(process.cwd)}</div>
             </div>
@@ -5627,15 +6285,20 @@ renderMissionControlSessions = function(sessions) {
 
     // Add managed processes section
     const container = document.getElementById('mc-sessions-list');
-    if (container && managedProcesses.size > 0) {
-        // Insert managed processes at the top
-        const managedHtml = renderManagedProcessesInList(container);
-        container.insertAdjacentHTML('afterbegin', managedHtml);
+    if (container) {
+        // Remove any existing managed sections first to prevent duplicates
+        container.querySelectorAll('.mc-managed-section').forEach(el => el.remove());
 
-        // Add click handlers for managed process items
-        container.querySelectorAll('.mc-session-item[data-process-id]').forEach(el => {
-            el.onclick = () => selectManagedProcess(el.dataset.processId);
-        });
+        if (managedProcesses.size > 0) {
+            // Insert managed processes at the top
+            const managedHtml = renderManagedProcessesInList(container);
+            container.insertAdjacentHTML('afterbegin', managedHtml);
+
+            // Add click handlers for managed process items
+            container.querySelectorAll('.mc-session-item[data-process-id]').forEach(el => {
+                el.onclick = () => selectManagedProcess(el.dataset.processId);
+            });
+        }
     }
 
     // Update count to include managed processes
@@ -5911,10 +6574,10 @@ function renderGraveyardCard(session, isGastown = false) {
             ${previewContent}
             ${activityLogContent}
             <div class="graveyard-card-actions">
-                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${session.sessionId}')" title="Resume this session">
+                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${escapeJsString(session.sessionId)}')" title="Resume this session">
                     ▶️ Resume
                 </button>
-                <button class="graveyard-btn" onclick="event.stopPropagation(); copyResumeCmd('${session.sessionId}')" title="Copy resume command">
+                <button class="graveyard-btn" onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}')" title="Copy resume command">
                     📋 Copy
                 </button>
             </div>
@@ -5967,13 +6630,13 @@ function showGraveyardDetails(sessionId) {
             ` : ''}
 
             <div class="graveyard-details-actions">
-                <button class="btn-primary" onclick="resumeSession('${session.sessionId}'); closeModal();">
+                <button class="btn-primary" onclick="resumeSession('${escapeJsString(session.sessionId)}'); closeModal();">
                     ▶️ Resume Session
                 </button>
-                <button class="btn-secondary" onclick="copyResumeCmd('${session.sessionId}')">
+                <button class="btn-secondary" onclick="copyResumeCmd('${escapeJsString(session.sessionId)}')">
                     📋 Copy Resume Command
                 </button>
-                <button class="btn-secondary" onclick="openJsonl('${session.sessionId}')">
+                <button class="btn-secondary" onclick="openJsonl('${escapeJsString(session.sessionId)}')">
                     📂 Open JSONL File
                 </button>
             </div>

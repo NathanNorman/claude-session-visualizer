@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #0d1117; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #0d1117;
+  font-family: Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  background: #161b22;
+  padding: 15pt 40pt;
+}
+h1 {
+  color: #58a6ff;
+  font-size: 28pt;
+  margin: 0;
+  font-weight: bold;
+}
+.content {
+  padding: 18pt 40pt;
+}
+.file-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12pt;
+}
+.file-card {
+  background: #161b22;
+  border: 1pt solid #30363d;
+  border-radius: 6pt;
+  padding: 12pt;
+  width: 200pt;
+}
+.file-card.new {
+  border-color: #3fb950;
+}
+.file-card.modified {
+  border-color: #58a6ff;
+}
+.file-name {
+  color: #f0f6fc;
+  font-size: 11pt;
+  font-family: Courier New, monospace;
+  margin: 0 0 8pt 0;
+}
+.file-desc {
+  color: #8b949e;
+  font-size: 9pt;
+  margin: 0;
+  line-height: 1.4;
+}
+.badge {
+  display: inline-block;
+  font-size: 8pt;
+  padding: 2pt 6pt;
+  border-radius: 3pt;
+  margin-bottom: 8pt;
+}
+.badge.new {
+  background: #238636;
+  color: #ffffff;
+}
+.badge.modified {
+  background: #1f6feb;
+  color: #ffffff;
+}
+.badge p {
+  margin: 0;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>What We Built</h1>
+</div>
+<div class="content">
+  <div class="file-grid">
+    <div class="file-card new">
+      <div class="badge new"><p>NEW</p></div>
+      <p class="file-name">sdk_session_manager.py</p>
+      <p class="file-desc">SDKSession dataclass, SDKSessionManager with tool approval callbacks</p>
+    </div>
+    <div class="file-card modified">
+      <div class="badge modified"><p>MODIFIED</p></div>
+      <p class="file-name">routes/processes.py</p>
+      <p class="file-desc">/message, /tool-approval, /spawn-sdk, /sdk-mode endpoints</p>
+    </div>
+    <div class="file-card modified">
+      <div class="badge modified"><p>MODIFIED</p></div>
+      <p class="file-name">app.js</p>
+      <p class="file-desc">sendProcessInput routing, tool approval UI, SDK mode toggle</p>
+    </div>
+    <div class="file-card modified">
+      <div class="badge modified"><p>MODIFIED</p></div>
+      <p class="file-name">styles.css</p>
+      <p class="file-desc">.tool-approval card styling with allow/deny buttons</p>
+    </div>
+    <div class="file-card modified">
+      <div class="badge modified"><p>MODIFIED</p></div>
+      <p class="file-name">index.html</p>
+      <p class="file-desc">SDK mode toggle checkbox in Mission Control</p>
+    </div>
+    <div class="file-card modified">
+      <div class="badge modified"><p>MODIFIED</p></div>
+      <p class="file-name">pyproject.toml</p>
+      <p class="file-desc">claude-agent-sdk &gt;= 0.1.22 dependency</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>
