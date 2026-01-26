@@ -171,8 +171,12 @@ class SDKSessionManager:
                     resume=session.session_id,
                 )
 
+            # can_use_tool requires streaming mode - wrap prompt in async generator
+            async def prompt_stream():
+                yield {"type": "text", "text": text}
+
             # Use query() async generator - this is the correct API
-            async for message in query(prompt=text, options=options):
+            async for message in query(prompt=prompt_stream(), options=options):
                 # Capture session ID from init message for future resume
                 if hasattr(message, 'subtype') and message.subtype == 'init':
                     if hasattr(message, 'session_id'):
