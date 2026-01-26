@@ -23,6 +23,7 @@ try:
         ToolUseBlock,
         ResultMessage,
     )
+    from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
     SDK_AVAILABLE = True
 except ImportError:
     SDK_AVAILABLE = False
@@ -32,6 +33,8 @@ except ImportError:
     TextBlock = None
     ToolUseBlock = None
     ResultMessage = None
+    PermissionResultAllow = None
+    PermissionResultDeny = None
 
 
 @dataclass
@@ -106,14 +109,14 @@ class SDKSessionManager:
                 # Wait for user approval with 5-minute timeout
                 approved = await asyncio.wait_for(future, timeout=300)
 
-                # Use dict format like claudecodeui does
+                # Python SDK requires PermissionResultAllow/Deny types
                 if approved:
-                    return {"behavior": "allow", "updatedInput": tool_input}
+                    return PermissionResultAllow(updated_input=tool_input)
                 else:
-                    return {"behavior": "deny", "message": "User denied"}
+                    return PermissionResultDeny(message="User denied")
 
             except asyncio.TimeoutError:
-                return {"behavior": "deny", "message": "Approval timeout"}
+                return PermissionResultDeny(message="Approval timeout")
             finally:
                 session.pending_approval = None
                 session._approval_futures.pop(tool_use_id, None)
