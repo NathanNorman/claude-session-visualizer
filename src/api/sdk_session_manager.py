@@ -23,13 +23,6 @@ try:
         ToolUseBlock,
         ResultMessage,
     )
-    # Try importing permission types
-    try:
-        from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
-    except ImportError:
-        # Fallback - return dicts if types not available
-        PermissionResultAllow = None
-        PermissionResultDeny = None
     SDK_AVAILABLE = True
 except ImportError:
     SDK_AVAILABLE = False
@@ -39,8 +32,6 @@ except ImportError:
     TextBlock = None
     ToolUseBlock = None
     ResultMessage = None
-    PermissionResultAllow = None
-    PermissionResultDeny = None
 
 
 @dataclass
@@ -115,21 +106,13 @@ class SDKSessionManager:
                 # Wait for user approval with 5-minute timeout
                 approved = await asyncio.wait_for(future, timeout=300)
 
-                if PermissionResultAllow and PermissionResultDeny:
-                    if approved:
-                        return PermissionResultAllow(updated_input=tool_input)
-                    else:
-                        return PermissionResultDeny(message="User denied", interrupt=False)
+                # Use dict format like claudecodeui does
+                if approved:
+                    return {"behavior": "allow", "updatedInput": tool_input}
                 else:
-                    # Fallback to dict format
-                    if approved:
-                        return {"behavior": "allow", "updatedInput": tool_input}
-                    else:
-                        return {"behavior": "deny", "message": "User denied"}
+                    return {"behavior": "deny", "message": "User denied"}
 
             except asyncio.TimeoutError:
-                if PermissionResultDeny:
-                    return PermissionResultDeny(message="Approval timeout", interrupt=True)
                 return {"behavior": "deny", "message": "Approval timeout"}
             finally:
                 session.pending_approval = None
@@ -157,22 +140,26 @@ class SDKSessionManager:
         })
 
         try:
-            # Build options - use acceptEdits to auto-approve tools for now
+            # Build options with tool approval callback
             options = ClaudeAgentOptions(
                 cwd=session.cwd,
-                permission_mode='acceptEdits',
+                can_use_tool=session._can_use_tool,
             )
 
             # If we have a previous session ID, resume it
             if session.session_id:
                 options = ClaudeAgentOptions(
                     cwd=session.cwd,
-                    permission_mode='acceptEdits',
+                    can_use_tool=session._can_use_tool,
                     resume=session.session_id,
                 )
 
-            # Use query() with simple string prompt
-            async for message in query(prompt=text, options=options):
+            # can_use_tool requires streaming mode - message type must be "user"
+            async def prompt_stream():
+                yield {"type": "user", "text": text}
+
+            # Use query() with streaming prompt
+            async for message in query(prompt=prompt_stream(), options=options):
                 # Capture session ID from init message for future resume
                 if hasattr(message, 'subtype') and message.subtype == 'init':
                     if hasattr(message, 'session_id'):
