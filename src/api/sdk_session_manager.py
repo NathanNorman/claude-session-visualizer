@@ -16,16 +16,29 @@ from fastapi import WebSocket
 # Import will be validated when SDK is installed
 try:
     from claude_agent_sdk import (
-        ClaudeSDKClient,
+        query,
         ClaudeAgentOptions,
-        PermissionResultAllow,
-        PermissionResultDeny,
+        AssistantMessage,
+        TextBlock,
+        ToolUseBlock,
+        ResultMessage,
     )
+    # Try importing permission types
+    try:
+        from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+    except ImportError:
+        # Fallback - return dicts if types not available
+        PermissionResultAllow = None
+        PermissionResultDeny = None
     SDK_AVAILABLE = True
 except ImportError:
     SDK_AVAILABLE = False
-    ClaudeSDKClient = None
+    query = None
     ClaudeAgentOptions = None
+    AssistantMessage = None
+    TextBlock = None
+    ToolUseBlock = None
+    ResultMessage = None
     PermissionResultAllow = None
     PermissionResultDeny = None
 
@@ -38,13 +51,14 @@ class SDKSession:
     cwd: str
     state: str  # "running", "waiting", "stopped"
     started_at: datetime
-    client: Optional[Any] = None  # ClaudeSDKClient when active
+    session_id: Optional[str] = None  # Claude's internal session ID for resuming
     messages: deque = field(default_factory=lambda: deque(maxlen=500))
-    output_buffer: deque = field(default_factory=lambda: deque(maxlen=1000))
+    output_buffer: str = ""
     websocket_clients: set = field(default_factory=set)
     pending_approval: Optional[dict] = None
     is_streaming: bool = False
     _approval_futures: dict = field(default_factory=dict)
+    _can_use_tool: Optional[Any] = None
 
 
 class SDKSessionManager:
@@ -54,16 +68,12 @@ class SDKSessionManager:
         self.sessions: dict[str, SDKSession] = {}
 
     async def create_session(self, cwd: str) -> SDKSession:
-        """Create a new SDK session with tool approval callback.
+        """Create a new SDK session placeholder.
 
-        Args:
-            cwd: Working directory for the Claude session
-
-        Returns:
-            SDKSession instance ready for interaction
+        The actual Claude session starts on first message.
         """
         if not SDK_AVAILABLE:
-            raise RuntimeError("claude-agent-sdk not installed")
+            raise RuntimeError("claude-agent-sdk not installed. Run: pip install claude-agent-sdk")
 
         session_id = str(uuid.uuid4())[:8]
         session = SDKSession(
@@ -73,8 +83,17 @@ class SDKSessionManager:
             started_at=datetime.now(timezone.utc)
         )
 
-        # Tool approval callback - broadcasts to WebSocket, waits for response
+        # Create tool approval callback
+        session._can_use_tool = self._make_approval_callback(session)
+
+        self.sessions[session_id] = session
+        return session
+
+    def _make_approval_callback(self, session: SDKSession):
+        """Create a tool approval callback for a session."""
+
         async def can_use_tool(tool_name: str, tool_input: dict, context: Any):
+            """Callback invoked before each tool use."""
             tool_use_id = str(uuid.uuid4())[:8]
             future = asyncio.Future()
             session._approval_futures[tool_use_id] = future
@@ -95,52 +114,42 @@ class SDKSessionManager:
             try:
                 # Wait for user approval with 5-minute timeout
                 approved = await asyncio.wait_for(future, timeout=300)
-                if approved:
-                    return PermissionResultAllow(updated_input=tool_input)
+
+                if PermissionResultAllow and PermissionResultDeny:
+                    if approved:
+                        return PermissionResultAllow(updated_input=tool_input)
+                    else:
+                        return PermissionResultDeny(message="User denied", interrupt=False)
                 else:
-                    return PermissionResultDeny(message="User denied", interrupt=False)
+                    # Fallback to dict format
+                    if approved:
+                        return {"behavior": "allow", "updatedInput": tool_input}
+                    else:
+                        return {"behavior": "deny", "message": "User denied"}
+
             except asyncio.TimeoutError:
-                return PermissionResultDeny(message="Approval timeout", interrupt=True)
+                if PermissionResultDeny:
+                    return PermissionResultDeny(message="Approval timeout", interrupt=True)
+                return {"behavior": "deny", "message": "Approval timeout"}
             finally:
                 session.pending_approval = None
                 session._approval_futures.pop(tool_use_id, None)
 
-        # Store the callback reference for the session
-        session._can_use_tool = can_use_tool
-
-        options = ClaudeAgentOptions(
-            cwd=cwd,
-            can_use_tool=can_use_tool
-        )
-
-        # Create client - note: actual connection happens on first query
-        client = ClaudeSDKClient(options=options)
-        session.client = client
-
-        self.sessions[session_id] = session
-        return session
+        return can_use_tool
 
     async def send_message(self, session_id: str, text: str):
         """Send a message to a session and stream responses.
 
-        Args:
-            session_id: ID of the target session
-            text: Message text to send
-
-        Raises:
-            ValueError: If session not found
+        Uses the query() async generator from claude-agent-sdk.
         """
         session = self.sessions.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
-        if not session.client:
-            raise ValueError(f"Session {session_id} has no active client")
-
         session.state = "running"
         session.is_streaming = True
 
-        # Broadcast user message to all clients
+        # Broadcast user message
         await self._broadcast(session, {
             "type": "message",
             "role": "user",
@@ -148,13 +157,35 @@ class SDKSessionManager:
         })
 
         try:
-            # Send query and process streaming responses
-            await session.client.query(text)
+            # Build options
+            options = ClaudeAgentOptions(
+                cwd=session.cwd,
+                can_use_tool=session._can_use_tool,
+            )
 
-            async for message in session.client.receive_messages():
+            # If we have a previous session ID, resume it
+            if session.session_id:
+                options = ClaudeAgentOptions(
+                    cwd=session.cwd,
+                    can_use_tool=session._can_use_tool,
+                    resume=session.session_id,
+                )
+
+            # Use query() async generator - this is the correct API
+            async for message in query(prompt=text, options=options):
+                # Capture session ID from init message for future resume
+                if hasattr(message, 'subtype') and message.subtype == 'init':
+                    if hasattr(message, 'session_id'):
+                        session.session_id = message.session_id
+                    elif hasattr(message, 'data') and isinstance(message.data, dict):
+                        session.session_id = message.data.get('session_id')
+
+                # Handle the message
                 await self._handle_sdk_message(session, message)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             await self._broadcast(session, {
                 "type": "error",
                 "error": str(e)
@@ -165,13 +196,7 @@ class SDKSessionManager:
             await self._broadcast(session, {"type": "state", "state": "waiting"})
 
     async def approve_tool(self, session_id: str, tool_use_id: str, approved: bool):
-        """Resolve a pending tool approval request.
-
-        Args:
-            session_id: ID of the session
-            tool_use_id: ID of the tool use request
-            approved: Whether to allow the tool use
-        """
+        """Resolve a pending tool approval request."""
         session = self.sessions.get(session_id)
         if not session:
             return
@@ -193,7 +218,8 @@ class SDKSessionManager:
                 "state": s.state,
                 "started_at": s.started_at.isoformat(),
                 "client_count": len(s.websocket_clients),
-                "has_pending_approval": s.pending_approval is not None
+                "has_pending_approval": s.pending_approval is not None,
+                "has_claude_session": s.session_id is not None,
             }
             for s in self.sessions.values()
         ]
@@ -203,12 +229,6 @@ class SDKSessionManager:
         session = self.sessions.pop(session_id, None)
         if session:
             session.state = "stopped"
-            if session.client:
-                try:
-                    await session.client.close()
-                except Exception:
-                    pass
-            # Notify clients
             await self._broadcast(session, {"type": "state", "state": "stopped"})
 
     async def add_websocket_client(self, session_id: str, ws: WebSocket):
@@ -216,6 +236,15 @@ class SDKSessionManager:
         session = self.sessions.get(session_id)
         if session:
             session.websocket_clients.add(ws)
+            # Send current output buffer to new client
+            if session.output_buffer:
+                try:
+                    await ws.send_json({
+                        "type": "history",
+                        "content": session.output_buffer
+                    })
+                except Exception:
+                    pass
 
     async def remove_websocket_client(self, session_id: str, ws: WebSocket):
         """Remove a WebSocket client from a session."""
@@ -234,39 +263,74 @@ class SDKSessionManager:
         session.websocket_clients -= disconnected
 
     async def _handle_sdk_message(self, session: SDKSession, message):
-        """Convert SDK message to WebSocket format and broadcast.
+        """Convert SDK message to WebSocket format and broadcast."""
 
-        Args:
-            session: Target session
-            message: SDK message object
-        """
-        # Handle different message types from SDK
-        if hasattr(message, 'content'):
+        # Handle AssistantMessage with content blocks
+        if AssistantMessage and isinstance(message, AssistantMessage):
             for block in message.content:
-                if hasattr(block, 'text'):
-                    # Text content block
+                if TextBlock and isinstance(block, TextBlock):
+                    text = block.text
+                    session.output_buffer += text
                     await self._broadcast(session, {
                         "type": "output",
                         "stream": "stdout",
-                        "data": block.text
+                        "data": text
                     })
-                elif hasattr(block, 'name'):
-                    # ToolUseBlock - tool is being invoked
+                elif ToolUseBlock and isinstance(block, ToolUseBlock):
                     await self._broadcast(session, {
                         "type": "tool_use",
                         "name": block.name,
                         "input": getattr(block, 'input', {}),
                         "tool_use_id": getattr(block, 'id', str(uuid.uuid4())[:8])
                     })
-        elif hasattr(message, 'delta'):
-            # Streaming delta - partial content
-            delta = message.delta
-            if hasattr(delta, 'text'):
+            return
+
+        # Handle ResultMessage (final result)
+        if ResultMessage and isinstance(message, ResultMessage):
+            if hasattr(message, 'result'):
                 await self._broadcast(session, {
-                    "type": "output",
-                    "stream": "stdout",
-                    "data": delta.text
+                    "type": "result",
+                    "result": message.result
                 })
+            return
+
+        # Handle streaming events (partial content)
+        if hasattr(message, 'type'):
+            msg_type = message.type
+
+            if msg_type == 'content_block_delta':
+                delta = getattr(message, 'delta', None)
+                if delta and hasattr(delta, 'text'):
+                    text = delta.text
+                    session.output_buffer += text
+                    await self._broadcast(session, {
+                        "type": "output",
+                        "stream": "stdout",
+                        "data": text
+                    })
+            elif msg_type == 'system':
+                # System messages (init, etc.)
+                subtype = getattr(message, 'subtype', '')
+                if subtype == 'init':
+                    await self._broadcast(session, {
+                        "type": "system",
+                        "subtype": "init",
+                        "message": "Session initialized"
+                    })
+
+        # Fallback: try to extract text from unknown message types
+        elif hasattr(message, 'content'):
+            content = message.content
+            if isinstance(content, list):
+                for block in content:
+                    if hasattr(block, 'text'):
+                        text = block.text
+                        session.output_buffer += text
+                        await self._broadcast(session, {
+                            "type": "output",
+                            "stream": "stdout",
+                            "data": text
+                        })
 
 
 # Singleton instance
