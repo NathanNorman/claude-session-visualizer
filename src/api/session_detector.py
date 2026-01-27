@@ -22,6 +22,8 @@ from .detection.jsonl_parser import (
     cwd_to_project_slug,
     extract_text_content,
     extract_tool_calls,
+    extract_tool_calls_detailed,
+    extract_tool_results,
     extract_activity,
     extract_detailed_tool_history,
 )
@@ -1486,9 +1488,10 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
         jsonl_file: Path to the JSONL file
 
     Returns:
-        List of message dicts with role, content, timestamp, and optionally tools
+        List of message dicts with role, content, timestamp, and optionally toolsDetailed
     """
     messages = []
+    pending_tools = {}  # tool_id -> reference to tool dict in most recent assistant message
 
     try:
         # Read the entire file to get full conversation history
@@ -1498,7 +1501,22 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
                     data = json.loads(line)
 
                     if data.get('type') == 'user':
-                        content = extract_text_content(data.get('message', {}))
+                        msg = data.get('message', {})
+                        msg_content = msg.get('content', [])
+                        content = extract_text_content(msg)
+                        result_timestamp = data.get('timestamp')
+
+                        # Extract tool results and link to pending tools
+                        tool_results = extract_tool_results(msg_content)
+                        for tool_id, result in tool_results.items():
+                            if tool_id in pending_tools:
+                                pending_tools[tool_id]['output'] = result['output']
+                                pending_tools[tool_id]['is_error'] = result['is_error']
+                                pending_tools[tool_id]['resultTimestamp'] = result_timestamp
+
+                        # Clear pending tools after linking results
+                        pending_tools.clear()
+
                         messages.append({
                             'role': 'user',
                             'content': content,
@@ -1512,10 +1530,22 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
                         msg_content = msg.get('content', [])
                         content = extract_text_content(msg)
 
+                        # Get detailed tools with input
+                        tools_detailed = extract_tool_calls_detailed(msg_content)
+                        # Also get string summaries for backwards compat
+                        tools_summary = extract_tool_calls(msg_content)
+
+                        # Track tools for linking with upcoming results
+                        pending_tools.clear()
+                        for tool in tools_detailed:
+                            if tool.get('id'):
+                                pending_tools[tool['id']] = tool
+
                         messages.append({
                             'role': 'assistant',
                             'content': content,
-                            'tools': extract_tool_calls(msg_content),
+                            'tools': tools_summary,  # String summaries for display
+                            'toolsDetailed': tools_detailed,  # Full tool objects with input/output
                             'timestamp': data.get('timestamp'),
                             'lineNumber': line_num,
                             'tokens': estimate_tokens(content)

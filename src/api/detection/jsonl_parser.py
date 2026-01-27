@@ -385,6 +385,41 @@ def extract_tool_calls(content: list) -> list[str]:
     return tools
 
 
+def extract_tool_calls_detailed(content: list) -> list[dict]:
+    """Extract detailed tool call info from message content.
+
+    Returns list of tool dicts with id, name, input for each tool_use block.
+    """
+    tools = []
+    for item in content:
+        if isinstance(item, dict) and item.get('type') == 'tool_use':
+            tools.append({
+                'id': item.get('id'),
+                'name': item.get('name', 'Unknown'),
+                'input': item.get('input', {}),
+                'output': None,
+                'is_error': False
+            })
+    return tools
+
+
+def extract_tool_results(content: list) -> dict:
+    """Extract tool results from user message content.
+
+    Returns dict mapping tool_use_id to result info.
+    """
+    results = {}
+    for item in content:
+        if isinstance(item, dict) and item.get('type') == 'tool_result':
+            tool_id = item.get('tool_use_id')
+            if tool_id:
+                results[tool_id] = {
+                    'output': item.get('content', ''),
+                    'is_error': item.get('is_error', False)
+                }
+    return results
+
+
 def get_session_metadata(session_id: str, activity_tracker: callable = None) -> dict | None:
     """Get metadata for a specific session ID from its JSONL file."""
     if not CLAUDE_PROJECTS_DIR.exists():

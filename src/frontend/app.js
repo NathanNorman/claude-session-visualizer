@@ -5694,6 +5694,412 @@ async function loadConversationHistory(sessionId, skipLoadingState = false) {
 }
 
 /**
+ * Render inline expandable tool blocks for a message
+ */
+function renderInlineToolBlocks(tools) {
+    if (!tools || tools.length === 0) return '';
+
+    const errorCount = tools.filter(t => t.is_error).length;
+
+    const toolsHtml = tools.map((tool, idx) => {
+        const isError = tool.is_error;
+        const toolName = tool.name || 'Unknown';
+        const summary = getInlineToolSummary(tool);
+        const isAgent = toolName === 'Task';
+        const isRunning = !tool.output && tool.output !== '';
+
+        // Calculate duration
+        const durationHtml = getToolDurationHtml(tool, isRunning);
+
+        // Estimate tokens for tool (roughly 4 chars per token)
+        const inputTokens = Math.ceil(JSON.stringify(tool.input || {}).length / 4);
+        const outputTokens = Math.ceil((tool.output || '').length / 4);
+        const totalTokens = inputTokens + outputTokens;
+        const tokenDisplay = formatToolTokens(inputTokens, outputTokens);
+
+        // Format input - returns { text, type }
+        const inputResult = formatInlineToolInput(tool);
+        const inputStr = inputResult.text;
+        const inputType = inputResult.type;
+
+        // Format output (truncated if too long)
+        const output = tool.output || '';
+        const outputIsTruncated = output.length > 1000;
+        const outputTruncated = outputIsTruncated ? output.slice(0, 1000) : output;
+
+        // Check if output looks like JSON
+        let outputType = 'plain';
+        if (output.trim().startsWith('{') || output.trim().startsWith('[')) {
+            try {
+                JSON.parse(output);
+                outputType = 'json';
+            } catch {}
+        }
+
+        // Escape content for data attributes
+        const inputEscaped = inputStr.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        const outputEscaped = output.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+        // Render content with syntax highlighting based on type
+        const inputHtml = inputType === 'json' ? highlightJson(inputStr) :
+                          inputType === 'bash' ? highlightBash(inputStr) :
+                          escapeHtml(inputStr);
+        const outputHtml = outputType === 'json' ? highlightJson(outputTruncated) : escapeHtml(outputTruncated);
+
+        return `
+            <div class="mc-inline-tool ${isError ? 'error' : ''} ${isAgent ? 'agent' : ''} ${isRunning ? 'running' : ''}" data-tool-idx="${idx}">
+                <div class="mc-inline-tool-header" onclick="toggleInlineToolExpand(this)">
+                    <span class="tool-expand-icon">▶</span>
+                    <span class="tool-status-icon">${isRunning ? '<span class="tool-running-pulse"></span>' : (isError ? '❌' : '✅')}</span>
+                    <span class="tool-name">${escapeHtml(toolName)}</span>
+                    ${isAgent ? '<span class="tool-agent-badge">🤖 Agent</span>' : ''}
+                    <span class="tool-summary">${escapeHtml(summary)}</span>
+                    ${durationHtml}
+                    <span class="tool-tokens" title="Input: ~${inputTokens} tokens, Output: ~${outputTokens} tokens">${tokenDisplay}</span>
+                </div>
+                <div class="mc-inline-tool-details hidden">
+                    ${inputStr ? `
+                        <div class="tool-input">
+                            <div class="detail-header">
+                                <span class="detail-label">Input</span>
+                                <button class="detail-copy-btn" onclick="event.stopPropagation(); copyToolContent(this)" data-content="${inputEscaped}" title="Copy input">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                            <pre class="detail-content ${inputType}-content">${inputHtml}</pre>
+                        </div>
+                    ` : ''}
+                    ${output ? `
+                        <div class="tool-output ${isError ? 'error-output' : ''} ${outputIsTruncated ? 'truncated' : ''}">
+                            <div class="detail-header">
+                                <span class="detail-label">Output${isError ? ' (Error)' : ''}</span>
+                                <button class="detail-copy-btn" onclick="event.stopPropagation(); copyToolContent(this)" data-content="${outputEscaped}" title="Copy output">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                            <pre class="detail-content ${outputType}-content" data-truncated="${outputIsTruncated}" data-full-content="${outputEscaped}">${outputHtml}${outputIsTruncated ? '\n<span class="truncation-indicator">... (truncated)</span>' : ''}</pre>
+                            ${outputIsTruncated ? `
+                                <button class="expand-output-btn" onclick="event.stopPropagation(); toggleOutputExpand(this)">
+                                    <span class="expand-icon">▶</span>
+                                    <span class="expand-text">Show full output (${Math.round(output.length / 1024)}KB)</span>
+                                </button>
+                            ` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="mc-inline-tools">
+            ${errorCount > 0 ? `<div class="mc-inline-tools-error-badge">${errorCount} failed</div>` : ''}
+            ${toolsHtml}
+        </div>
+    `;
+}
+
+/**
+ * Toggle inline tool expansion
+ */
+function toggleInlineToolExpand(header) {
+    const item = header.closest('.mc-inline-tool');
+    const details = item.querySelector('.mc-inline-tool-details');
+    const icon = header.querySelector('.tool-expand-icon');
+
+    if (details.classList.contains('hidden')) {
+        details.classList.remove('hidden');
+        icon.textContent = '▼';
+        item.classList.add('expanded');
+    } else {
+        details.classList.add('hidden');
+        icon.textContent = '▶';
+        item.classList.remove('expanded');
+    }
+}
+
+/**
+ * Toggle expanded output view
+ */
+function toggleOutputExpand(button) {
+    const outputDiv = button.closest('.tool-output');
+    const pre = outputDiv.querySelector('pre.detail-content');
+    const icon = button.querySelector('.expand-icon');
+    const text = button.querySelector('.expand-text');
+    const isExpanded = outputDiv.classList.contains('expanded');
+
+    if (isExpanded) {
+        // Collapse back to truncated view
+        outputDiv.classList.remove('expanded');
+        icon.textContent = '▶';
+        text.textContent = text.dataset.originalText || 'Show full output';
+
+        // Get truncated content (first 1000 chars)
+        const fullContent = pre.dataset.fullContent || '';
+        const decoded = fullContent.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        const truncated = decoded.slice(0, 1000);
+
+        // Check if JSON for highlighting
+        let html;
+        if (decoded.trim().startsWith('{') || decoded.trim().startsWith('[')) {
+            try {
+                JSON.parse(decoded);
+                html = highlightJson(truncated);
+            } catch {
+                html = escapeHtml(truncated);
+            }
+        } else {
+            html = escapeHtml(truncated);
+        }
+        pre.innerHTML = html + '\n<span class="truncation-indicator">... (truncated)</span>';
+    } else {
+        // Expand to full view
+        outputDiv.classList.add('expanded');
+        icon.textContent = '▼';
+        text.dataset.originalText = text.textContent;
+        text.textContent = 'Collapse output';
+
+        // Get full content from data attribute
+        const fullContent = pre.dataset.fullContent || '';
+        const decoded = fullContent.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+        // Check if JSON for highlighting
+        let html;
+        if (decoded.trim().startsWith('{') || decoded.trim().startsWith('[')) {
+            try {
+                JSON.parse(decoded);
+                html = highlightJson(decoded);
+            } catch {
+                html = escapeHtml(decoded);
+            }
+        } else {
+            html = escapeHtml(decoded);
+        }
+        pre.innerHTML = html;
+    }
+}
+
+/**
+ * Copy tool input/output content to clipboard
+ */
+function copyToolContent(button) {
+    const content = button.dataset.content || '';
+    // Decode HTML entities
+    const decoded = content.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+    navigator.clipboard.writeText(decoded).then(() => {
+        // Show success feedback
+        const originalHtml = button.innerHTML;
+        button.innerHTML = '✓';
+        button.classList.add('copied');
+        setTimeout(() => {
+            button.innerHTML = originalHtml;
+            button.classList.remove('copied');
+        }, 1500);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Get summary text for inline tool display
+ */
+function getInlineToolSummary(tool) {
+    const name = tool.name || '';
+    const input = tool.input || {};
+
+    if (name === 'Bash') {
+        return input.description || (input.command || '').slice(0, 60);
+    } else if (name === 'Read') {
+        const path = input.file_path || '';
+        return path.split('/').pop() || 'file';
+    } else if (name === 'Write' || name === 'Edit') {
+        const path = input.file_path || '';
+        return path.split('/').pop() || 'file';
+    } else if (name === 'Grep') {
+        return `'${(input.pattern || '').slice(0, 40)}'`;
+    } else if (name === 'Glob') {
+        return (input.pattern || '').slice(0, 40);
+    } else if (name === 'Task') {
+        return input.description || '';
+    } else if (name === 'WebFetch') {
+        const url = input.url || '';
+        try {
+            return new URL(url).hostname;
+        } catch {
+            return url.slice(0, 40);
+        }
+    }
+    return '';
+}
+
+/**
+ * Format tool input for inline display
+ * Returns { text: string, type: 'json'|'bash'|'plain' } for proper rendering
+ */
+function formatInlineToolInput(tool) {
+    const name = tool.name || '';
+    const input = tool.input || {};
+
+    if (name === 'Bash') {
+        return { text: input.command || '', type: 'bash' };
+    } else if (name === 'Read') {
+        return { text: input.file_path || '', type: 'plain' };
+    } else if (name === 'Write') {
+        const content = input.content || '';
+        return { text: `${input.file_path || ''}\n---\n${content.slice(0, 300)}${content.length > 300 ? '...' : ''}`, type: 'plain' };
+    } else if (name === 'Edit') {
+        const oldStr = input.old_string || '';
+        const newStr = input.new_string || '';
+        return { text: `${input.file_path || ''}\n---\nold: ${oldStr.slice(0, 150)}\nnew: ${newStr.slice(0, 150)}`, type: 'plain' };
+    } else if (name === 'Grep') {
+        return { text: `pattern: ${input.pattern || ''}\npath: ${input.path || '.'}`, type: 'plain' };
+    } else if (name === 'Glob') {
+        return { text: `pattern: ${input.pattern || ''}\npath: ${input.path || '.'}`, type: 'plain' };
+    } else if (name === 'WebFetch') {
+        return { text: input.url || '', type: 'plain' };
+    }
+
+    // Generic: show full input as JSON with syntax highlighting
+    try {
+        return { text: JSON.stringify(input, null, 2), type: 'json' };
+    } catch {
+        return { text: String(input), type: 'plain' };
+    }
+}
+
+/**
+ * Syntax highlight JSON string
+ */
+function highlightJson(jsonStr) {
+    // Escape HTML first
+    let html = escapeHtml(jsonStr);
+
+    // Highlight different JSON elements
+    // Strings (including keys)
+    html = html.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, (match, content) => {
+        // Check if this is a key (followed by :)
+        return `<span class="json-string">"${content}"</span>`;
+    });
+
+    // Numbers
+    html = html.replace(/\b(-?\d+\.?\d*)\b/g, '<span class="json-number">$1</span>');
+
+    // Booleans
+    html = html.replace(/\b(true|false)\b/g, '<span class="json-boolean">$1</span>');
+
+    // Null
+    html = html.replace(/\bnull\b/g, '<span class="json-null">null</span>');
+
+    // Keys (text before colon)
+    html = html.replace(/<span class="json-string">"([^"]+)"<\/span>\s*:/g,
+        '<span class="json-key">"$1"</span>:');
+
+    return html;
+}
+
+/**
+ * Syntax highlight Bash/shell commands
+ */
+function highlightBash(bashStr) {
+    // Escape HTML first
+    let html = escapeHtml(bashStr);
+
+    // Keywords and control structures
+    const keywords = ['if', 'then', 'else', 'elif', 'fi', 'for', 'in', 'do', 'done', 'while', 'until', 'case', 'esac', 'function', 'return', 'exit'];
+    const keywordPattern = new RegExp(`\\b(${keywords.join('|')})\\b`, 'g');
+    html = html.replace(keywordPattern, '<span class="bash-keyword">$1</span>');
+
+    // Common commands (first word of line or after ; or | or &&)
+    const commands = ['echo', 'cd', 'ls', 'cat', 'grep', 'sed', 'awk', 'find', 'xargs', 'sort', 'uniq', 'head', 'tail', 'wc', 'cut', 'tr', 'rm', 'cp', 'mv', 'mkdir', 'touch', 'chmod', 'chown', 'curl', 'wget', 'git', 'npm', 'yarn', 'python', 'python3', 'pip', 'node', 'docker', 'kubectl', 'aws', 'gh', 'jq', 'export', 'source', 'eval', 'exec', 'set', 'unset', 'test', 'read', 'printf'];
+    const cmdPattern = new RegExp(`(^|;\\s*|\\|\\s*|&&\\s*|\\|\\|\\s*)(${commands.join('|')})\\b`, 'gm');
+    html = html.replace(cmdPattern, '$1<span class="bash-command">$2</span>');
+
+    // Variables $VAR, ${VAR}, $1, $@, etc.
+    html = html.replace(/(\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@#?!*-])/g, '<span class="bash-variable">$1</span>');
+
+    // Strings (double and single quoted)
+    html = html.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, '<span class="bash-string">"$1"</span>');
+    html = html.replace(/'([^'\\]*(\\.[^'\\]*)*)'/g, '<span class="bash-string">\'$1\'</span>');
+
+    // Comments
+    html = html.replace(/(#[^\n]*)/g, '<span class="bash-comment">$1</span>');
+
+    // Operators
+    html = html.replace(/(\||&amp;&amp;|&amp;|\|\||;;|&gt;|&lt;|&gt;&gt;|2&gt;&amp;1|2&gt;)/g, '<span class="bash-operator">$1</span>');
+
+    // Numbers (standalone)
+    html = html.replace(/\b(\d+)\b/g, '<span class="bash-number">$1</span>');
+
+    // Flags/options
+    html = html.replace(/(\s)(--?[A-Za-z][A-Za-z0-9-]*)/g, '$1<span class="bash-flag">$2</span>');
+
+    return html;
+}
+
+/**
+ * Get tool duration HTML
+ * For completed tools: shows how long the tool took
+ * For running tools: shows elapsed time with live indicator
+ */
+function getToolDurationHtml(tool, isRunning) {
+    const timestamp = tool.timestamp;
+    if (!timestamp) return '';
+
+    const startTime = new Date(timestamp).getTime();
+
+    if (isRunning) {
+        // Tool still running - show elapsed time
+        const elapsed = Date.now() - startTime;
+        const duration = formatDuration(elapsed);
+        return `<span class="tool-duration running" data-start="${startTime}">${duration}</span>`;
+    } else if (tool.resultTimestamp) {
+        // Tool completed - calculate actual duration
+        const endTime = new Date(tool.resultTimestamp).getTime();
+        const duration = endTime - startTime;
+        if (duration > 0) {
+            return `<span class="tool-duration completed">${formatDuration(duration)}</span>`;
+        }
+    }
+
+    // No duration available
+    return '';
+}
+
+/**
+ * Format duration in human-readable form
+ */
+function formatDuration(ms) {
+    if (ms < 1000) return '<1s';
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return `${hours}h ${remainingMinutes}m`;
+}
+
+/**
+ * Format tool token counts for display
+ */
+function formatToolTokens(inputTokens, outputTokens) {
+    const total = inputTokens + outputTokens;
+    if (total < 1000) {
+        return `~${total} tok`;
+    } else {
+        return `~${(total / 1000).toFixed(1)}k tok`;
+    }
+}
+
+/**
  * Render conversation messages
  */
 function renderConversation(messages) {
@@ -5708,7 +6114,7 @@ function renderConversation(messages) {
     // Filter out empty messages, but keep tool-only assistant messages and system messages
     const filteredMessages = messages.filter(msg => {
         const hasContent = msg.content && msg.content.trim();
-        const hasTools = msg.tools && msg.tools.length > 0;
+        const hasTools = (msg.tools && msg.tools.length > 0) || (msg.toolsDetailed && msg.toolsDetailed.length > 0);
         const isSystem = msg.role === 'system';
         return hasContent || hasTools || isSystem;
     });
@@ -5759,6 +6165,14 @@ function renderConversation(messages) {
         let displayContent = '';
         let isToolOnly = false;
         let toolsText = '';
+        let inlineToolsHtml = '';
+
+        // Render inline tool blocks if detailed tools are available
+        const toolsDetailed = msg.toolsDetailed || [];
+        if (toolsDetailed.length > 0) {
+            inlineToolsHtml = renderInlineToolBlocks(toolsDetailed);
+            toolsText = (msg.tools || []).join(', ');
+        }
 
         if (msg.content && msg.content.trim()) {
             if (msg.isCompaction) {
@@ -5772,12 +6186,14 @@ function renderConversation(messages) {
                 // Assistant/system messages: full markdown rendering
                 displayContent = renderMarkdown(msg.content);
             }
+        } else if (toolsDetailed.length > 0) {
+            // Tool-only message - tools are already in inlineToolsHtml
+            isToolOnly = true;
         } else if (msg.tools && msg.tools.length > 0) {
+            // Fallback for messages without detailed tools
             isToolOnly = true;
             toolsText = msg.tools.join(', ');
-            // Format each tool with stylized name
             const formattedTools = msg.tools.map(tool => {
-                // Extract tool name (first word before space or colon)
                 const match = tool.match(/^(\w+)(.*)/);
                 if (match) {
                     const toolName = match[1];
@@ -5817,6 +6233,7 @@ function renderConversation(messages) {
                     ${tokenDisplay ? `<span class="mc-message-tokens" title="${tokens} tokens">${tokenDisplay} tokens</span>` : ''}
                 </div>
                 <div class="mc-message-content">${displayContent}</div>
+                ${inlineToolsHtml}
             </div>
         `;
     }).join('');
