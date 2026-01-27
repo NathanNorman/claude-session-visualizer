@@ -24,3 +24,18 @@ daemon/
 plans/
 plugins/
 visualizer/
+.agent/
+.ralph/
+ralph.yml
+PROMPT.md
+
+# Dependencies
+node_modules/
+
+# Test output
+playwright-report/
+test-results/
+
+# Temp/lock files
+.~lock.*
+*.lock.#*
