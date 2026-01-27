@@ -5168,27 +5168,18 @@ function initMCInput() {
     // Hide autocomplete and pickers when clicking outside
     document.addEventListener('click', (e) => {
         const autocomplete = document.getElementById('mc-autocomplete');
-        const commandsPicker = document.getElementById('mc-commands-picker');
-        const skillsPicker = document.getElementById('mc-skills-picker');
-        const commandsBtn = document.getElementById('mc-commands-btn');
-        const skillsBtn = document.getElementById('mc-skills-btn');
+        const slashPicker = document.getElementById('mc-slash-picker');
+        const slashBtn = document.getElementById('mc-slash-btn');
 
         // Hide autocomplete
         if (autocomplete && !autocomplete.contains(e.target) && e.target !== inputEl) {
             hideAutocomplete();
         }
 
-        // Hide commands picker if clicking outside
-        if (commandsPicker && !commandsPicker.classList.contains('hidden')) {
-            if (!commandsPicker.contains(e.target) && e.target !== commandsBtn && !commandsBtn.contains(e.target)) {
-                hideCommandsPicker();
-            }
-        }
-
-        // Hide skills picker if clicking outside
-        if (skillsPicker && !skillsPicker.classList.contains('hidden')) {
-            if (!skillsPicker.contains(e.target) && e.target !== skillsBtn && !skillsBtn.contains(e.target)) {
-                hideSkillsPicker();
+        // Hide slash picker if clicking outside
+        if (slashPicker && !slashPicker.classList.contains('hidden')) {
+            if (!slashPicker.contains(e.target) && e.target !== slashBtn && !slashBtn.contains(e.target)) {
+                hideSlashPicker();
             }
         }
     });
@@ -5196,15 +5187,10 @@ function initMCInput() {
     // Handle Escape key to close pickers
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-            const commandsPicker = document.getElementById('mc-commands-picker');
-            const skillsPicker = document.getElementById('mc-skills-picker');
+            const slashPicker = document.getElementById('mc-slash-picker');
 
-            if (commandsPicker && !commandsPicker.classList.contains('hidden')) {
-                hideCommandsPicker();
-                e.preventDefault();
-            }
-            if (skillsPicker && !skillsPicker.classList.contains('hidden')) {
-                hideSkillsPicker();
+            if (slashPicker && !slashPicker.classList.contains('hidden')) {
+                hideSlashPicker();
                 e.preventDefault();
             }
         }
@@ -7617,7 +7603,7 @@ let autocompleteSelectedIndex = -1;
  * Handle slash command autocomplete
  * Shows dropdown when user types / followed by characters
  */
-function handleSlashAutocomplete(inputEl) {
+async function handleSlashAutocomplete(inputEl) {
     const text = inputEl.innerText || '';
     const autocomplete = document.getElementById('mc-autocomplete');
 
@@ -7632,8 +7618,8 @@ function handleSlashAutocomplete(inputEl) {
     // Get the partial command (everything after /)
     const partial = text.slice(1).toLowerCase();
 
-    // Filter matching commands
-    const matches = getMatchingCommands(partial);
+    // Filter matching commands (async)
+    const matches = await getMatchingCommands(partial);
 
     if (matches.length === 0) {
         hideAutocomplete();
@@ -7647,7 +7633,7 @@ function handleSlashAutocomplete(inputEl) {
 /**
  * Get commands matching the partial input
  */
-function getMatchingCommands(partial) {
+async function getMatchingCommands(partial) {
     const results = [];
 
     // Built-in commands
@@ -7661,24 +7647,17 @@ function getMatchingCommands(partial) {
         }
     }
 
-    // Common skills (hardcoded for now, could be fetched from API)
-    const commonSkills = [
-        { name: '/commit', description: 'Create a git commit with a generated message' },
-        { name: '/debug', description: 'Start systematic debugging process' },
-        { name: '/review', description: 'Review code changes' },
-        { name: '/test', description: 'Run or create tests' },
-        { name: '/refactor', description: 'Refactor selected code' },
-        { name: '/explain', description: 'Explain code or concept' },
-        { name: '/pr', description: 'Create or manage pull requests' },
-        { name: '/init', description: 'Initialize project configuration' }
-    ];
+    // Fetch skills from API (uses cache)
+    const skills = await fetchSkills();
 
-    for (const skill of commonSkills) {
-        const skillName = skill.name.slice(1);
-        if (skillName.startsWith(partial) && !BUILTIN_COMMANDS[skillName]) {
+    for (const skill of skills) {
+        const skillName = skill.name.toLowerCase();
+        if ((skillName.startsWith(partial) || partial === '') && !BUILTIN_COMMANDS[skillName]) {
             results.push({
-                ...skill,
-                type: 'skill'
+                name: `/${skill.name}`,
+                description: skill.description,
+                type: 'skill',
+                source: skill.source
             });
         }
     }
@@ -7823,61 +7802,120 @@ function hideAutocomplete() {
 }
 
 /**
- * Skills data for the picker
+ * Default skills data (fallback if API unavailable)
  */
-const AVAILABLE_SKILLS = [
-    { name: 'commit', description: 'Create a git commit with AI-generated message', category: 'Git' },
-    { name: 'pr', description: 'Create or manage pull requests', category: 'Git' },
-    { name: 'review', description: 'Review code changes for issues and improvements', category: 'Code' },
-    { name: 'debug', description: 'Start systematic debugging process', category: 'Code' },
-    { name: 'test', description: 'Run tests or generate test cases', category: 'Code' },
-    { name: 'refactor', description: 'Refactor selected code for better quality', category: 'Code' },
-    { name: 'explain', description: 'Explain code, concepts, or errors', category: 'Learning' },
-    { name: 'docs', description: 'Generate or update documentation', category: 'Docs' },
-    { name: 'init', description: 'Initialize project configuration', category: 'Setup' },
-    { name: 'migrate', description: 'Help with code migrations and upgrades', category: 'Code' },
-    { name: 'optimize', description: 'Optimize code for performance', category: 'Code' },
-    { name: 'security', description: 'Scan for security vulnerabilities', category: 'Code' },
-    { name: 'api', description: 'Generate or consume API endpoints', category: 'Code' },
-    { name: 'db', description: 'Database queries and schema management', category: 'Data' },
-    { name: 'deploy', description: 'Deployment and CI/CD assistance', category: 'DevOps' }
+const DEFAULT_SKILLS = [
+    { name: 'commit', description: 'Create a git commit with AI-generated message', category: 'Git', source: 'default' },
+    { name: 'pr', description: 'Create or manage pull requests', category: 'Git', source: 'default' },
+    { name: 'review', description: 'Review code changes for issues and improvements', category: 'Code', source: 'default' },
+    { name: 'debug', description: 'Start systematic debugging process', category: 'Code', source: 'default' },
+    { name: 'test', description: 'Run tests or generate test cases', category: 'Code', source: 'default' },
+    { name: 'refactor', description: 'Refactor selected code for better quality', category: 'Code', source: 'default' },
+    { name: 'explain', description: 'Explain code, concepts, or errors', category: 'Learning', source: 'default' },
+    { name: 'docs', description: 'Generate or update documentation', category: 'Docs', source: 'default' },
+    { name: 'init', description: 'Initialize project configuration', category: 'Setup', source: 'default' },
+    { name: 'migrate', description: 'Help with code migrations and upgrades', category: 'Code', source: 'default' },
+    { name: 'optimize', description: 'Optimize code for performance', category: 'Code', source: 'default' },
+    { name: 'security', description: 'Scan for security vulnerabilities', category: 'Code', source: 'default' },
+    { name: 'api', description: 'Generate or consume API endpoints', category: 'Code', source: 'default' },
+    { name: 'db', description: 'Database queries and schema management', category: 'Data', source: 'default' },
+    { name: 'deploy', description: 'Deployment and CI/CD assistance', category: 'DevOps', source: 'default' }
 ];
 
 /**
- * Toggle commands picker visibility
+ * Cached skills data from API
  */
-function toggleCommandsPicker() {
-    const picker = document.getElementById('mc-commands-picker');
-    const btn = document.getElementById('mc-commands-btn');
-    const skillsPicker = document.getElementById('mc-skills-picker');
+let cachedSkills = null;
+let skillsCacheTimestamp = 0;
+const SKILLS_CACHE_TTL = 30000; // 30 seconds
 
-    // Close skills picker if open
-    if (skillsPicker && !skillsPicker.classList.contains('hidden')) {
-        hideSkillsPicker();
+/**
+ * Fetch skills from the API and merge with defaults
+ * @returns {Promise<Array>} Array of skill objects
+ */
+async function fetchSkills() {
+    const now = Date.now();
+
+    // Return cached data if still valid
+    if (cachedSkills && (now - skillsCacheTimestamp) < SKILLS_CACHE_TTL) {
+        return cachedSkills;
     }
 
-    if (picker.classList.contains('hidden')) {
-        showCommandsPicker();
-        btn.classList.add('active');
-    } else {
-        hideCommandsPicker();
+    try {
+        const response = await fetch('/api/skills');
+        if (!response.ok) {
+            console.warn('Failed to fetch skills from API, using defaults');
+            return DEFAULT_SKILLS;
+        }
+
+        const data = await response.json();
+        const customSkills = data.skills || [];
+
+        // Create a set of custom skill names to avoid duplicates
+        const customNames = new Set(customSkills.map(s => s.name.toLowerCase()));
+
+        // Merge: custom skills first, then defaults that aren't overridden
+        const merged = [
+            ...customSkills,
+            ...DEFAULT_SKILLS.filter(s => !customNames.has(s.name.toLowerCase()))
+        ];
+
+        // Sort by category then name
+        merged.sort((a, b) => {
+            if (a.category !== b.category) return a.category.localeCompare(b.category);
+            return a.name.localeCompare(b.name);
+        });
+
+        cachedSkills = merged;
+        skillsCacheTimestamp = now;
+
+        return merged;
+    } catch (error) {
+        console.warn('Error fetching skills:', error);
+        return DEFAULT_SKILLS;
     }
 }
 
 /**
- * Show commands picker
+ * Invalidate skills cache (call when skills might have changed)
  */
-function showCommandsPicker() {
-    const picker = document.getElementById('mc-commands-picker');
-    const list = document.getElementById('mc-commands-list');
-    const searchInput = document.getElementById('mc-commands-search');
+function invalidateSkillsCache() {
+    cachedSkills = null;
+    skillsCacheTimestamp = 0;
+}
+
+/**
+ * Toggle unified slash picker visibility
+ */
+function toggleSlashPicker() {
+    const picker = document.getElementById('mc-slash-picker');
+    const btn = document.getElementById('mc-slash-btn');
+
+    if (picker.classList.contains('hidden')) {
+        showSlashPicker();
+        btn.classList.add('active');
+    } else {
+        hideSlashPicker();
+    }
+}
+
+/**
+ * Show unified slash picker
+ */
+async function showSlashPicker() {
+    const picker = document.getElementById('mc-slash-picker');
+    const list = document.getElementById('mc-slash-list');
+    const searchInput = document.getElementById('mc-slash-search');
 
     if (!picker || !list) return;
 
-    // Render commands
-    renderCommandsList(list, '');
-
+    // Show loading state
+    list.innerHTML = '<div class="mc-picker-empty">Loading...</div>';
     picker.classList.remove('hidden');
+
+    // Fetch and render unified list
+    const skills = await fetchSkills();
+    renderSlashList(list, '', skills);
 
     // Focus search input
     if (searchInput) {
@@ -7887,170 +7925,218 @@ function showCommandsPicker() {
 }
 
 /**
- * Hide commands picker
+ * Hide unified slash picker
  */
-function hideCommandsPicker() {
-    const picker = document.getElementById('mc-commands-picker');
-    const btn = document.getElementById('mc-commands-btn');
+function hideSlashPicker() {
+    const picker = document.getElementById('mc-slash-picker');
+    const btn = document.getElementById('mc-slash-btn');
 
     if (picker) picker.classList.add('hidden');
     if (btn) btn.classList.remove('active');
 }
 
 /**
- * Filter commands picker
+ * Filter unified slash picker
  */
-function filterCommandsPicker(query) {
-    const list = document.getElementById('mc-commands-list');
+async function filterSlashPicker(query) {
+    const list = document.getElementById('mc-slash-list');
     if (list) {
-        renderCommandsList(list, query.toLowerCase());
+        const skills = await fetchSkills();
+        renderSlashList(list, query.toLowerCase(), skills);
     }
 }
 
 /**
- * Render commands list
+ * Render unified slash list with built-in commands at top, then skills grouped by source
+ * @param {HTMLElement} container - Container element
+ * @param {string} filter - Filter query
+ * @param {Array} skills - Array of skill objects
  */
-function renderCommandsList(container, filter) {
-    const commands = Object.entries(BUILTIN_COMMANDS)
-        .filter(([name]) => !filter || name.includes(filter))
+function renderSlashList(container, filter, skills = DEFAULT_SKILLS) {
+    // Get built-in commands
+    const builtinCommands = Object.entries(BUILTIN_COMMANDS)
+        .filter(([name, cmd]) => !filter || name.includes(filter) || cmd.description.toLowerCase().includes(filter))
         .map(([name, cmd]) => ({
-            name: `/${name}`,
-            description: cmd.description
+            name,
+            description: cmd.description,
+            type: 'builtin'
         }));
 
-    if (commands.length === 0) {
-        container.innerHTML = '<div class="mc-picker-empty">No commands found</div>';
-        return;
-    }
-
-    container.innerHTML = commands.map(cmd => `
-        <div class="mc-picker-item" onclick="selectPickerCommand('${escapeHtml(cmd.name)}')">
-            <div class="mc-picker-item-icon command">/</div>
-            <div class="mc-picker-item-content">
-                <div class="mc-picker-item-name">${escapeHtml(cmd.name)}</div>
-                <div class="mc-picker-item-desc">${escapeHtml(cmd.description)}</div>
-            </div>
-        </div>
-    `).join('');
-}
-
-/**
- * Toggle skills picker visibility
- */
-function toggleSkillsPicker() {
-    const picker = document.getElementById('mc-skills-picker');
-    const btn = document.getElementById('mc-skills-btn');
-    const commandsPicker = document.getElementById('mc-commands-picker');
-
-    // Close commands picker if open
-    if (commandsPicker && !commandsPicker.classList.contains('hidden')) {
-        hideCommandsPicker();
-    }
-
-    if (picker.classList.contains('hidden')) {
-        showSkillsPicker();
-        btn.classList.add('active');
-    } else {
-        hideSkillsPicker();
-    }
-}
-
-/**
- * Show skills picker
- */
-function showSkillsPicker() {
-    const picker = document.getElementById('mc-skills-picker');
-    const list = document.getElementById('mc-skills-list');
-    const searchInput = document.getElementById('mc-skills-search');
-
-    if (!picker || !list) return;
-
-    // Render skills
-    renderSkillsList(list, '');
-
-    picker.classList.remove('hidden');
-
-    // Focus search input
-    if (searchInput) {
-        searchInput.value = '';
-        setTimeout(() => searchInput.focus(), 50);
-    }
-}
-
-/**
- * Hide skills picker
- */
-function hideSkillsPicker() {
-    const picker = document.getElementById('mc-skills-picker');
-    const btn = document.getElementById('mc-skills-btn');
-
-    if (picker) picker.classList.add('hidden');
-    if (btn) btn.classList.remove('active');
-}
-
-/**
- * Filter skills picker
- */
-function filterSkillsPicker(query) {
-    const list = document.getElementById('mc-skills-list');
-    if (list) {
-        renderSkillsList(list, query.toLowerCase());
-    }
-}
-
-/**
- * Render skills list grouped by category
- */
-function renderSkillsList(container, filter) {
-    const filtered = AVAILABLE_SKILLS.filter(skill =>
-        !filter || skill.name.includes(filter) || skill.description.toLowerCase().includes(filter)
+    // Filter skills
+    const filteredSkills = skills.filter(skill =>
+        !filter || skill.name.toLowerCase().includes(filter) || skill.description.toLowerCase().includes(filter)
     );
 
-    if (filtered.length === 0) {
-        container.innerHTML = '<div class="mc-picker-empty">No skills found</div>';
+    if (builtinCommands.length === 0 && filteredSkills.length === 0) {
+        container.innerHTML = '<div class="mc-picker-empty">No commands or skills found</div>';
         return;
     }
 
-    // Group by category
-    const grouped = {};
-    filtered.forEach(skill => {
-        if (!grouped[skill.category]) {
-            grouped[skill.category] = [];
-        }
-        grouped[skill.category].push(skill);
-    });
-
     let html = '';
-    for (const [category, skills] of Object.entries(grouped)) {
-        html += `<div class="mc-picker-category">${escapeHtml(category)}</div>`;
-        html += skills.map(skill => `
-            <div class="mc-picker-item" onclick="selectPickerSkill('${escapeHtml(skill.name)}')">
-                <div class="mc-picker-item-icon skill">⚡</div>
+
+    // Built-in commands section
+    if (builtinCommands.length > 0) {
+        html += '<div class="mc-picker-category">Built-in Commands</div>';
+        html += builtinCommands.map(cmd => `
+            <div class="mc-picker-item" onclick="selectSlashItem('/${escapeHtml(cmd.name)}')">
+                <div class="mc-picker-item-icon command">/</div>
                 <div class="mc-picker-item-content">
-                    <div class="mc-picker-item-name">/${escapeHtml(skill.name)}</div>
-                    <div class="mc-picker-item-desc">${escapeHtml(skill.description)}</div>
+                    <div class="mc-picker-item-name">/${escapeHtml(cmd.name)}</div>
+                    <div class="mc-picker-item-desc">${escapeHtml(cmd.description)}</div>
                 </div>
             </div>
         `).join('');
+    }
+
+    // Group skills by source (personal, project, default)
+    if (filteredSkills.length > 0) {
+        const personalSkills = filteredSkills.filter(s => s.source === 'personal');
+        const projectSkills = filteredSkills.filter(s => s.source && s.source.startsWith('project:'));
+        const defaultSkills = filteredSkills.filter(s => s.source === 'default' || !s.source);
+
+        // Helper to render a skill item
+        const renderSkillItem = (skill) => `
+            <div class="mc-picker-item"
+                 onclick="selectSlashItem('/${escapeHtml(skill.name)}')"
+                 onmouseenter="showSkillPreview('${escapeHtml(skill.name)}', this)"
+                 onmouseleave="hideSkillPreview()">
+                <div class="mc-picker-item-icon skill">⚡</div>
+                <div class="mc-picker-item-content">
+                    <div class="mc-picker-item-name">/${escapeHtml(skill.name)}</div>
+                    <div class="mc-picker-item-desc">${escapeHtml(skill.description || '')}</div>
+                </div>
+            </div>
+        `;
+
+        // Personal skills (from ~/.claude/skills)
+        if (personalSkills.length > 0) {
+            html += `<div class="mc-picker-category">Personal Skills <span class="mc-picker-category-count">${personalSkills.length}</span></div>`;
+            html += personalSkills.sort((a, b) => a.name.localeCompare(b.name)).map(renderSkillItem).join('');
+        }
+
+        // Project skills
+        if (projectSkills.length > 0) {
+            html += `<div class="mc-picker-category">Project Skills <span class="mc-picker-category-count">${projectSkills.length}</span></div>`;
+            html += projectSkills.sort((a, b) => a.name.localeCompare(b.name)).map(renderSkillItem).join('');
+        }
+
+        // Default/suggested skills
+        if (defaultSkills.length > 0) {
+            html += `<div class="mc-picker-category">Common Skills <span class="mc-picker-category-count">${defaultSkills.length}</span></div>`;
+            html += defaultSkills.sort((a, b) => a.name.localeCompare(b.name)).map(renderSkillItem).join('');
+        }
     }
 
     container.innerHTML = html;
 }
 
 /**
- * Select a command from picker
+ * Get a human-readable label for skill source
  */
-function selectPickerCommand(command) {
-    insertCommandIntoInput(command);
-    hideCommandsPicker();
+function getSourceLabel(source) {
+    if (!source || source === 'default') return '';
+    if (source === 'personal') return 'personal';
+    if (source.startsWith('project:')) return source.replace('project:', '');
+    return source;
 }
 
 /**
- * Select a skill from picker
+ * Select an item from the unified slash picker
  */
-function selectPickerSkill(skillName) {
-    insertCommandIntoInput(`/${skillName}`);
-    hideSkillsPicker();
+function selectSlashItem(command) {
+    insertCommandIntoInput(command);
+    hideSlashPicker();
+}
+
+/**
+ * Skill preview popup state
+ */
+let skillPreviewTimeout = null;
+let skillPreviewCache = {};
+
+/**
+ * Show skill preview popup on hover
+ */
+async function showSkillPreview(skillName, element) {
+    // Clear any pending hide timeout
+    if (skillPreviewTimeout) {
+        clearTimeout(skillPreviewTimeout);
+        skillPreviewTimeout = null;
+    }
+
+    // Delay showing preview to avoid flicker
+    skillPreviewTimeout = setTimeout(async () => {
+        let popup = document.getElementById('skill-preview-popup');
+
+        // Create popup if it doesn't exist
+        if (!popup) {
+            popup = document.createElement('div');
+            popup.id = 'skill-preview-popup';
+            popup.className = 'skill-preview-popup';
+            document.body.appendChild(popup);
+        }
+
+        // Show loading state
+        popup.innerHTML = '<div class="skill-preview-loading">Loading...</div>';
+        popup.classList.add('visible');
+
+        // Position popup to the right of the picker
+        const picker = document.getElementById('mc-slash-picker');
+        if (picker) {
+            const pickerRect = picker.getBoundingClientRect();
+            popup.style.left = `${pickerRect.right + 10}px`;
+            popup.style.bottom = `${window.innerHeight - pickerRect.bottom}px`;
+        }
+
+        // Fetch skill details (use cache if available)
+        let skillData = skillPreviewCache[skillName];
+        if (!skillData) {
+            try {
+                const response = await fetch(`/api/skills/${encodeURIComponent(skillName)}`);
+                if (response.ok) {
+                    skillData = await response.json();
+                    skillPreviewCache[skillName] = skillData;
+                }
+            } catch (error) {
+                console.warn('Error fetching skill details:', error);
+            }
+        }
+
+        if (skillData && !skillData.error) {
+            // Render skill content
+            const content = skillData.content || '';
+            const truncatedContent = content.length > 2000 ? content.slice(0, 2000) + '\n\n... (truncated)' : content;
+
+            popup.innerHTML = `
+                <div class="skill-preview-header">
+                    <span class="skill-preview-name">/${escapeHtml(skillData.name)}</span>
+                    <span class="skill-preview-source">${escapeHtml(skillData.source || '')}</span>
+                </div>
+                <div class="skill-preview-desc">${escapeHtml(skillData.description || '')}</div>
+                <div class="skill-preview-content">${escapeHtml(truncatedContent)}</div>
+            `;
+        } else {
+            popup.innerHTML = '<div class="skill-preview-error">Could not load skill details</div>';
+        }
+    }, 300);
+}
+
+/**
+ * Hide skill preview popup
+ */
+function hideSkillPreview() {
+    if (skillPreviewTimeout) {
+        clearTimeout(skillPreviewTimeout);
+        skillPreviewTimeout = null;
+    }
+
+    // Delay hiding to allow moving to popup
+    skillPreviewTimeout = setTimeout(() => {
+        const popup = document.getElementById('skill-preview-popup');
+        if (popup) {
+            popup.classList.remove('visible');
+        }
+    }, 200);
 }
 
 /**
@@ -8088,6 +8174,7 @@ let currentPermissionMode = 'normal';
 function updateContextIndicator(usedTokens, maxTokens = 200000) {
     const fill = document.getElementById('mc-context-fill');
     const label = document.getElementById('mc-context-label');
+    const tokensEl = document.getElementById('mc-context-tokens');
     const indicator = document.querySelector('.mc-context-indicator');
 
     if (!fill || !label || !indicator) return;
@@ -8096,6 +8183,11 @@ function updateContextIndicator(usedTokens, maxTokens = 200000) {
 
     fill.style.width = `${percentage}%`;
     label.textContent = `${percentage}%`;
+
+    // Update token count display
+    if (tokensEl) {
+        tokensEl.textContent = formatTokenCount(usedTokens);
+    }
 
     // Update warning/danger states
     indicator.classList.remove('warning', 'danger');

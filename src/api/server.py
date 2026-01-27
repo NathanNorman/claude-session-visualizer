@@ -54,6 +54,7 @@ from .routes import (
     templates_router,
     sharing_router,
     processes_router,
+    skills_router,
 )
 from .process_manager import get_process_manager
 from .sdk_session_manager import get_sdk_session_manager
@@ -82,6 +83,7 @@ app.include_router(machines_router)
 app.include_router(templates_router)
 app.include_router(sharing_router)
 app.include_router(processes_router)
+app.include_router(skills_router)
 
 # Global WebSocket manager
 ws_manager = ConnectionManager()
