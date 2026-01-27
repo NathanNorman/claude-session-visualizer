@@ -5975,72 +5975,25 @@ function formatInlineToolInput(tool) {
 }
 
 /**
- * Syntax highlight JSON string
+ * Syntax highlight JSON string using highlight.js
  */
 function highlightJson(jsonStr) {
-    // Escape HTML first
-    let html = escapeHtml(jsonStr);
-
-    // Highlight different JSON elements
-    // Strings (including keys)
-    html = html.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, (match, content) => {
-        // Check if this is a key (followed by :)
-        return `<span class="json-string">"${content}"</span>`;
-    });
-
-    // Numbers
-    html = html.replace(/\b(-?\d+\.?\d*)\b/g, '<span class="json-number">$1</span>');
-
-    // Booleans
-    html = html.replace(/\b(true|false)\b/g, '<span class="json-boolean">$1</span>');
-
-    // Null
-    html = html.replace(/\bnull\b/g, '<span class="json-null">null</span>');
-
-    // Keys (text before colon)
-    html = html.replace(/<span class="json-string">"([^"]+)"<\/span>\s*:/g,
-        '<span class="json-key">"$1"</span>:');
-
-    return html;
+    try {
+        return hljs.highlight(jsonStr, { language: 'json' }).value;
+    } catch {
+        return escapeHtml(jsonStr);
+    }
 }
 
 /**
- * Syntax highlight Bash/shell commands
+ * Syntax highlight Bash/shell commands using highlight.js
  */
 function highlightBash(bashStr) {
-    // Escape HTML first
-    let html = escapeHtml(bashStr);
-
-    // Keywords and control structures
-    const keywords = ['if', 'then', 'else', 'elif', 'fi', 'for', 'in', 'do', 'done', 'while', 'until', 'case', 'esac', 'function', 'return', 'exit'];
-    const keywordPattern = new RegExp(`\\b(${keywords.join('|')})\\b`, 'g');
-    html = html.replace(keywordPattern, '<span class="bash-keyword">$1</span>');
-
-    // Common commands (first word of line or after ; or | or &&)
-    const commands = ['echo', 'cd', 'ls', 'cat', 'grep', 'sed', 'awk', 'find', 'xargs', 'sort', 'uniq', 'head', 'tail', 'wc', 'cut', 'tr', 'rm', 'cp', 'mv', 'mkdir', 'touch', 'chmod', 'chown', 'curl', 'wget', 'git', 'npm', 'yarn', 'python', 'python3', 'pip', 'node', 'docker', 'kubectl', 'aws', 'gh', 'jq', 'export', 'source', 'eval', 'exec', 'set', 'unset', 'test', 'read', 'printf'];
-    const cmdPattern = new RegExp(`(^|;\\s*|\\|\\s*|&&\\s*|\\|\\|\\s*)(${commands.join('|')})\\b`, 'gm');
-    html = html.replace(cmdPattern, '$1<span class="bash-command">$2</span>');
-
-    // Variables $VAR, ${VAR}, $1, $@, etc.
-    html = html.replace(/(\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@#?!*-])/g, '<span class="bash-variable">$1</span>');
-
-    // Strings (double and single quoted)
-    html = html.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, '<span class="bash-string">"$1"</span>');
-    html = html.replace(/'([^'\\]*(\\.[^'\\]*)*)'/g, '<span class="bash-string">\'$1\'</span>');
-
-    // Comments
-    html = html.replace(/(#[^\n]*)/g, '<span class="bash-comment">$1</span>');
-
-    // Operators
-    html = html.replace(/(\||&amp;&amp;|&amp;|\|\||;;|&gt;|&lt;|&gt;&gt;|2&gt;&amp;1|2&gt;)/g, '<span class="bash-operator">$1</span>');
-
-    // Numbers (standalone)
-    html = html.replace(/\b(\d+)\b/g, '<span class="bash-number">$1</span>');
-
-    // Flags/options
-    html = html.replace(/(\s)(--?[A-Za-z][A-Za-z0-9-]*)/g, '$1<span class="bash-flag">$2</span>');
-
-    return html;
+    try {
+        return hljs.highlight(bashStr, { language: 'bash' }).value;
+    } catch {
+        return escapeHtml(bashStr);
+    }
 }
 
 /**
