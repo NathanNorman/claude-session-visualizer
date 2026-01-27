@@ -842,15 +842,8 @@ if (Logger.debugPanelVisible || Logger.serverLogsEnabled) {
 // MissionControlManager - centralized view state and navigation
 class MissionControlManager {
     constructor() {
-        this.views = ['sessions', 'gastown', 'timeline', 'analytics', 'mission-control'];
-        this.currentView = localStorage.getItem('missionControlView') || 'sessions';
-        this.viewShortcuts = {
-            's': 'sessions',
-            'g': 'gastown',
-            't': 'timeline',
-            'a': 'analytics',
-            'c': 'mission-control'
-        };
+        this.views = ['mission-control', 'sessions', 'gastown', 'timeline', 'analytics', 'graveyard'];
+        this.currentView = localStorage.getItem('missionControlView') || 'mission-control';
     }
 
     getCurrentView() {
@@ -864,10 +857,6 @@ class MissionControlManager {
             return true;
         }
         return false;
-    }
-
-    getViewForShortcut(key) {
-        return this.viewShortcuts[key] || null;
     }
 
     cycleView(direction = 1) {
@@ -1317,7 +1306,7 @@ function createCard(session, index = 0) {
                 <div class="action-menu hidden" id="menu-${session.sessionId}">
                     <button onclick="event.stopPropagation(); copySessionId('${escapeJsString(session.sessionId)}')">📋 Copy Session ID</button>
                     <button onclick="event.stopPropagation(); openJsonl('${escapeJsString(session.sessionId)}')">📂 Open JSONL File</button>
-                    <button onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}')">🔗 Copy Resume Command</button>
+                    <button onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">🔗 Copy Resume Command</button>
                     <hr class="menu-divider">
                     <button onclick="event.stopPropagation(); refreshSummary('${escapeJsString(session.sessionId)}')">🤖 Generate AI Summary</button>
                     <button onclick="event.stopPropagation(); shareSession('${escapeJsString(session.sessionId)}')">📤 Share Session</button>
@@ -1487,8 +1476,10 @@ async function copySessionId(sessionId) {
     closeAllMenus();
 }
 
-async function copyResumeCmd(sessionId) {
-    const cmd = `claude --resume ${sessionId}`;
+async function copyResumeCmd(sessionId, cwd) {
+    // Build command with cd to session directory if cwd provided
+    const resumeCmd = `claude --resume ${sessionId}`;
+    const cmd = cwd ? `cd ${cwd} && ${resumeCmd}` : resumeCmd;
     try {
         await navigator.clipboard.writeText(cmd);
         showToast('Resume command copied!');
@@ -5593,30 +5584,51 @@ function renderConversation(messages) {
         }
 
         let displayContent = '';
+        let isToolOnly = false;
+        let toolsText = '';
+
         if (msg.content && msg.content.trim()) {
             if (msg.isCompaction) {
                 displayContent = `<div class="mc-compaction">${escapeHtml(msg.content).replace(/\n/g, '<br>')}</div>`;
-            } else {
+            } else if (role === 'user') {
+                // User messages: escape HTML, basic formatting
                 const content = escapeHtml(msg.content).slice(0, 500);
                 const truncated = msg.content.length > 500 ? '...' : '';
                 displayContent = content + truncated;
+            } else {
+                // Assistant/system messages: full markdown rendering
+                displayContent = renderMarkdown(msg.content);
             }
         } else if (msg.tools && msg.tools.length > 0) {
-            displayContent = `<span class="mc-tools">🔧 ${msg.tools.join(', ')}</span>`;
+            isToolOnly = true;
+            toolsText = msg.tools.join(', ');
+            // Format each tool with stylized name
+            const formattedTools = msg.tools.map(tool => {
+                // Extract tool name (first word before space or colon)
+                const match = tool.match(/^(\w+)(.*)/);
+                if (match) {
+                    const toolName = match[1];
+                    const rest = match[2] || '';
+                    return `<span class="mc-tool-item"><span class="mc-tool-name">${toolName}</span><span class="mc-tool-detail">${escapeHtml(rest)}</span></span>`;
+                }
+                return `<span class="mc-tool-item">${escapeHtml(tool)}</span>`;
+            }).join('');
+            displayContent = `<div class="mc-tools">${formattedTools}</div>`;
         }
 
-        // Store raw content for copy (escape quotes for data attribute)
-        const rawContent = (msg.content || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        // Store raw content for copy (include tools if tool-only message)
+        const copyContent = msg.content || toolsText;
+        const rawContent = copyContent.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         const lineNumber = msg.lineNumber !== undefined ? msg.lineNumber : -1;
         const tokens = msg.tokens || 0;
         const tokenDisplay = formatTokenCount(tokens);
+        const toolOnlyClass = isToolOnly ? ' tool-only' : '';
 
         return `
-            <div class="mc-message ${roleClass}" data-idx="${idx}" data-line="${lineNumber}">
+            <div class="mc-message ${roleClass}${toolOnlyClass}" data-idx="${idx}" data-line="${lineNumber}">
                 <div class="mc-message-header">
                     <span class="mc-message-role">${roleLabel}</span>
                     <span class="mc-message-time">${timestamp}</span>
-                    ${tokenDisplay ? `<span class="mc-message-tokens" title="${tokens} tokens">${tokenDisplay} tokens</span>` : ''}
                     <button class="mc-copy-btn" onclick="copyMessageContent(this)" data-content="${rawContent}" title="Copy to clipboard">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -5629,6 +5641,7 @@ function renderConversation(messages) {
                             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
                         </svg>
                     </button>` : ''}
+                    ${tokenDisplay ? `<span class="mc-message-tokens" title="${tokens} tokens">${tokenDisplay} tokens</span>` : ''}
                 </div>
                 <div class="mc-message-content">${displayContent}</div>
             </div>
@@ -8684,10 +8697,10 @@ function renderGraveyardCard(session, isGastown = false) {
             ${previewContent}
             ${activityLogContent}
             <div class="graveyard-card-actions">
-                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${escapeJsString(session.sessionId)}')" title="Resume this session">
+                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Resume this session">
                     ▶️ Resume
                 </button>
-                <button class="graveyard-btn" onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}')" title="Copy resume command">
+                <button class="graveyard-btn" onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Copy resume command">
                     📋 Copy
                 </button>
             </div>
@@ -8740,10 +8753,10 @@ function showGraveyardDetails(sessionId) {
             ` : ''}
 
             <div class="graveyard-details-actions">
-                <button class="btn-primary" onclick="resumeSession('${escapeJsString(session.sessionId)}'); closeModal();">
+                <button class="btn-primary" onclick="resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}'); closeModal();">
                     ▶️ Resume Session
                 </button>
-                <button class="btn-secondary" onclick="copyResumeCmd('${escapeJsString(session.sessionId)}')">
+                <button class="btn-secondary" onclick="copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">
                     📋 Copy Resume Command
                 </button>
                 <button class="btn-secondary" onclick="openJsonl('${escapeJsString(session.sessionId)}')">
@@ -8757,8 +8770,10 @@ function showGraveyardDetails(sessionId) {
 /**
  * Resume a dead session in a new terminal
  */
-function resumeSession(sessionId) {
-    const cmd = `claude --resume ${sessionId}`;
+function resumeSession(sessionId, cwd) {
+    // Build command with cd to session directory if cwd provided
+    const resumeCmd = `claude --resume ${sessionId}`;
+    const cmd = cwd ? `cd ${cwd} && ${resumeCmd}` : resumeCmd;
 
     // Try to copy to clipboard
     navigator.clipboard.writeText(cmd).then(() => {

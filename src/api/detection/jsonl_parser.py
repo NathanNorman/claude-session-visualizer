@@ -324,14 +324,14 @@ def extract_text_content(message: dict) -> str:
     """Extract text from message content."""
     content = message.get('content', [])
     if isinstance(content, str):
-        return content[:500]  # Truncate long messages
+        return content
 
     texts = []
     for item in content:
         if isinstance(item, dict) and item.get('type') == 'text':
-            texts.append(item.get('text', '')[:500])
+            texts.append(item.get('text', ''))
 
-    return '\n'.join(texts)[:1000]
+    return '\n'.join(texts)
 
 
 def extract_tool_calls(content: list) -> list[str]:

@@ -4914,14 +4914,14 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     background: rgba(239, 68, 68, 0.1);
 }
 
-/* Token count display */
+/* Token count display - positioned at far right */
 .mc-message-tokens {
     font-size: 10px;
     color: var(--text-tertiary, #6b7280);
     padding: 2px 6px;
-    background: rgba(107, 114, 128, 0.1);
+    background: rgba(107, 114, 128, 0.15);
     border-radius: 8px;
-    margin-left: auto;
+    white-space: nowrap;
 }
 
 .mc-message-role {
@@ -4943,6 +4943,44 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 .mc-message.system .mc-message-role {
     color: #9ca3af;
+}
+
+/* Tool-only messages - pink/magenta theme */
+.mc-message.tool-only {
+    background: rgba(236, 72, 153, 0.2);
+    border-left: 3px solid #f472b6;
+}
+
+.mc-message.tool-only .mc-message-role {
+    color: #f9a8d4;
+}
+
+/* Tool display styling */
+.mc-tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.mc-tool-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(236, 72, 153, 0.25);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+.mc-tool-name {
+    font-weight: 700;
+    color: #f9a8d4;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.mc-tool-detail {
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
 .mc-compaction {
@@ -5007,9 +5045,127 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 .mc-message-content {
     color: var(--text-primary);
-    white-space: pre-wrap;
     word-break: break-word;
+    line-height: 1.6;
 }
+
+/* Markdown rendering for MC messages - inline code */
+.mc-message-content code:not(pre code) {
+    background: rgba(139, 92, 246, 0.2);
+    color: #a5f3a3;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.9em;
+}
+
+/* Markdown rendering for MC messages - code blocks */
+.mc-message-content pre {
+    background: #0d1117;
+    border: 1px solid rgba(139, 92, 246, 0.2);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+    overflow-x: auto;
+    line-height: 1.45;
+}
+
+.mc-message-content pre code {
+    background: transparent;
+    padding: 0;
+    color: #e6edf3;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+}
+
+/* Markdown rendering for MC messages - bold/strong */
+.mc-message-content strong {
+    color: #93c5fd;
+    font-weight: 600;
+}
+
+/* Markdown rendering for MC messages - lists */
+.mc-message-content ul,
+.mc-message-content ol {
+    margin: 8px 0;
+    padding-left: 24px;
+}
+
+.mc-message-content li {
+    margin: 4px 0;
+}
+
+/* Markdown rendering for MC messages - paragraphs */
+.mc-message-content p {
+    margin: 8px 0;
+}
+
+.mc-message-content p:first-child {
+    margin-top: 0;
+}
+
+.mc-message-content p:last-child {
+    margin-bottom: 0;
+}
+
+/* Markdown rendering for MC messages - blockquotes */
+.mc-message-content blockquote {
+    border-left: 3px solid rgba(139, 92, 246, 0.5);
+    margin: 12px 0;
+    padding-left: 16px;
+    color: var(--text-secondary);
+}
+
+/* Markdown rendering for MC messages - horizontal rules */
+.mc-message-content hr {
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    margin: 16px 0;
+}
+
+/* Markdown rendering for MC messages - tables */
+.mc-message-content table {
+    border-collapse: collapse;
+    margin: 12px 0;
+    width: auto;
+    font-size: 12px;
+}
+
+.mc-message-content th,
+.mc-message-content td {
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 8px 12px;
+    text-align: left;
+}
+
+.mc-message-content th {
+    background: rgba(255, 255, 255, 0.05);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.mc-message-content td {
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.mc-message-content tr:hover td {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+/* Markdown rendering for MC messages - headers */
+.mc-message-content h1,
+.mc-message-content h2,
+.mc-message-content h3,
+.mc-message-content h4 {
+    color: var(--text-primary);
+    margin: 16px 0 8px 0;
+    font-weight: 600;
+}
+
+.mc-message-content h1 { font-size: 1.4em; }
+.mc-message-content h2 { font-size: 1.2em; }
+.mc-message-content h3 { font-size: 1.1em; }
+.mc-message-content h4 { font-size: 1em; }
 
 /* Responsive */
 @media (max-width: 900px) {

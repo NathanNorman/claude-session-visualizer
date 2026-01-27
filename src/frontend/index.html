@@ -38,7 +38,10 @@
 
     <nav class="view-tabs">
         <div class="tab-indicator"></div>
-        <button class="tab-button active" onclick="switchView('sessions')" data-view="sessions">
+        <button class="tab-button active" onclick="switchView('mission-control')" data-view="mission-control">
+            🎛️ Mission Control
+        </button>
+        <button class="tab-button" onclick="switchView('sessions')" data-view="sessions">
             Sessions
         </button>
         <button class="tab-button" onclick="switchView('gastown')" data-view="gastown">
@@ -50,16 +53,13 @@
         <button class="tab-button" onclick="switchView('analytics')" data-view="analytics">
             Analytics
         </button>
-        <button class="tab-button" onclick="switchView('mission-control')" data-view="mission-control">
-            🎛️ Mission Control
-        </button>
         <button class="tab-button" onclick="switchView('graveyard')" data-view="graveyard">
             🪦 Graveyard
         </button>
     </nav>
 
     <div id="main-content" role="main">
-    <div id="sessions-view" class="view active">
+    <div id="sessions-view" class="view">
         <div id="filters">
             <input type="text" id="search" placeholder="🔍 Search sessions...">
             <select id="status-filter">
@@ -123,7 +123,7 @@
         <div id="analytics-container"></div>
     </div>
 
-    <div id="mission-control-view" class="view">
+    <div id="mission-control-view" class="view active">
         <div class="mission-control-header">
             <h2>🎛️ Mission Control</h2>
             <div class="mission-control-status">
