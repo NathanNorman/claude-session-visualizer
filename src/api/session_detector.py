@@ -27,6 +27,18 @@ from .detection.jsonl_parser import (
 from .detection.matcher import match_process_to_session
 
 logger = logging.getLogger(__name__)
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count for text using a simple heuristic.
+
+    Claude uses roughly 4 characters per token on average.
+    This is a fast approximation without needing a tokenizer.
+    """
+    if not text:
+        return 0
+    # Rough estimate: ~4 chars per token for English text
+    return max(1, len(text) // 4)
 MAX_SESSION_AGE_HOURS = 2  # Only show sessions with activity in last N hours
 STATE_DIR = Path.home() / ".claude" / "visualizer" / "session-state"
 STATE_FILE_MAX_AGE_SECONDS = 300  # Consider state files stale after 5 minutes
@@ -1480,37 +1492,46 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
     try:
         # Read the entire file to get full conversation history
         with open(jsonl_file, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
+            for line_num, line in enumerate(f):
                 try:
                     data = json.loads(line)
 
                     if data.get('type') == 'user':
+                        content = extract_text_content(data.get('message', {}))
                         messages.append({
                             'role': 'user',
-                            'content': extract_text_content(data.get('message', {})),
-                            'timestamp': data.get('timestamp')
+                            'content': content,
+                            'timestamp': data.get('timestamp'),
+                            'lineNumber': line_num,
+                            'tokens': estimate_tokens(content)
                         })
 
                     elif data.get('type') == 'assistant':
                         msg = data.get('message', {})
-                        content = msg.get('content', [])
+                        msg_content = msg.get('content', [])
+                        content = extract_text_content(msg)
 
                         messages.append({
                             'role': 'assistant',
-                            'content': extract_text_content(msg),
-                            'tools': extract_tool_calls(content),
-                            'timestamp': data.get('timestamp')
+                            'content': content,
+                            'tools': extract_tool_calls(msg_content),
+                            'timestamp': data.get('timestamp'),
+                            'lineNumber': line_num,
+                            'tokens': estimate_tokens(content)
                         })
 
                     elif data.get('type') == 'summary':
                         # Compaction summary - shows where conversation was compressed
                         summary_text = data.get('summary', '')
                         if summary_text:
+                            display_content = f"📋 [Conversation compacted]\n{summary_text[:500]}{'...' if len(summary_text) > 500 else ''}"
                             messages.append({
                                 'role': 'system',
-                                'content': f"📋 [Conversation compacted]\n{summary_text[:500]}{'...' if len(summary_text) > 500 else ''}",
+                                'content': display_content,
                                 'timestamp': data.get('timestamp'),
-                                'isCompaction': True
+                                'isCompaction': True,
+                                'lineNumber': line_num,
+                                'tokens': estimate_tokens(summary_text)
                             })
 
                 except json.JSONDecodeError:

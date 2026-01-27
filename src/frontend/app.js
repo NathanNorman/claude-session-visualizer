@@ -1515,6 +1515,138 @@ async function openJsonl(sessionId) {
     closeAllMenus();
 }
 
+/**
+ * Copy message content to clipboard
+ * @param {HTMLElement} btn - The copy button element
+ */
+async function copyMessageContent(btn) {
+    const content = btn.dataset.content
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+
+    try {
+        await navigator.clipboard.writeText(content);
+        // Visual feedback - change icon briefly
+        const originalHtml = btn.innerHTML;
+        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+        btn.classList.add('copied');
+        setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.classList.remove('copied');
+        }, 1500);
+    } catch (e) {
+        showToast('Failed to copy', 'error');
+    }
+}
+
+// Delete message state
+let pendingDeleteMessage = null;
+
+/**
+ * Handle delete button click - extract data and show modal
+ * @param {HTMLElement} btn - The delete button element
+ */
+function handleDeleteClick(btn) {
+    const lineNumber = parseInt(btn.dataset.line, 10);
+    const role = btn.dataset.role;
+
+    // Get the message content from the sibling content element
+    const messageEl = btn.closest('.mc-message');
+    const contentEl = messageEl?.querySelector('.mc-message-content');
+    const preview = contentEl?.textContent || '';
+
+    showDeleteModal(mcSelectedSessionId, lineNumber, preview, role);
+}
+
+/**
+ * Show delete confirmation modal
+ * @param {string} sessionId - Session ID
+ * @param {number} lineNumber - Line number in JSONL
+ * @param {string} preview - Message preview
+ * @param {string} role - Message role (user/assistant)
+ */
+function showDeleteModal(sessionId, lineNumber, preview, role) {
+    pendingDeleteMessage = { sessionId, lineNumber };
+
+    const modal = document.getElementById('delete-message-modal');
+    const previewEl = document.getElementById('delete-message-preview');
+
+    if (previewEl) {
+        const truncatedPreview = preview.length > 150 ? preview.substring(0, 150) + '...' : preview;
+        previewEl.innerHTML = `<span class="delete-preview-role">${role}:</span> ${escapeHtml(truncatedPreview)}`;
+    }
+
+    if (modal) {
+        modal.classList.remove('hidden');
+    }
+}
+
+/**
+ * Hide delete confirmation modal
+ */
+function hideDeleteModal() {
+    const modal = document.getElementById('delete-message-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+    pendingDeleteMessage = null;
+}
+
+/**
+ * Confirm and execute message deletion
+ */
+async function confirmDeleteMessage() {
+    if (!pendingDeleteMessage) return;
+
+    const { sessionId, lineNumber } = pendingDeleteMessage;
+    hideDeleteModal();
+
+    try {
+        const response = await fetch(`/api/session/${sessionId}/message`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ line_number: lineNumber })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        // Update context indicator with new token count
+        if (result.new_total_tokens !== undefined) {
+            updateContextIndicator(result.new_total_tokens, MAX_CONTEXT_TOKENS);
+        }
+
+        showToast('Message deleted', 'success');
+
+        // Refresh conversation to show updated list
+        if (mcSelectedSessionId === sessionId) {
+            loadConversationHistory(sessionId);
+        }
+
+    } catch (error) {
+        console.error('Failed to delete message:', error);
+        showToast(`Failed to delete: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Format token count for display
+ */
+function formatTokenCount(tokens) {
+    if (!tokens || tokens === 0) return '';
+    if (tokens >= 1000) {
+        return `${(tokens / 1000).toFixed(1)}k`;
+    }
+    return tokens.toString();
+}
+
 async function killSession(pid, slug) {
     closeAllMenus();
     if (!pid) {
@@ -2273,17 +2405,6 @@ function buildEmojiTrail(activityLog, maxLength = 30) {
 
     // Return last N items
     return trail.slice(-maxLength);
-}
-
-// Format timestamp for display
-function formatActivityTime(timestamp) {
-    if (!timestamp) return '';
-    try {
-        const date = new Date(timestamp);
-        return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
-    } catch {
-        return '';
-    }
 }
 
 // Render the emoji trail as HTML with clickable popovers
@@ -3863,7 +3984,8 @@ function switchView(viewName) {
 
     // Refresh Mission Control when switching to it
     if (viewName === 'mission-control') {
-        refreshMissionControl();
+        // Fetch managed processes first, then render
+        refreshManagedProcessList().then(() => refreshMissionControl());
     }
 
     // Refresh Graveyard when switching to it
@@ -4763,10 +4885,19 @@ function initMissionControl() {
     // Initialize SDK mode status
     initSDKMode();
 
+    // Fetch managed processes on init (for SDK sessions that persist across page loads)
+    refreshManagedProcessList().then(() => {
+        // Re-render mission control after managed processes are loaded
+        if (missionControl.getCurrentView() === 'mission-control') {
+            refreshMissionControl();
+        }
+    });
+
     // Refresh button
     const refreshBtn = document.getElementById('mc-refresh');
     if (refreshBtn) {
-        refreshBtn.addEventListener('click', () => {
+        refreshBtn.addEventListener('click', async () => {
+            await refreshManagedProcessList();
             refreshMissionControl();
             showToast('Mission Control refreshed');
         });
@@ -4791,15 +4922,54 @@ function initMCInput() {
 
     if (!inputEl || !sendBtn) return;
 
-    // Handle input for syntax highlighting
+    // Handle input for syntax highlighting and autocomplete
     inputEl.addEventListener('input', () => {
         highlightMCInput(inputEl);
+        handleSlashAutocomplete(inputEl);
     });
 
-    // Handle Cmd+Enter to send
+    // Handle Cmd+Enter to send, and autocomplete navigation
     inputEl.addEventListener('keydown', (e) => {
+        // Check if autocomplete is open and handle navigation
+        const autocomplete = document.getElementById('mc-autocomplete');
+        if (autocomplete && !autocomplete.classList.contains('hidden')) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                navigateAutocomplete(1);
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                navigateAutocomplete(-1);
+                return;
+            }
+            if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                const selected = autocomplete.querySelector('.mc-autocomplete-item.selected');
+                if (selected) {
+                    e.preventDefault();
+                    selectAutocompleteItem(selected);
+                    return;
+                }
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                hideAutocomplete();
+                return;
+            }
+            if (e.key === 'Tab') {
+                const selected = autocomplete.querySelector('.mc-autocomplete-item.selected');
+                if (selected) {
+                    e.preventDefault();
+                    selectAutocompleteItem(selected);
+                    return;
+                }
+            }
+        }
+
+        // Cmd+Enter to send
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
             e.preventDefault();
+            hideAutocomplete();
             sendMCMessage();
         }
     });
@@ -4813,7 +4983,53 @@ function initMCInput() {
 
     // Send button click
     sendBtn.addEventListener('click', () => {
+        hideAutocomplete();
         sendMCMessage();
+    });
+
+    // Hide autocomplete and pickers when clicking outside
+    document.addEventListener('click', (e) => {
+        const autocomplete = document.getElementById('mc-autocomplete');
+        const commandsPicker = document.getElementById('mc-commands-picker');
+        const skillsPicker = document.getElementById('mc-skills-picker');
+        const commandsBtn = document.getElementById('mc-commands-btn');
+        const skillsBtn = document.getElementById('mc-skills-btn');
+
+        // Hide autocomplete
+        if (autocomplete && !autocomplete.contains(e.target) && e.target !== inputEl) {
+            hideAutocomplete();
+        }
+
+        // Hide commands picker if clicking outside
+        if (commandsPicker && !commandsPicker.classList.contains('hidden')) {
+            if (!commandsPicker.contains(e.target) && e.target !== commandsBtn && !commandsBtn.contains(e.target)) {
+                hideCommandsPicker();
+            }
+        }
+
+        // Hide skills picker if clicking outside
+        if (skillsPicker && !skillsPicker.classList.contains('hidden')) {
+            if (!skillsPicker.contains(e.target) && e.target !== skillsBtn && !skillsBtn.contains(e.target)) {
+                hideSkillsPicker();
+            }
+        }
+    });
+
+    // Handle Escape key to close pickers
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const commandsPicker = document.getElementById('mc-commands-picker');
+            const skillsPicker = document.getElementById('mc-skills-picker');
+
+            if (commandsPicker && !commandsPicker.classList.contains('hidden')) {
+                hideCommandsPicker();
+                e.preventDefault();
+            }
+            if (skillsPicker && !skillsPicker.classList.contains('hidden')) {
+                hideSkillsPicker();
+                e.preventDefault();
+            }
+        }
     });
 }
 
@@ -5010,9 +5226,13 @@ function refreshMissionControl() {
 
     // Reload conversation if session still exists (skip loading state for background refresh)
     if (mcSelectedSessionId) {
-        const sessionStillExists = sessions.some(s => s.sessionId === mcSelectedSessionId);
-        if (sessionStillExists) {
+        const selectedSession = sessions.find(s => s.sessionId === mcSelectedSessionId);
+        if (selectedSession) {
             loadConversationHistory(mcSelectedSessionId, true);
+            // Update context indicator with latest token data
+            if (selectedSession.contextTokens) {
+                updateContextIndicator(selectedSession.contextTokens, MAX_CONTEXT_TOKENS);
+            }
         } else {
             // Session ended, clear selection
             mcSelectedSessionId = null;
@@ -5258,6 +5478,13 @@ function selectMissionControlSession(sessionId) {
         labelEl.textContent = displayName;
     }
 
+    // Update context indicator with session's token data
+    if (session && session.contextTokens) {
+        updateContextIndicator(session.contextTokens, MAX_CONTEXT_TOKENS);
+    } else {
+        updateContextIndicator(0, MAX_CONTEXT_TOKENS);
+    }
+
     // Show/hide message input based on session state
     if (session && (session.state === 'active' || session.state === 'waiting')) {
         showMCInput();
@@ -5378,11 +5605,30 @@ function renderConversation(messages) {
             displayContent = `<span class="mc-tools">🔧 ${msg.tools.join(', ')}</span>`;
         }
 
+        // Store raw content for copy (escape quotes for data attribute)
+        const rawContent = (msg.content || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        const lineNumber = msg.lineNumber !== undefined ? msg.lineNumber : -1;
+        const tokens = msg.tokens || 0;
+        const tokenDisplay = formatTokenCount(tokens);
+
         return `
-            <div class="mc-message ${roleClass}" data-idx="${idx}">
+            <div class="mc-message ${roleClass}" data-idx="${idx}" data-line="${lineNumber}">
                 <div class="mc-message-header">
                     <span class="mc-message-role">${roleLabel}</span>
                     <span class="mc-message-time">${timestamp}</span>
+                    ${tokenDisplay ? `<span class="mc-message-tokens" title="${tokens} tokens">${tokenDisplay} tokens</span>` : ''}
+                    <button class="mc-copy-btn" onclick="copyMessageContent(this)" data-content="${rawContent}" title="Copy to clipboard">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                    ${lineNumber >= 0 ? `<button class="mc-delete-btn" onclick="handleDeleteClick(this)" data-line="${lineNumber}" data-role="${role}" title="Delete message">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>` : ''}
                 </div>
                 <div class="mc-message-content">${displayContent}</div>
             </div>
@@ -5413,25 +5659,6 @@ function clearMissionControlConversation() {
 
     // Hide message input
     hideMCInput();
-}
-
-/**
- * Format time ago helper
- */
-function formatTimeAgo(date) {
-    // Handle both Date objects and timestamps
-    const dateObj = date instanceof Date ? date : new Date(date);
-    if (isNaN(dateObj.getTime())) return 'N/A';
-
-    const now = new Date();
-    const diffMs = now - dateObj;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMins / 60);
-
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    return dateObj.toLocaleDateString();
 }
 
 // Initialize Mission Control on DOM ready
@@ -5601,6 +5828,17 @@ async function spawnSession() {
             console.warn('Could not detect SDK mode:', e);
         }
 
+        // Build initial placeholder banner
+        const dirName = data.cwd.split('/').pop() || data.cwd;
+        const placeholderBanner = `<div class="sdk-welcome-banner sdk-placeholder">
+<div class="sdk-banner-info">
+<div class="sdk-banner-title">Claude Code SDK Session</div>
+<div class="sdk-banner-model">Initializing...</div>
+<div class="sdk-banner-cwd">${escapeHtml(data.cwd)}</div>
+</div>
+</div>
+<div class="sdk-ready-message">Session ready — send a message to start</div>`;
+
         // Track the managed process with SDK flag
         managedProcesses.set(processId, {
             id: processId,
@@ -5608,7 +5846,7 @@ async function spawnSession() {
             state: data.state,
             isSDK: isSDK,
             ws: null,
-            outputBuffer: '' // Store all output even when not selected
+            outputBuffer: isSDK ? placeholderBanner : '' // Show placeholder for SDK sessions
         });
 
         hideSpawnModal();
@@ -5617,9 +5855,12 @@ async function spawnSession() {
         // Connect to process output stream
         connectToProcess(processId);
 
-        // Refresh the session list
+        // Refresh the session list (managed processes first, then render)
+        await refreshManagedProcessList();
         refreshMissionControl();
-        refreshManagedProcessList();
+
+        // Auto-select the newly spawned process
+        selectManagedProcess(processId);
 
     } catch (error) {
         console.error('Failed to spawn session:', error);
@@ -5689,11 +5930,22 @@ function handleProcessMessage(processId, msg) {
 
         case 'history':
             // Received buffered history on connect - replace buffer
+            // Handle both PTY format (lines array) and SDK format (content string)
+            let historyContent = '';
             if (Array.isArray(msg.lines)) {
-                const content = msg.lines.join('');
-                process.outputBuffer = content;
+                historyContent = msg.lines.join('');
+            } else if (msg.content) {
+                historyContent = msg.content;
+            }
+            if (historyContent) {
+                process.outputBuffer = historyContent;
                 if (selectedProcessId === processId) {
-                    setTerminalOutputDirect(content);
+                    // SDK sessions store pre-formatted HTML
+                    if (process.isSDK) {
+                        setTerminalHtml(historyContent);
+                    } else {
+                        setTerminalOutputDirect(historyContent);
+                    }
                 }
             }
             break;
@@ -5723,9 +5975,37 @@ function handleProcessMessage(processId, msg) {
             appendToolUseBlock(processId, msg);
             break;
 
+        case 'tool_result':
+            // SDK: Tool execution completed
+            updateToolUseBlock(msg.tool_use_id, msg.is_error ? 'failed' : 'completed', msg.output);
+            break;
+
         case 'tool_approval':
             // SDK: Tool requires user approval
-            showToolApprovalUI(processId, msg);
+            // Check if this is an edit tool that should show diff UI
+            if (isEditTool(msg.name)) {
+                showEditApprovalUI(processId, msg);
+            } else {
+                showToolApprovalUI(processId, msg);
+            }
+            break;
+
+        case 'user_choice':
+            // SDK: Claude is asking user to choose from options
+            showUserChoiceUI(processId, msg);
+            break;
+
+        case 'result':
+            // SDK: Final result from Claude
+            console.log('[MC-DEBUG] SDK result:', msg.result);
+            break;
+
+        case 'system':
+            // SDK: System message (init, session info)
+            console.log('[MC-DEBUG] SDK system:', msg.subtype, msg.data);
+            if (msg.subtype === 'init') {
+                showSDKWelcomeBanner(processId, msg);
+            }
             break;
     }
 }
@@ -5751,6 +6031,7 @@ function setTerminalOutputDirect(content) {
 
 /**
  * Append content to terminal output directly (no processId check)
+ * For raw terminal output - parses ANSI codes
  */
 function appendTerminalOutputDirect(content) {
     console.log('[MC-DEBUG] appendTerminalOutputDirect:', { contentLen: content?.length, contentPreview: content?.substring(0, 100) });
@@ -5765,16 +6046,63 @@ function appendTerminalOutputDirect(content) {
 }
 
 /**
+ * Append pre-formatted HTML to terminal output directly
+ * For SDK messages that already contain HTML - does NOT escape
+ */
+function appendTerminalHtml(html) {
+    console.log('[MC-DEBUG] appendTerminalHtml:', { htmlLen: html?.length });
+
+    const terminalEl = document.getElementById('mc-terminal-output');
+    const contentEl = terminalEl?.querySelector('.mc-terminal-content');
+
+    if (contentEl) {
+        contentEl.innerHTML += html;
+        // Force scroll to bottom after appending
+        if (processOutputStickyScroll) {
+            processOutputStickyScroll.scrollToBottom();
+        }
+        // Fallback: direct scroll
+        if (terminalEl) {
+            terminalEl.scrollTop = terminalEl.scrollHeight;
+        }
+    }
+}
+
+/**
+ * Set terminal content with pre-formatted HTML (no ANSI parsing)
+ * For SDK sessions that store HTML in their buffer
+ */
+function setTerminalHtml(html) {
+    const terminalEl = document.getElementById('mc-terminal-output');
+    const contentEl = terminalEl?.querySelector('.mc-terminal-content');
+
+    if (contentEl) {
+        contentEl.innerHTML = html;
+
+        if (!processOutputStickyScroll && terminalEl) {
+            processOutputStickyScroll = new StickyScroll(terminalEl, { showIndicator: true });
+            processOutputStickyScroll.attach();
+        }
+        processOutputStickyScroll?.scrollToBottom();
+    }
+}
+
+/**
  * Display buffered output for a process (called when selecting)
  */
 function displayProcessBuffer(processId) {
     const process = managedProcesses.get(processId);
     if (!process) return;
 
-    console.log('[MC-DEBUG] displayProcessBuffer:', { processId, bufferLen: process.outputBuffer?.length });
+    console.log('[MC-DEBUG] displayProcessBuffer:', { processId, bufferLen: process.outputBuffer?.length, isSDK: process.isSDK });
 
     if (process.outputBuffer) {
-        setTerminalOutputDirect(process.outputBuffer);
+        // SDK sessions store pre-formatted HTML, PTY sessions store raw ANSI
+        if (process.isSDK) {
+            setTerminalHtml(process.outputBuffer);
+        } else {
+            setTerminalOutputDirect(process.outputBuffer);
+        }
     }
 }
 
@@ -5870,18 +6198,226 @@ function parseAnsiToHtml(text) {
 // ============================================================================
 
 /**
+ * Configure marked.js for Claude-like rendering
+ */
+function initMarkdownRenderer() {
+    if (typeof marked === 'undefined') {
+        console.warn('marked.js not loaded, using fallback renderer');
+        return;
+    }
+
+    // Configure marked with highlight.js
+    marked.setOptions({
+        highlight: function(code, lang) {
+            if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                try {
+                    return hljs.highlight(code, { language: lang }).value;
+                } catch (e) {}
+            }
+            // Fallback to auto-detection
+            if (typeof hljs !== 'undefined') {
+                try {
+                    return hljs.highlightAuto(code).value;
+                } catch (e) {}
+            }
+            return code;
+        },
+        breaks: true,
+        gfm: true,
+    });
+}
+
+// Initialize when DOM loads
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initMarkdownRenderer);
+} else {
+    initMarkdownRenderer();
+}
+
+/**
+ * Render markdown content to HTML with syntax highlighting
+ */
+function renderMarkdown(content) {
+    if (typeof marked === 'undefined') {
+        // Fallback: basic escaping with some formatting
+        return escapeHtml(content)
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+            .replace(/\n/g, '<br>');
+    }
+
+    // Use marked for full markdown rendering
+    let html = marked.parse(content);
+
+    // Post-process: apply syntax highlighting to any missed code blocks
+    if (typeof hljs !== 'undefined') {
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = html;
+        tempDiv.querySelectorAll('pre code:not(.hljs)').forEach(block => {
+            hljs.highlightElement(block);
+        });
+        html = tempDiv.innerHTML;
+    }
+
+    return html;
+}
+
+/**
  * Append a structured message from the SDK to the terminal
  */
 function appendStructuredMessage(processId, msg) {
+    console.log('[SDK-MSG] appendStructuredMessage called:', { processId, role: msg.role, selectedProcessId, match: selectedProcessId === processId });
+
+    const process = managedProcesses.get(processId);
+    if (!process) {
+        console.warn('[SDK-MSG] Process not found in managedProcesses:', processId);
+        return;
+    }
+
+    // When a new assistant message arrives, mark any running tools as completed
+    // This indicates the tool has finished and Claude is continuing
+    if (msg.role === 'assistant') {
+        completeRunningTools();
+    }
+
+    const isUser = msg.role === 'user';
+    const roleClass = isUser ? 'user-message' : 'assistant-message';
+    const roleLabel = isUser ? 'You' : 'Claude';
+    const roleIcon = isUser ? '👤' : '🤖';
+
+    // Render markdown for assistant messages, escape for user messages
+    const renderedContent = isUser
+        ? `<p>${escapeHtml(msg.content)}</p>`
+        : renderMarkdown(msg.content);
+
+    // Store raw content for copy (escape quotes for data attribute)
+    const rawContent = (msg.content || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+    // Build message HTML - compact layout with copy button
+    const html = `<div class="sdk-message ${roleClass}"><div class="sdk-message-header"><span class="sdk-role-icon">${roleIcon}</span><span class="sdk-role-label">${roleLabel}</span><button class="mc-copy-btn" onclick="copyMessageContent(this)" data-content="${rawContent}" title="Copy to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button></div><div class="sdk-message-content">${renderedContent}</div></div>`;
+
+    // If assistant message, remove loading indicator
+    if (!isUser) {
+        removeSDKLoadingIndicator(processId);
+    }
+
+    process.outputBuffer = (process.outputBuffer || '') + html;
+    console.log('[SDK-MSG] Added to buffer, selectedProcessId:', selectedProcessId, 'processId:', processId);
+
+    if (selectedProcessId === processId) {
+        console.log('[SDK-MSG] Appending to terminal');
+        appendTerminalHtml(html);
+
+        // If user message, show loading indicator
+        if (isUser) {
+            showSDKLoadingIndicator(processId);
+        }
+    } else {
+        console.log('[SDK-MSG] NOT appending - process not selected');
+    }
+}
+
+/**
+ * Show loading indicator while waiting for Claude response
+ */
+function showSDKLoadingIndicator(processId) {
+    const loadingHtml = `<div class="sdk-loading" id="sdk-loading-${processId}"><div class="sdk-loading-dots"><span></span><span></span><span></span></div><span>Claude is thinking...</span></div>`;
+    appendTerminalHtml(loadingHtml);
+}
+
+/**
+ * Remove loading indicator when response arrives
+ */
+function removeSDKLoadingIndicator(processId) {
+    const loadingEl = document.getElementById(`sdk-loading-${processId}`);
+    if (loadingEl) {
+        loadingEl.remove();
+    }
+}
+
+/**
+ * Show SDK session welcome banner when init message received
+ */
+function showSDKWelcomeBanner(processId, msg) {
     const process = managedProcesses.get(processId);
     if (!process) return;
 
-    const roleClass = msg.role === 'user' ? 'user-message' : 'assistant-message';
-    const html = `<div class="sdk-message ${roleClass}"><strong>${escapeHtml(msg.role)}:</strong> ${escapeHtml(msg.content)}</div>`;
+    // Extract info from init message - data is nested under msg.data
+    const data = msg.data || msg;
+    const cwd = data.cwd || process.cwd;
+    const claudeSessionId = data.session_id || null;
+    const toolCount = data.tools?.length || 0;
+    const model = data.model || 'Claude';
 
-    process.outputBuffer = (process.outputBuffer || '') + html;
+    // Auto-save session for resume capability (Phase 4)
+    if (claudeSessionId) {
+        autoSaveSession(processId, claudeSessionId);
+    }
+
+    // Build clean banner
+    const bannerHtml = `<div class="sdk-welcome-banner">
+<div class="sdk-banner-info">
+<div class="sdk-banner-title">Claude Code SDK Session</div>
+<div class="sdk-banner-model">${escapeHtml(model)} · ${toolCount} tools</div>
+<div class="sdk-banner-cwd">${escapeHtml(cwd)}</div>
+</div>
+</div>`;
+
+    // Replace placeholder banner if present, otherwise prepend
+    if (process.outputBuffer?.includes('sdk-placeholder')) {
+        // Remove placeholder banner and ready message
+        process.outputBuffer = process.outputBuffer
+            .replace(/<div class="sdk-welcome-banner sdk-placeholder">[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/, '')
+            .replace(/<div class="sdk-ready-message">[\s\S]*?<\/div>/, '');
+        process.outputBuffer = bannerHtml + process.outputBuffer;
+    } else if (!process.outputBuffer?.includes('sdk-welcome-banner')) {
+        process.outputBuffer = bannerHtml + (process.outputBuffer || '');
+    }
+
+    // If this process is currently selected, re-display the full buffer
     if (selectedProcessId === processId) {
-        appendTerminalOutputDirect(html);
+        setTerminalHtml(process.outputBuffer);
+    }
+}
+
+/**
+ * Generate a brief summary for a tool use
+ */
+function getToolSummary(toolName, input) {
+    switch (toolName) {
+        case 'Read':
+            return `Reading ${input.file_path?.split('/').pop() || 'file'}`;
+        case 'Write':
+            return `Writing to ${input.file_path?.split('/').pop() || 'file'}`;
+        case 'Edit':
+            return `Editing ${input.file_path?.split('/').pop() || 'file'}`;
+        case 'Bash':
+            const cmd = input.command || '';
+            return `Running: ${cmd.substring(0, 50)}${cmd.length > 50 ? '...' : ''}`;
+        case 'Glob':
+            return `Searching for ${input.pattern || 'files'}`;
+        case 'Grep':
+            return `Searching for "${input.pattern?.substring(0, 30) || ''}"`;
+        case 'Task':
+            return `Spawning ${input.subagent_type || 'agent'}`;
+        case 'WebFetch':
+            return `Fetching ${input.url?.substring(0, 40) || 'URL'}`;
+        default:
+            return `Using ${toolName}`;
+    }
+}
+
+/**
+ * Toggle tool details expansion
+ */
+function toggleToolDetails(btn) {
+    const block = btn.closest('.tool-use-block');
+    if (block) {
+        block.classList.toggle('expanded');
+        const icon = btn.querySelector('.tool-expand-icon');
+        if (icon) {
+            icon.textContent = block.classList.contains('expanded') ? '▼' : '▶';
+        }
     }
 }
 
@@ -5892,18 +6428,94 @@ function appendToolUseBlock(processId, msg) {
     const process = managedProcesses.get(processId);
     if (!process) return;
 
+    const toolId = msg.tool_use_id || `tool-${Date.now()}`;
+    const summary = getToolSummary(msg.name, msg.input || {});
     const inputStr = JSON.stringify(msg.input, null, 2);
+
+    // Get icon for tool type
+    const toolIcons = {
+        'Read': '📖', 'Write': '✍️', 'Edit': '📝', 'Bash': '💻',
+        'Glob': '🔍', 'Grep': '🔎', 'Task': '🤖', 'WebFetch': '🌐',
+        'MultiEdit': '📝', 'NotebookEdit': '📓', 'LS': '📁'
+    };
+    const icon = toolIcons[msg.name] || '⚙️';
+
     const html = `
-        <div class="tool-use-block">
-            <div class="tool-use-header">Tool: ${escapeHtml(msg.name)}</div>
-            <pre class="tool-use-input">${escapeHtml(inputStr)}</pre>
+        <div class="tool-use-block running" data-tool-id="${escapeHtml(toolId)}">
+            <div class="tool-use-header" onclick="toggleToolDetails(this)">
+                <span class="tool-expand-icon">▶</span>
+                <span class="tool-icon">${icon}</span>
+                <span class="tool-name">${escapeHtml(msg.name)}</span>
+                <span class="tool-summary">${escapeHtml(summary)}</span>
+                <span class="tool-status">
+                    <span class="tool-spinner"></span>
+                    <span class="tool-status-text">Running</span>
+                </span>
+            </div>
+            <div class="tool-use-details">
+                <div class="tool-section">
+                    <div class="tool-section-label">Input</div>
+                    <pre class="tool-use-input">${escapeHtml(inputStr)}</pre>
+                </div>
+                <div class="tool-section tool-output-section" style="display: none;">
+                    <div class="tool-section-label">Output</div>
+                    <pre class="tool-use-output"></pre>
+                </div>
+            </div>
         </div>
     `;
 
     process.outputBuffer = (process.outputBuffer || '') + html;
     if (selectedProcessId === processId) {
-        appendTerminalOutputDirect(html);
+        appendTerminalHtml(html);
     }
+}
+
+/**
+ * Update a tool use block with result/completion status
+ */
+function updateToolUseBlock(toolId, status, output) {
+    const block = document.querySelector(`.tool-use-block[data-tool-id="${toolId}"]`);
+    if (!block) return;
+
+    // Update status
+    block.classList.remove('running');
+    block.classList.add(status); // 'completed' or 'failed'
+
+    const statusText = block.querySelector('.tool-status-text');
+    if (statusText) {
+        statusText.textContent = status === 'completed' ? 'Done' : 'Failed';
+    }
+
+    // Show output if provided
+    if (output) {
+        const outputSection = block.querySelector('.tool-output-section');
+        const outputPre = block.querySelector('.tool-use-output');
+        if (outputSection && outputPre) {
+            outputSection.style.display = 'block';
+            // Truncate very long output
+            const displayOutput = output.length > 2000
+                ? output.substring(0, 2000) + '\n... (truncated)'
+                : output;
+            outputPre.textContent = displayOutput;
+        }
+    }
+}
+
+/**
+ * Mark all running tool use blocks as completed
+ * Called when a new assistant message arrives, indicating tools have finished
+ */
+function completeRunningTools() {
+    const runningTools = document.querySelectorAll('.tool-use-block.running');
+    runningTools.forEach(block => {
+        block.classList.remove('running');
+        block.classList.add('completed');
+        const statusText = block.querySelector('.tool-status-text');
+        if (statusText) {
+            statusText.textContent = 'Done';
+        }
+    });
 }
 
 /**
@@ -5928,7 +6540,7 @@ function showToolApprovalUI(processId, msg) {
     // Store in buffer and display
     process.outputBuffer = (process.outputBuffer || '') + html;
     if (selectedProcessId === processId) {
-        appendTerminalOutputDirect(html);
+        appendTerminalHtml(html);
     }
 
     // Also show a toast notification
@@ -5959,12 +6571,612 @@ async function approveToolUse(processId, toolUseId, approved) {
                 `<span class="tool-resolved ${approved ? 'approved' : 'denied'}">${approved ? 'Allowed' : 'Denied'}</span>`;
         }
 
+        // Update the tool use block status
+        updateToolUseBlock(toolUseId, approved ? 'completed' : 'failed');
+
         showToast(`Tool ${approved ? 'allowed' : 'denied'}`, approved ? 'success' : 'info');
 
     } catch (error) {
         console.error('Failed to send tool approval:', error);
         showToast(`Failed to send approval: ${error.message}`, 'error');
     }
+}
+
+// ============================================================================
+// Phase 2: User Choice UI
+// ============================================================================
+
+/**
+ * Check if a message contains user choice/question data
+ */
+function isUserChoiceMessage(msg) {
+    // Check for AskUserQuestion tool or choice patterns
+    return msg.type === 'user_choice' ||
+           (msg.input && msg.input.questions) ||
+           (msg.name === 'AskUserQuestion');
+}
+
+/**
+ * Show user choice UI when Claude asks for selection
+ */
+function showUserChoiceUI(processId, msg) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    const choiceId = msg.tool_use_id || `choice-${Date.now()}`;
+
+    // Extract questions from message
+    const questions = msg.input?.questions || msg.questions || [];
+    if (questions.length === 0) {
+        console.warn('[SDK] No questions found in user_choice message:', msg);
+        return;
+    }
+
+    // Build HTML for each question
+    let html = `<div class="sdk-user-choice" data-choice-id="${escapeHtml(choiceId)}">`;
+    html += `<div class="sdk-user-choice-header"><span>🤔</span> Claude needs your input</div>`;
+
+    questions.forEach((q, qIndex) => {
+        const question = q.question || q;
+        const options = q.options || [];
+        const header = q.header || '';
+        const multiSelect = q.multiSelect || false;
+
+        html += `<div class="sdk-choice-question-block" data-question-index="${qIndex}">`;
+
+        if (header) {
+            html += `<div class="sdk-choice-header-tag">${escapeHtml(header)}</div>`;
+        }
+
+        html += `<div class="sdk-user-choice-question">${escapeHtml(question)}</div>`;
+        html += `<div class="sdk-choice-options" data-multi="${multiSelect}">`;
+
+        options.forEach((opt, optIndex) => {
+            const label = opt.label || opt;
+            const description = opt.description || '';
+
+            if (description) {
+                html += `<button class="sdk-choice-btn sdk-choice-btn-detailed"
+                         onclick="selectUserChoice('${escapeHtml(processId)}', '${escapeHtml(choiceId)}', ${qIndex}, ${optIndex}, '${escapeHtml(label)}')"
+                         data-option-index="${optIndex}">
+                    <div class="sdk-choice-btn-label">${escapeHtml(label)}</div>
+                    <div class="sdk-choice-btn-desc">${escapeHtml(description)}</div>
+                </button>`;
+            } else {
+                html += `<button class="sdk-choice-btn"
+                         onclick="selectUserChoice('${escapeHtml(processId)}', '${escapeHtml(choiceId)}', ${qIndex}, ${optIndex}, '${escapeHtml(label)}')"
+                         data-option-index="${optIndex}">${escapeHtml(label)}</button>`;
+            }
+        });
+
+        html += `</div>`; // close options
+
+        // Add "Other" input option
+        html += `<div class="sdk-choice-other">
+            <input type="text" class="sdk-choice-other-input"
+                   placeholder="Or type a custom response..."
+                   id="choice-other-${choiceId}-${qIndex}">
+            <button class="sdk-choice-other-submit"
+                    onclick="submitOtherChoice('${escapeHtml(processId)}', '${escapeHtml(choiceId)}', ${qIndex})">
+                Submit
+            </button>
+        </div>`;
+
+        html += `</div>`; // close question block
+    });
+
+    html += `</div>`; // close user-choice
+
+    // Store in buffer and display
+    process.outputBuffer = (process.outputBuffer || '') + html;
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+
+    showToast('Claude is waiting for your input', 'info');
+}
+
+/**
+ * Handle user selecting a choice option
+ */
+async function selectUserChoice(processId, choiceId, questionIndex, optionIndex, label) {
+    const choiceEl = document.querySelector(`.sdk-user-choice[data-choice-id="${choiceId}"]`);
+
+    // Visual feedback
+    const buttons = choiceEl?.querySelectorAll(`.sdk-choice-question-block[data-question-index="${questionIndex}"] .sdk-choice-btn`);
+    buttons?.forEach(btn => btn.classList.remove('selected'));
+    buttons?.[optionIndex]?.classList.add('selected');
+
+    // Disable all buttons while processing
+    choiceEl?.querySelectorAll('.sdk-choice-btn').forEach(btn => btn.classList.add('disabled'));
+
+    // Send the selection to Claude
+    const response = await sendUserChoiceResponse(processId, choiceId, label);
+
+    if (response) {
+        // Mark as resolved
+        choiceEl?.classList.add('resolved');
+        showToast(`Selected: ${label}`, 'success');
+    } else {
+        // Re-enable buttons on failure
+        choiceEl?.querySelectorAll('.sdk-choice-btn').forEach(btn => btn.classList.remove('disabled'));
+    }
+}
+
+/**
+ * Handle user submitting a custom "Other" response
+ */
+async function submitOtherChoice(processId, choiceId, questionIndex) {
+    const inputEl = document.getElementById(`choice-other-${choiceId}-${questionIndex}`);
+    const text = inputEl?.value?.trim();
+
+    if (!text) {
+        showToast('Please enter a response', 'warning');
+        return;
+    }
+
+    const choiceEl = document.querySelector(`.sdk-user-choice[data-choice-id="${choiceId}"]`);
+    choiceEl?.querySelectorAll('.sdk-choice-btn').forEach(btn => btn.classList.add('disabled'));
+
+    const response = await sendUserChoiceResponse(processId, choiceId, text);
+
+    if (response) {
+        choiceEl?.classList.add('resolved');
+        showToast(`Submitted: ${text}`, 'success');
+    } else {
+        choiceEl?.querySelectorAll('.sdk-choice-btn').forEach(btn => btn.classList.remove('disabled'));
+    }
+}
+
+/**
+ * Send user choice response to the SDK session
+ */
+async function sendUserChoiceResponse(processId, choiceId, answer) {
+    try {
+        // Send as a regular message - the SDK will interpret it as a choice response
+        const response = await fetch(`/api/process/${processId}/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: answer })
+        });
+
+        return response.ok;
+    } catch (error) {
+        console.error('Failed to send choice response:', error);
+        showToast(`Failed to send response: ${error.message}`, 'error');
+        return false;
+    }
+}
+
+// ============================================================================
+// Phase 3: Edit Approval UI with Diff Viewer
+// ============================================================================
+
+/**
+ * Check if a tool is an edit tool that should show diff UI
+ */
+function isEditTool(toolName) {
+    const editTools = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+    return editTools.includes(toolName);
+}
+
+/**
+ * Show edit approval UI with diff viewer
+ */
+function showEditApprovalUI(processId, msg) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    const toolUseId = msg.tool_use_id;
+    const toolName = msg.name;
+    const input = msg.input || {};
+
+    // Extract file path and content based on tool type
+    let filePath = '';
+    let oldContent = '';
+    let newContent = '';
+
+    if (toolName === 'Edit') {
+        filePath = input.file_path || '';
+        oldContent = input.old_string || '';
+        newContent = input.new_string || '';
+    } else if (toolName === 'Write') {
+        filePath = input.file_path || '';
+        oldContent = ''; // New file or full replacement
+        newContent = input.content || '';
+    } else if (toolName === 'MultiEdit') {
+        // MultiEdit has array of edits - show first one or summary
+        filePath = input.file_path || '';
+        const edits = input.edits || [];
+        if (edits.length > 0) {
+            oldContent = edits.map(e => e.old_string || '').join('\n---\n');
+            newContent = edits.map(e => e.new_string || '').join('\n---\n');
+        }
+    }
+
+    // Generate diff HTML
+    const diffHtml = generateDiffView(oldContent, newContent);
+    const stats = calculateDiffStats(oldContent, newContent);
+
+    const html = `
+        <div class="sdk-edit-approval" data-tool-id="${escapeHtml(toolUseId)}">
+            <div class="sdk-edit-header">
+                <div class="sdk-edit-file-info">
+                    <span class="sdk-edit-icon">📝</span>
+                    <span class="sdk-edit-file-path">${escapeHtml(filePath || 'unknown file')}</span>
+                    <span class="sdk-edit-tool-name">${escapeHtml(toolName)}</span>
+                </div>
+            </div>
+            <div class="sdk-diff-viewer">
+                ${diffHtml}
+            </div>
+            <div class="sdk-diff-stats">
+                <span class="sdk-diff-stat-added">+${stats.added} additions</span>
+                <span class="sdk-diff-stat-removed">-${stats.removed} deletions</span>
+            </div>
+            <div class="sdk-edit-actions">
+                <button class="sdk-edit-btn sdk-edit-btn-approve"
+                        onclick="approveEdit('${escapeHtml(processId)}', '${escapeHtml(toolUseId)}', true)">
+                    ✓ Approve
+                </button>
+                <button class="sdk-edit-btn sdk-edit-btn-reject"
+                        onclick="approveEdit('${escapeHtml(processId)}', '${escapeHtml(toolUseId)}', false)">
+                    ✗ Reject
+                </button>
+            </div>
+        </div>
+    `;
+
+    // Store in buffer and display
+    process.outputBuffer = (process.outputBuffer || '') + html;
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+
+    showToast(`Edit to ${filePath.split('/').pop() || 'file'} requires approval`, 'warning');
+}
+
+/**
+ * Generate a diff view HTML from old and new content
+ */
+function generateDiffView(oldContent, newContent) {
+    if (!oldContent && !newContent) {
+        return '<div class="sdk-diff-line context"><span class="sdk-diff-line-content">(empty)</span></div>';
+    }
+
+    // Handle new file case
+    if (!oldContent && newContent) {
+        const lines = newContent.split('\n');
+        return lines.map((line, i) => `
+            <div class="sdk-diff-line added">
+                <span class="sdk-diff-line-number">${i + 1}</span>
+                <span class="sdk-diff-line-content">+ ${escapeHtml(line)}</span>
+            </div>
+        `).join('');
+    }
+
+    // Handle delete case
+    if (oldContent && !newContent) {
+        const lines = oldContent.split('\n');
+        return lines.map((line, i) => `
+            <div class="sdk-diff-line removed">
+                <span class="sdk-diff-line-number">${i + 1}</span>
+                <span class="sdk-diff-line-content">- ${escapeHtml(line)}</span>
+            </div>
+        `).join('');
+    }
+
+    // Simple line-by-line diff for edits
+    const oldLines = oldContent.split('\n');
+    const newLines = newContent.split('\n');
+    let html = '';
+
+    // Show header
+    html += `<div class="sdk-diff-line header">
+        <span class="sdk-diff-line-content">@@ Edit: ${oldLines.length} lines → ${newLines.length} lines @@</span>
+    </div>`;
+
+    // Show removed lines
+    oldLines.forEach((line, i) => {
+        html += `<div class="sdk-diff-line removed">
+            <span class="sdk-diff-line-number">${i + 1}</span>
+            <span class="sdk-diff-line-content">- ${escapeHtml(line)}</span>
+        </div>`;
+    });
+
+    // Show added lines
+    newLines.forEach((line, i) => {
+        html += `<div class="sdk-diff-line added">
+            <span class="sdk-diff-line-number">${i + 1}</span>
+            <span class="sdk-diff-line-content">+ ${escapeHtml(line)}</span>
+        </div>`;
+    });
+
+    return html;
+}
+
+/**
+ * Calculate diff statistics
+ */
+function calculateDiffStats(oldContent, newContent) {
+    const oldLines = oldContent ? oldContent.split('\n').length : 0;
+    const newLines = newContent ? newContent.split('\n').length : 0;
+
+    return {
+        added: newLines,
+        removed: oldLines
+    };
+}
+
+/**
+ * Approve or reject an edit
+ */
+async function approveEdit(processId, toolUseId, approved) {
+    try {
+        const response = await fetch(`/api/process/${processId}/tool-approval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool_use_id: toolUseId, approved })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        // Update the UI
+        const editEl = document.querySelector(`.sdk-edit-approval[data-tool-id="${toolUseId}"]`);
+        if (editEl) {
+            editEl.classList.add('resolved');
+            const actionsEl = editEl.querySelector('.sdk-edit-actions');
+            if (actionsEl) {
+                actionsEl.innerHTML = `
+                    <span class="sdk-edit-resolved-badge ${approved ? 'approved' : 'rejected'}">
+                        ${approved ? '✓ Approved' : '✗ Rejected'}
+                    </span>
+                `;
+            }
+        }
+
+        showToast(`Edit ${approved ? 'approved' : 'rejected'}`, approved ? 'success' : 'info');
+
+    } catch (error) {
+        console.error('Failed to send edit approval:', error);
+        showToast(`Failed to send approval: ${error.message}`, 'error');
+    }
+}
+
+// ============================================================================
+// Phase 4: Skills Browser and Session Resume
+// ============================================================================
+
+/**
+ * Session persistence key for localStorage
+ */
+const SDK_SESSION_STORAGE_KEY = 'sdk_sessions';
+const SDK_LAST_SESSION_KEY = 'sdk_last_session';
+
+/**
+ * Save session info to localStorage for resume
+ */
+function saveSessionToStorage(processId, sessionInfo) {
+    try {
+        const sessions = JSON.parse(localStorage.getItem(SDK_SESSION_STORAGE_KEY) || '{}');
+        sessions[processId] = {
+            ...sessionInfo,
+            savedAt: new Date().toISOString()
+        };
+        // Keep only last 10 sessions
+        const keys = Object.keys(sessions);
+        if (keys.length > 10) {
+            const sortedKeys = keys.sort((a, b) =>
+                new Date(sessions[b].savedAt) - new Date(sessions[a].savedAt)
+            );
+            sortedKeys.slice(10).forEach(k => delete sessions[k]);
+        }
+        localStorage.setItem(SDK_SESSION_STORAGE_KEY, JSON.stringify(sessions));
+        localStorage.setItem(SDK_LAST_SESSION_KEY, processId);
+    } catch (e) {
+        console.warn('Failed to save session to storage:', e);
+    }
+}
+
+/**
+ * Get saved sessions from localStorage
+ */
+function getSavedSessions() {
+    try {
+        return JSON.parse(localStorage.getItem(SDK_SESSION_STORAGE_KEY) || '{}');
+    } catch (e) {
+        return {};
+    }
+}
+
+/**
+ * Get the last used session ID
+ */
+function getLastSessionId() {
+    return localStorage.getItem(SDK_LAST_SESSION_KEY);
+}
+
+/**
+ * Show saved sessions that can be resumed
+ */
+function showSavedSessions(processId) {
+    const sessions = getSavedSessions();
+    const sessionList = Object.entries(sessions);
+
+    if (sessionList.length === 0) {
+        showLocalSystemMessage(processId, '📂', 'No saved sessions found. Sessions are saved automatically when you use them.');
+        return;
+    }
+
+    let html = `<div class="sdk-system-message">
+        <div class="sdk-system-header">📂 Saved Sessions</div>
+        <div class="sdk-sessions-list">`;
+
+    sessionList.sort((a, b) => new Date(b[1].savedAt) - new Date(a[1].savedAt));
+
+    sessionList.forEach(([id, info]) => {
+        const dirName = info.cwd?.split('/').pop() || 'Unknown';
+        const savedAt = new Date(info.savedAt).toLocaleString();
+        const claudeSessionId = info.claudeSessionId || 'No Claude session';
+
+        html += `<div class="sdk-session-item" data-session-id="${escapeHtml(id)}">
+            <div class="sdk-session-item-header">
+                <span class="sdk-session-item-dir">${escapeHtml(dirName)}</span>
+                <span class="sdk-session-item-time">${escapeHtml(savedAt)}</span>
+            </div>
+            <div class="sdk-session-item-path">${escapeHtml(info.cwd || '')}</div>
+            <div class="sdk-session-item-actions">
+                <button onclick="resumeSavedSession('${escapeHtml(id)}')" class="sdk-btn-resume">Resume</button>
+            </div>
+        </div>`;
+    });
+
+    html += `</div></div>`;
+
+    const process = managedProcesses.get(processId);
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '') + html;
+    }
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+}
+
+/**
+ * Resume a saved session
+ */
+async function resumeSavedSession(sessionId) {
+    const sessions = getSavedSessions();
+    const sessionInfo = sessions[sessionId];
+
+    if (!sessionInfo) {
+        showToast('Session not found', 'error');
+        return;
+    }
+
+    showToast(`Resuming session in ${sessionInfo.cwd?.split('/').pop() || 'directory'}...`, 'info');
+
+    try {
+        // Spawn a new session with the same cwd
+        const response = await fetch('/api/spawn', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cwd: sessionInfo.cwd,
+                resume_session_id: sessionInfo.claudeSessionId // Pass the Claude session ID for resuming
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to spawn session');
+        }
+
+        const data = await response.json();
+        showToast(`Session resumed: ${data.process_id}`, 'success');
+
+        // Connect to the new session
+        connectToProcess(data.process_id);
+        selectManagedProcess(data.process_id);
+
+    } catch (error) {
+        console.error('Failed to resume session:', error);
+        showToast(`Failed to resume: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Handle /skills or /skill command
+ */
+async function handleSkillsCommand(processId, args) {
+    if (!args || args.trim() === '' || args.trim() === 'list') {
+        // Show available skills
+        await showAvailableSkills(processId);
+    } else {
+        // Invoke a specific skill - send to Claude with skill prefix
+        const skillName = args.trim();
+        showLocalSystemMessage(processId, '🎯', `Invoking skill: /${skillName}`);
+
+        // Send the skill command to Claude
+        try {
+            const response = await fetch(`/api/process/${processId}/message`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: `/${skillName}` })
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to send skill command');
+            }
+        } catch (error) {
+            showToast(`Failed to invoke skill: ${error.message}`, 'error');
+        }
+    }
+}
+
+/**
+ * Show available skills
+ */
+async function showAvailableSkills(processId) {
+    // Common Claude Code skills - this is a curated list
+    const commonSkills = [
+        { name: 'commit', description: 'Create a git commit with generated message' },
+        { name: 'debug', description: 'Systematic debugging workflow' },
+        { name: 'review-pr', description: 'Review a pull request' },
+        { name: 'help', description: 'Show Claude Code help' },
+        { name: 'init', description: 'Initialize project configuration' },
+        { name: 'test', description: 'Run tests and analyze results' },
+        { name: 'refactor', description: 'Refactor code with best practices' },
+        { name: 'explain', description: 'Explain code in detail' },
+        { name: 'docs', description: 'Generate documentation' }
+    ];
+
+    let html = `<div class="sdk-system-message">
+        <div class="sdk-system-header">🎯 Available Skills</div>
+        <div class="sdk-skills-list">
+            <table class="sdk-help-table">
+                <tr><th>Skill</th><th>Description</th></tr>`;
+
+    commonSkills.forEach(skill => {
+        html += `<tr>
+            <td><code>/${skill.name}</code></td>
+            <td>${escapeHtml(skill.description)}</td>
+        </tr>`;
+    });
+
+    html += `</table>
+        <div class="sdk-help-note">
+            <strong>Usage:</strong> Type <code>/skill &lt;name&gt;</code> or just <code>/&lt;name&gt;</code> to invoke a skill.
+            <br>Skills that aren't built-in will be sent to Claude for handling.
+        </div>
+        </div>
+    </div>`;
+
+    const process = managedProcesses.get(processId);
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '') + html;
+    }
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+}
+
+/**
+ * Auto-save session when Claude session ID is received
+ */
+function autoSaveSession(processId, claudeSessionId) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    saveSessionToStorage(processId, {
+        cwd: process.cwd,
+        claudeSessionId: claudeSessionId,
+        state: process.state
+    });
+
+    console.log(`[SDK] Auto-saved session ${processId} with Claude session ${claudeSessionId}`);
 }
 
 /**
@@ -6034,11 +7246,16 @@ async function refreshManagedProcessList() {
             }
         }
 
-        // Clean up stopped processes not in the list
+        // Clean up processes no longer tracked by server
         const activeIds = new Set(processes.map(p => p.id));
         for (const [id, process] of managedProcesses) {
-            if (!activeIds.has(id) && process.state === 'stopped') {
+            if (!activeIds.has(id)) {
+                // Close WebSocket if open
+                if (process.ws && process.ws.readyState === WebSocket.OPEN) {
+                    process.ws.close();
+                }
                 managedProcesses.delete(id);
+                console.log(`[MC] Removed stale process ${id} from tracking`);
             }
         }
 
@@ -6087,6 +7304,10 @@ function selectManagedProcess(processId) {
         killBtn.classList.toggle('hidden', process.state === 'stopped');
     }
 
+    // Update context indicator (SDK sessions track tokens via WebSocket updates)
+    const tokens = process.contextTokens || 0;
+    updateContextIndicator(tokens, MAX_CONTEXT_TOKENS);
+
     // Show terminal output, hide conversation stream
     const streamEl = document.getElementById('mc-conversation-stream');
     const terminalEl = document.getElementById('mc-terminal-output');
@@ -6108,9 +7329,831 @@ function selectManagedProcess(processId) {
     }
 }
 
+// ============================================================================
+// Slash Command System for SDK Sessions
+// ============================================================================
+
+/**
+ * Built-in slash commands available in SDK sessions
+ */
+const BUILTIN_COMMANDS = {
+    help: {
+        description: 'Show available commands',
+        handler: showCommandHelp
+    },
+    clear: {
+        description: 'Clear the terminal output',
+        handler: clearTerminal
+    },
+    stop: {
+        description: 'Stop the current operation',
+        handler: stopCurrentOperation
+    },
+    history: {
+        description: 'Show command history',
+        handler: showCommandHistory
+    },
+    skills: {
+        description: 'List available skills or invoke one',
+        handler: handleSkillsCommand
+    },
+    skill: {
+        description: 'Invoke a skill (e.g., /skill commit)',
+        handler: handleSkillsCommand
+    },
+    sessions: {
+        description: 'Show saved sessions you can resume',
+        handler: showSavedSessions
+    }
+};
+
+/**
+ * Command history for up-arrow recall
+ */
+let commandHistory = [];
+let historyIndex = -1;
+
+/**
+ * Parse a slash command from input text
+ * @param {string} text - Input text to parse
+ * @returns {object|null} - Parsed command {name, args} or null if not a command
+ */
+function parseSlashCommand(text) {
+    if (!text.startsWith('/')) return null;
+
+    const parts = text.slice(1).split(/\s+/);
+    const name = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ');
+
+    return { name, args, raw: text };
+}
+
+/**
+ * Handle a slash command
+ * @param {string} processId - The process ID
+ * @param {object} command - Parsed command {name, args}
+ * @returns {boolean} - True if command was handled locally, false if should be sent to Claude
+ */
+async function handleSlashCommand(processId, command) {
+    const { name, args } = command;
+
+    // Check for built-in commands first
+    if (BUILTIN_COMMANDS[name]) {
+        await BUILTIN_COMMANDS[name].handler(processId, args);
+        return true;
+    }
+
+    // Not a built-in command - could be a skill or should be sent to Claude
+    // For now, return false to let it go to Claude with the slash prefix
+    return false;
+}
+
+/**
+ * Autocomplete state
+ */
+let autocompleteSelectedIndex = -1;
+
+/**
+ * Handle slash command autocomplete
+ * Shows dropdown when user types / followed by characters
+ */
+function handleSlashAutocomplete(inputEl) {
+    const text = inputEl.innerText || '';
+    const autocomplete = document.getElementById('mc-autocomplete');
+
+    if (!autocomplete) return;
+
+    // Only show autocomplete if text starts with / and has no spaces yet
+    if (!text.startsWith('/') || text.includes(' ') || text.length > 20) {
+        hideAutocomplete();
+        return;
+    }
+
+    // Get the partial command (everything after /)
+    const partial = text.slice(1).toLowerCase();
+
+    // Filter matching commands
+    const matches = getMatchingCommands(partial);
+
+    if (matches.length === 0) {
+        hideAutocomplete();
+        return;
+    }
+
+    // Render autocomplete dropdown
+    renderAutocomplete(matches, partial);
+}
+
+/**
+ * Get commands matching the partial input
+ */
+function getMatchingCommands(partial) {
+    const results = [];
+
+    // Built-in commands
+    for (const [name, cmd] of Object.entries(BUILTIN_COMMANDS)) {
+        if (name.startsWith(partial) || partial === '') {
+            results.push({
+                name: `/${name}`,
+                description: cmd.description,
+                type: 'builtin'
+            });
+        }
+    }
+
+    // Common skills (hardcoded for now, could be fetched from API)
+    const commonSkills = [
+        { name: '/commit', description: 'Create a git commit with a generated message' },
+        { name: '/debug', description: 'Start systematic debugging process' },
+        { name: '/review', description: 'Review code changes' },
+        { name: '/test', description: 'Run or create tests' },
+        { name: '/refactor', description: 'Refactor selected code' },
+        { name: '/explain', description: 'Explain code or concept' },
+        { name: '/pr', description: 'Create or manage pull requests' },
+        { name: '/init', description: 'Initialize project configuration' }
+    ];
+
+    for (const skill of commonSkills) {
+        const skillName = skill.name.slice(1);
+        if (skillName.startsWith(partial) && !BUILTIN_COMMANDS[skillName]) {
+            results.push({
+                ...skill,
+                type: 'skill'
+            });
+        }
+    }
+
+    return results;
+}
+
+/**
+ * Render autocomplete dropdown
+ */
+function renderAutocomplete(matches, partial) {
+    const autocomplete = document.getElementById('mc-autocomplete');
+    if (!autocomplete) return;
+
+    // Group by type
+    const builtins = matches.filter(m => m.type === 'builtin');
+    const skills = matches.filter(m => m.type === 'skill');
+
+    let html = '';
+
+    if (builtins.length > 0) {
+        html += '<div class="mc-autocomplete-header">Built-in Commands</div>';
+        builtins.forEach((match, i) => {
+            const isSelected = i === 0 && autocompleteSelectedIndex === -1;
+            html += `
+                <div class="mc-autocomplete-item${isSelected ? ' selected' : ''}"
+                     data-command="${escapeHtml(match.name)}"
+                     onclick="selectAutocompleteItem(this)">
+                    <span class="mc-autocomplete-cmd">${highlightMatch(match.name, partial)}</span>
+                    <span class="mc-autocomplete-desc">${escapeHtml(match.description)}</span>
+                </div>
+            `;
+        });
+    }
+
+    if (skills.length > 0) {
+        html += '<div class="mc-autocomplete-header">Skills</div>';
+        skills.forEach((match) => {
+            html += `
+                <div class="mc-autocomplete-item"
+                     data-command="${escapeHtml(match.name)}"
+                     onclick="selectAutocompleteItem(this)">
+                    <span class="mc-autocomplete-cmd">${highlightMatch(match.name, partial)}</span>
+                    <span class="mc-autocomplete-desc">${escapeHtml(match.description)}</span>
+                </div>
+            `;
+        });
+    }
+
+    autocomplete.innerHTML = html;
+    autocomplete.classList.remove('hidden');
+
+    // Select first item by default
+    if (autocompleteSelectedIndex === -1) {
+        const firstItem = autocomplete.querySelector('.mc-autocomplete-item');
+        if (firstItem) {
+            firstItem.classList.add('selected');
+            autocompleteSelectedIndex = 0;
+        }
+    }
+}
+
+/**
+ * Highlight matching portion of command
+ */
+function highlightMatch(text, partial) {
+    if (!partial) return escapeHtml(text);
+    const idx = text.toLowerCase().indexOf(partial.toLowerCase());
+    if (idx === -1) return escapeHtml(text);
+
+    const before = text.slice(0, idx);
+    const match = text.slice(idx, idx + partial.length);
+    const after = text.slice(idx + partial.length);
+
+    return `${escapeHtml(before)}<strong>${escapeHtml(match)}</strong>${escapeHtml(after)}`;
+}
+
+/**
+ * Navigate autocomplete with arrow keys
+ */
+function navigateAutocomplete(direction) {
+    const autocomplete = document.getElementById('mc-autocomplete');
+    if (!autocomplete) return;
+
+    const items = autocomplete.querySelectorAll('.mc-autocomplete-item');
+    if (items.length === 0) return;
+
+    // Remove current selection
+    items.forEach(item => item.classList.remove('selected'));
+
+    // Calculate new index
+    autocompleteSelectedIndex += direction;
+    if (autocompleteSelectedIndex < 0) {
+        autocompleteSelectedIndex = items.length - 1;
+    } else if (autocompleteSelectedIndex >= items.length) {
+        autocompleteSelectedIndex = 0;
+    }
+
+    // Select new item
+    items[autocompleteSelectedIndex].classList.add('selected');
+
+    // Scroll into view if needed
+    items[autocompleteSelectedIndex].scrollIntoView({ block: 'nearest' });
+}
+
+/**
+ * Select an autocomplete item
+ */
+function selectAutocompleteItem(item) {
+    const command = item.dataset.command;
+    const inputEl = document.getElementById('mc-input');
+
+    if (inputEl && command) {
+        // Set the command text with a trailing space
+        inputEl.innerText = command + ' ';
+
+        // Move cursor to end
+        const range = document.createRange();
+        const sel = window.getSelection();
+        range.selectNodeContents(inputEl);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        // Focus the input
+        inputEl.focus();
+    }
+
+    hideAutocomplete();
+}
+
+/**
+ * Hide autocomplete dropdown
+ */
+function hideAutocomplete() {
+    const autocomplete = document.getElementById('mc-autocomplete');
+    if (autocomplete) {
+        autocomplete.classList.add('hidden');
+        autocomplete.innerHTML = '';
+    }
+    autocompleteSelectedIndex = -1;
+}
+
+/**
+ * Skills data for the picker
+ */
+const AVAILABLE_SKILLS = [
+    { name: 'commit', description: 'Create a git commit with AI-generated message', category: 'Git' },
+    { name: 'pr', description: 'Create or manage pull requests', category: 'Git' },
+    { name: 'review', description: 'Review code changes for issues and improvements', category: 'Code' },
+    { name: 'debug', description: 'Start systematic debugging process', category: 'Code' },
+    { name: 'test', description: 'Run tests or generate test cases', category: 'Code' },
+    { name: 'refactor', description: 'Refactor selected code for better quality', category: 'Code' },
+    { name: 'explain', description: 'Explain code, concepts, or errors', category: 'Learning' },
+    { name: 'docs', description: 'Generate or update documentation', category: 'Docs' },
+    { name: 'init', description: 'Initialize project configuration', category: 'Setup' },
+    { name: 'migrate', description: 'Help with code migrations and upgrades', category: 'Code' },
+    { name: 'optimize', description: 'Optimize code for performance', category: 'Code' },
+    { name: 'security', description: 'Scan for security vulnerabilities', category: 'Code' },
+    { name: 'api', description: 'Generate or consume API endpoints', category: 'Code' },
+    { name: 'db', description: 'Database queries and schema management', category: 'Data' },
+    { name: 'deploy', description: 'Deployment and CI/CD assistance', category: 'DevOps' }
+];
+
+/**
+ * Toggle commands picker visibility
+ */
+function toggleCommandsPicker() {
+    const picker = document.getElementById('mc-commands-picker');
+    const btn = document.getElementById('mc-commands-btn');
+    const skillsPicker = document.getElementById('mc-skills-picker');
+
+    // Close skills picker if open
+    if (skillsPicker && !skillsPicker.classList.contains('hidden')) {
+        hideSkillsPicker();
+    }
+
+    if (picker.classList.contains('hidden')) {
+        showCommandsPicker();
+        btn.classList.add('active');
+    } else {
+        hideCommandsPicker();
+    }
+}
+
+/**
+ * Show commands picker
+ */
+function showCommandsPicker() {
+    const picker = document.getElementById('mc-commands-picker');
+    const list = document.getElementById('mc-commands-list');
+    const searchInput = document.getElementById('mc-commands-search');
+
+    if (!picker || !list) return;
+
+    // Render commands
+    renderCommandsList(list, '');
+
+    picker.classList.remove('hidden');
+
+    // Focus search input
+    if (searchInput) {
+        searchInput.value = '';
+        setTimeout(() => searchInput.focus(), 50);
+    }
+}
+
+/**
+ * Hide commands picker
+ */
+function hideCommandsPicker() {
+    const picker = document.getElementById('mc-commands-picker');
+    const btn = document.getElementById('mc-commands-btn');
+
+    if (picker) picker.classList.add('hidden');
+    if (btn) btn.classList.remove('active');
+}
+
+/**
+ * Filter commands picker
+ */
+function filterCommandsPicker(query) {
+    const list = document.getElementById('mc-commands-list');
+    if (list) {
+        renderCommandsList(list, query.toLowerCase());
+    }
+}
+
+/**
+ * Render commands list
+ */
+function renderCommandsList(container, filter) {
+    const commands = Object.entries(BUILTIN_COMMANDS)
+        .filter(([name]) => !filter || name.includes(filter))
+        .map(([name, cmd]) => ({
+            name: `/${name}`,
+            description: cmd.description
+        }));
+
+    if (commands.length === 0) {
+        container.innerHTML = '<div class="mc-picker-empty">No commands found</div>';
+        return;
+    }
+
+    container.innerHTML = commands.map(cmd => `
+        <div class="mc-picker-item" onclick="selectPickerCommand('${escapeHtml(cmd.name)}')">
+            <div class="mc-picker-item-icon command">/</div>
+            <div class="mc-picker-item-content">
+                <div class="mc-picker-item-name">${escapeHtml(cmd.name)}</div>
+                <div class="mc-picker-item-desc">${escapeHtml(cmd.description)}</div>
+            </div>
+        </div>
+    `).join('');
+}
+
+/**
+ * Toggle skills picker visibility
+ */
+function toggleSkillsPicker() {
+    const picker = document.getElementById('mc-skills-picker');
+    const btn = document.getElementById('mc-skills-btn');
+    const commandsPicker = document.getElementById('mc-commands-picker');
+
+    // Close commands picker if open
+    if (commandsPicker && !commandsPicker.classList.contains('hidden')) {
+        hideCommandsPicker();
+    }
+
+    if (picker.classList.contains('hidden')) {
+        showSkillsPicker();
+        btn.classList.add('active');
+    } else {
+        hideSkillsPicker();
+    }
+}
+
+/**
+ * Show skills picker
+ */
+function showSkillsPicker() {
+    const picker = document.getElementById('mc-skills-picker');
+    const list = document.getElementById('mc-skills-list');
+    const searchInput = document.getElementById('mc-skills-search');
+
+    if (!picker || !list) return;
+
+    // Render skills
+    renderSkillsList(list, '');
+
+    picker.classList.remove('hidden');
+
+    // Focus search input
+    if (searchInput) {
+        searchInput.value = '';
+        setTimeout(() => searchInput.focus(), 50);
+    }
+}
+
+/**
+ * Hide skills picker
+ */
+function hideSkillsPicker() {
+    const picker = document.getElementById('mc-skills-picker');
+    const btn = document.getElementById('mc-skills-btn');
+
+    if (picker) picker.classList.add('hidden');
+    if (btn) btn.classList.remove('active');
+}
+
+/**
+ * Filter skills picker
+ */
+function filterSkillsPicker(query) {
+    const list = document.getElementById('mc-skills-list');
+    if (list) {
+        renderSkillsList(list, query.toLowerCase());
+    }
+}
+
+/**
+ * Render skills list grouped by category
+ */
+function renderSkillsList(container, filter) {
+    const filtered = AVAILABLE_SKILLS.filter(skill =>
+        !filter || skill.name.includes(filter) || skill.description.toLowerCase().includes(filter)
+    );
+
+    if (filtered.length === 0) {
+        container.innerHTML = '<div class="mc-picker-empty">No skills found</div>';
+        return;
+    }
+
+    // Group by category
+    const grouped = {};
+    filtered.forEach(skill => {
+        if (!grouped[skill.category]) {
+            grouped[skill.category] = [];
+        }
+        grouped[skill.category].push(skill);
+    });
+
+    let html = '';
+    for (const [category, skills] of Object.entries(grouped)) {
+        html += `<div class="mc-picker-category">${escapeHtml(category)}</div>`;
+        html += skills.map(skill => `
+            <div class="mc-picker-item" onclick="selectPickerSkill('${escapeHtml(skill.name)}')">
+                <div class="mc-picker-item-icon skill">⚡</div>
+                <div class="mc-picker-item-content">
+                    <div class="mc-picker-item-name">/${escapeHtml(skill.name)}</div>
+                    <div class="mc-picker-item-desc">${escapeHtml(skill.description)}</div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    container.innerHTML = html;
+}
+
+/**
+ * Select a command from picker
+ */
+function selectPickerCommand(command) {
+    insertCommandIntoInput(command);
+    hideCommandsPicker();
+}
+
+/**
+ * Select a skill from picker
+ */
+function selectPickerSkill(skillName) {
+    insertCommandIntoInput(`/${skillName}`);
+    hideSkillsPicker();
+}
+
+/**
+ * Insert command into input field
+ */
+function insertCommandIntoInput(command) {
+    const inputEl = document.getElementById('mc-input');
+    if (!inputEl) return;
+
+    // Set the command with trailing space
+    inputEl.innerText = command + ' ';
+
+    // Move cursor to end
+    const range = document.createRange();
+    const sel = window.getSelection();
+    range.selectNodeContents(inputEl);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    // Focus the input
+    inputEl.focus();
+}
+
+/**
+ * Current permission mode state
+ */
+let currentPermissionMode = 'normal';
+
+/**
+ * Update context usage indicator
+ * @param {number} usedTokens - Tokens used in current conversation
+ * @param {number} maxTokens - Maximum tokens in context window
+ */
+function updateContextIndicator(usedTokens, maxTokens = 200000) {
+    const fill = document.getElementById('mc-context-fill');
+    const label = document.getElementById('mc-context-label');
+    const indicator = document.querySelector('.mc-context-indicator');
+
+    if (!fill || !label || !indicator) return;
+
+    const percentage = Math.min(100, Math.round((usedTokens / maxTokens) * 100));
+
+    fill.style.width = `${percentage}%`;
+    label.textContent = `${percentage}%`;
+
+    // Update warning/danger states
+    indicator.classList.remove('warning', 'danger');
+    if (percentage >= 90) {
+        indicator.classList.add('danger');
+    } else if (percentage >= 70) {
+        indicator.classList.add('warning');
+    }
+}
+
+/**
+ * Set permission mode for SDK session
+ */
+function setPermissionMode(mode) {
+    currentPermissionMode = mode;
+    console.log('[MC] Permission mode set to:', mode);
+
+    // Update backend if we have a selected managed SDK process
+    if (selectedProcessId) {
+        fetch(`/api/process/${selectedProcessId}/permission-mode`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+        }).then(res => {
+            if (res.ok) {
+                showToast(`Mode changed to: ${getModeDisplayName(mode)}`);
+            } else {
+                console.error('[MC] Failed to set permission mode');
+                showToast('Failed to change mode', 'error');
+            }
+        }).catch(err => {
+            console.error('[MC] Error setting permission mode:', err);
+            showToast('Failed to change mode', 'error');
+        });
+    } else if (mcSelectedSessionId) {
+        // Detected session - can't control permission mode
+        showToast('Permission mode only works for managed SDK sessions', 'warning');
+    } else {
+        showToast(`Mode: ${getModeDisplayName(mode)} (for next spawned session)`);
+    }
+}
+
+/**
+ * Get display name for permission mode
+ */
+function getModeDisplayName(mode) {
+    const names = {
+        'normal': 'Normal',
+        'acceptEdits': 'Accept Edits',
+        'bypassPermissions': 'Bypass Permissions',
+        'planMode': 'Plan Mode'
+    };
+    return names[mode] || mode;
+}
+
+/**
+ * Toggle compact input visibility
+ */
+function toggleCompactInput() {
+    const input = document.getElementById('mc-compact-input');
+    const btn = document.getElementById('mc-compact-btn');
+    const instructionsInput = document.getElementById('mc-compact-instructions');
+
+    if (!input || !btn) return;
+
+    if (input.classList.contains('hidden')) {
+        input.classList.remove('hidden');
+        btn.classList.add('active');
+        if (instructionsInput) {
+            instructionsInput.value = '';
+            setTimeout(() => instructionsInput.focus(), 50);
+        }
+    } else {
+        hideCompactInput();
+    }
+}
+
+/**
+ * Hide compact input
+ */
+function hideCompactInput() {
+    const input = document.getElementById('mc-compact-input');
+    const btn = document.getElementById('mc-compact-btn');
+
+    if (input) input.classList.add('hidden');
+    if (btn) btn.classList.remove('active');
+}
+
+/**
+ * Execute compact command
+ */
+async function executeCompact() {
+    const instructionsInput = document.getElementById('mc-compact-instructions');
+    const instructions = instructionsInput ? instructionsInput.value.trim() : '';
+
+    if (!selectedProcessId) {
+        showToast('No session selected');
+        hideCompactInput();
+        return;
+    }
+
+    showToast('Compacting conversation...');
+    hideCompactInput();
+
+    try {
+        const response = await fetch(`/api/process/${selectedProcessId}/compact`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instructions })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            showToast(`Compacted: ${result.tokens_saved || 0} tokens saved`);
+            // Update context indicator if we get new stats
+            if (result.new_usage) {
+                updateContextIndicator(result.new_usage.total_tokens);
+            }
+        } else {
+            showToast('Compact failed');
+        }
+    } catch (err) {
+        console.error('[MC] Compact error:', err);
+        showToast('Compact error');
+    }
+}
+
+/**
+ * Show help for available commands
+ */
+function showCommandHelp(processId) {
+    const helpLines = [
+        '<div class="sdk-system-message">',
+        '<div class="sdk-system-header">📋 Available Commands</div>',
+        '<div class="sdk-help-content">',
+        '<table class="sdk-help-table">',
+        '<tr><th>Command</th><th>Description</th></tr>'
+    ];
+
+    for (const [name, cmd] of Object.entries(BUILTIN_COMMANDS)) {
+        helpLines.push(`<tr><td><code>/${name}</code></td><td>${cmd.description}</td></tr>`);
+    }
+
+    helpLines.push(
+        '</table>',
+        '<div class="sdk-help-note">',
+        '<strong>Tip:</strong> You can also use skill commands like <code>/commit</code>, <code>/debug</code>, etc.',
+        '</div>',
+        '</div>',
+        '</div>'
+    );
+
+    const html = helpLines.join('\n');
+
+    // Add to process buffer and display
+    const process = managedProcesses.get(processId);
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '') + html;
+    }
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+}
+
+/**
+ * Clear the terminal output
+ */
+function clearTerminal(processId) {
+    const process = managedProcesses.get(processId);
+    if (process) {
+        // Keep the welcome banner if present
+        const bannerMatch = process.outputBuffer?.match(/<div class="sdk-welcome-banner">[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/);
+        process.outputBuffer = bannerMatch ? bannerMatch[0] : '';
+    }
+
+    if (selectedProcessId === processId) {
+        const terminalEl = document.getElementById('mc-terminal-output');
+        const contentEl = terminalEl?.querySelector('.mc-terminal-content');
+        if (contentEl) {
+            contentEl.innerHTML = process?.outputBuffer || '';
+        }
+    }
+
+    showToast('Terminal cleared', 'info');
+}
+
+/**
+ * Stop the current operation
+ */
+async function stopCurrentOperation(processId) {
+    const process = managedProcesses.get(processId);
+    if (!process) return;
+
+    // For SDK sessions, we can try to send a cancel signal
+    // For now, show a message - actual implementation depends on SDK support
+    const html = `<div class="sdk-system-message"><span class="sdk-system-icon">⏹️</span> Stop requested. If Claude is mid-response, the operation may complete.</div>`;
+
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '') + html;
+    }
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+
+    showToast('Stop signal sent', 'info');
+}
+
+/**
+ * Show command history
+ */
+function showCommandHistory(processId) {
+    if (commandHistory.length === 0) {
+        const html = `<div class="sdk-system-message"><span class="sdk-system-icon">📜</span> No command history yet.</div>`;
+        appendTerminalHtml(html);
+        return;
+    }
+
+    const historyHtml = [
+        '<div class="sdk-system-message">',
+        '<div class="sdk-system-header">📜 Command History</div>',
+        '<div class="sdk-history-list">'
+    ];
+
+    commandHistory.slice(-20).forEach((cmd, i) => {
+        historyHtml.push(`<div class="sdk-history-item"><span class="sdk-history-num">${i + 1}.</span> ${escapeHtml(cmd)}</div>`);
+    });
+
+    historyHtml.push('</div></div>');
+
+    const html = historyHtml.join('\n');
+    const process = managedProcesses.get(processId);
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '') + html;
+    }
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+}
+
+/**
+ * Display a local system message in the terminal (not from Claude)
+ */
+function showLocalSystemMessage(processId, icon, message) {
+    const html = `<div class="sdk-system-message"><span class="sdk-system-icon">${icon}</span> ${message}</div>`;
+
+    const process = managedProcesses.get(processId);
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '') + html;
+    }
+    if (selectedProcessId === processId) {
+        appendTerminalHtml(html);
+    }
+}
+
 /**
  * Send input to a managed process.
  * Uses /message endpoint for SDK sessions, /stdin for PTY sessions.
+ * Handles slash commands for SDK sessions.
  */
 async function sendProcessInput() {
     if (!selectedProcessId) return;
@@ -6125,6 +8168,33 @@ async function sendProcessInput() {
 
     const process = managedProcesses.get(selectedProcessId);
     const isSDKSession = process?.isSDK || window.mcSDKMode;
+
+    // Add to command history (for up-arrow recall)
+    if (text && !commandHistory.includes(text)) {
+        commandHistory.push(text);
+        if (commandHistory.length > 100) commandHistory.shift(); // Limit history size
+    }
+    historyIndex = commandHistory.length; // Reset history navigation
+
+    // Check for slash commands in SDK sessions
+    if (isSDKSession) {
+        const command = parseSlashCommand(text);
+        if (command) {
+            console.log('[MC-DEBUG] Detected slash command:', command);
+
+            // Try to handle as built-in command
+            const handled = await handleSlashCommand(selectedProcessId, command);
+
+            if (handled) {
+                // Built-in command was handled locally - clear input and return
+                if (inputEl) inputEl.innerHTML = '';
+                return;
+            }
+
+            // Not a built-in command - send to Claude as-is (it may be a skill invocation)
+            // The SDK/Claude will handle skill commands like /commit, /debug, etc.
+        }
+    }
 
     try {
         let response;
@@ -6174,7 +8244,13 @@ async function killSelectedProcess() {
     if (!selectedProcessId) return;
 
     const process = managedProcesses.get(selectedProcessId);
-    if (!process || process.state === 'stopped') return;
+    if (!process) return;
+
+    // If already stopped, just remove from tracking
+    if (process.state === 'stopped') {
+        cleanupProcess(selectedProcessId);
+        return;
+    }
 
     if (!confirm(`Stop process in ${process.cwd}?`)) return;
 
@@ -6183,17 +8259,51 @@ async function killSelectedProcess() {
             method: 'POST'
         });
 
-        if (!response.ok) {
+        if (response.ok) {
+            showToast('Process stopped', 'success');
+        } else if (response.status === 404) {
+            // Process already gone from server, clean up locally
+            console.log(`[MC] Process ${selectedProcessId} not found on server, cleaning up locally`);
+            showToast('Process already stopped', 'info');
+        } else {
             const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
             throw new Error(error.detail || `HTTP ${response.status}`);
         }
 
-        showToast('Process stopped', 'success');
+        // Always clean up after kill attempt
+        cleanupProcess(selectedProcessId);
         refreshManagedProcessList();
 
     } catch (error) {
         console.error('Failed to kill process:', error);
         showToast(`Failed to stop: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Clean up a process from local tracking
+ */
+function cleanupProcess(processId) {
+    const process = managedProcesses.get(processId);
+    if (process) {
+        if (process.ws && process.ws.readyState === WebSocket.OPEN) {
+            process.ws.close();
+        }
+        managedProcesses.delete(processId);
+    }
+
+    // If this was the selected process, deselect
+    if (selectedProcessId === processId) {
+        selectedProcessId = null;
+        // Clear terminal
+        const terminalEl = document.getElementById('mc-terminal-output');
+        const contentEl = terminalEl?.querySelector('.mc-terminal-content');
+        if (contentEl) contentEl.innerHTML = '';
+    }
+
+    // Re-render the session list
+    if (typeof renderMissionControlSessions === 'function' && window.mcSessions) {
+        renderMissionControlSessions(window.mcSessions);
     }
 }
 
@@ -6255,11 +8365,11 @@ function renderManagedProcessesInList(container) {
     if (managedProcesses.size === 0) return '';
 
     let html = '<div class="mc-managed-section">';
-    html += '<div class="mc-section-header">🖥️ Managed Sessions</div>';
+    html += '<div class="mc-section-header">🖥️  Managed Sessions</div>';
 
     for (const [id, process] of managedProcesses) {
         const stateEmoji = process.state === 'running' ? '🟢' :
-                          process.state === 'stopped' ? '⚫' : '🟡';
+                          process.state === 'stopped' ? '⚫' : '🔵';
         const dirName = process.cwd.split('/').pop() || process.cwd;
         const isSelected = selectedProcessId === id;
 
@@ -6267,7 +8377,7 @@ function renderManagedProcessesInList(container) {
             <div class="mc-session-item managed ${isSelected ? 'selected' : ''}"
                  data-process-id="${escapeHtml(id)}"
                  onclick="selectManagedProcess('${escapeJsString(id)}')">
-                <div class="mc-session-name">${stateEmoji} ${escapeHtml(dirName)}<span class="managed-badge">MC</span></div>
+                <div class="mc-session-name">${stateEmoji} ${escapeHtml(dirName)}<span class="managed-badge">SDK</span></div>
                 <div class="mc-session-meta">${escapeHtml(process.cwd)}</div>
             </div>
         `;

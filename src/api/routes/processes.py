@@ -6,7 +6,7 @@ monitoring Claude Code processes.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
@@ -66,6 +66,18 @@ class ToolApprovalRequest(BaseModel):
 
     tool_use_id: str
     approved: bool
+
+
+class PermissionModeRequest(BaseModel):
+    """Request model for setting permission mode."""
+
+    mode: Literal['normal', 'acceptEdits', 'bypassPermissions', 'planMode']
+
+
+class CompactRequest(BaseModel):
+    """Request model for compacting conversation."""
+
+    instructions: Optional[str] = None
 
 
 class ProcessInfo(BaseModel):
@@ -152,7 +164,7 @@ async def send_stdin(process_id: str, request: StdinRequest):
 
 @router.post("/process/{process_id}/kill")
 async def kill_process(process_id: str, force: bool = False):
-    """Terminate a process.
+    """Terminate a process (PTY or SDK session).
 
     Args:
         process_id: ID of the process to terminate
@@ -161,28 +173,58 @@ async def kill_process(process_id: str, force: bool = False):
     Returns:
         Success status
     """
-    manager = get_process_manager()
+    # Try PTY manager first
+    pty_manager = get_process_manager()
+    pty_process = pty_manager.get_process(process_id)
 
-    try:
-        await manager.kill(process_id=process_id, force=force)
-        return {"success": True, "process_id": process_id}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if pty_process:
+        try:
+            await pty_manager.kill(process_id=process_id, force=force)
+            return {"success": True, "process_id": process_id}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Try SDK manager if available
+    if SDK_AVAILABLE:
+        sdk_manager = get_sdk_session_manager()
+        if sdk_manager.get_session(process_id):
+            try:
+                await sdk_manager.close_session(process_id)
+                return {"success": True, "process_id": process_id}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+    # Process not found in either manager
+    raise HTTPException(status_code=404, detail=f"Process {process_id} not found")
 
 
 @router.get("/processes", response_model=list[ProcessInfo])
 async def list_processes():
-    """List all managed processes.
+    """List all managed processes (PTY and SDK sessions).
 
     Returns:
         List of ProcessInfo for all managed processes
     """
-    manager = get_process_manager()
-    processes = manager.list_processes()
+    all_processes = []
 
-    return [ProcessInfo(**p) for p in processes]
+    # Get PTY processes
+    pty_manager = get_process_manager()
+    all_processes.extend(pty_manager.list_processes())
+
+    # Get SDK sessions if available
+    if SDK_AVAILABLE:
+        sdk_manager = get_sdk_session_manager()
+        for session_info in sdk_manager.list_sessions():
+            all_processes.append({
+                "id": session_info["id"],
+                "cwd": session_info["cwd"],
+                "state": session_info["state"],
+                "started_at": session_info["started_at"],
+                "exit_code": None,
+                "client_count": session_info["client_count"],
+            })
+
+    return [ProcessInfo(**p) for p in all_processes]
 
 
 @router.get("/process/{process_id}", response_model=ProcessInfo)
@@ -357,5 +399,72 @@ async def spawn_sdk_session(request: SpawnRequest):
             state=session.state,
             started_at=session.started_at.isoformat()
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/process/{process_id}/permission-mode")
+async def set_permission_mode(process_id: str, request: PermissionModeRequest):
+    """Set the permission mode for an SDK session.
+
+    Args:
+        process_id: ID of the SDK session
+        request: PermissionModeRequest with mode to set
+
+    Returns:
+        Success status with new mode
+    """
+    if not SDK_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="claude-agent-sdk not installed"
+        )
+
+    manager = get_sdk_session_manager()
+    session = manager.get_session(process_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {process_id} not found")
+
+    session.permission_mode = request.mode
+    return {"success": True, "process_id": process_id, "mode": request.mode}
+
+
+@router.post("/process/{process_id}/compact")
+async def compact_conversation(process_id: str, request: CompactRequest):
+    """Trigger conversation compaction for an SDK session.
+
+    Args:
+        process_id: ID of the SDK session
+        request: CompactRequest with optional instructions
+
+    Returns:
+        Success status
+    """
+    if not SDK_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="claude-agent-sdk not installed"
+        )
+
+    manager = get_sdk_session_manager()
+    session = manager.get_session(process_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {process_id} not found")
+
+    # Build compact command
+    compact_cmd = "/compact"
+    if request.instructions:
+        compact_cmd += f" {request.instructions}"
+
+    # Send through SDK session
+    try:
+        await manager.send_message(process_id, compact_cmd)
+        return {
+            "success": True,
+            "process_id": process_id,
+            "message": "Compaction initiated"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

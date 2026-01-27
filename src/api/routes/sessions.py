@@ -46,10 +46,13 @@ def write_to_tty(tty: str, message: str, submit: bool = True) -> dict:
     """Send text to a terminal session using AppleScript System Events.
 
     This activates Warp and uses System Events to type text and optionally press Enter.
-    Works with Warp terminal (and can be adapted for other terminals).
+
+    LIMITATION: This sends to the currently visible Warp tab. The user must have
+    the target session in the foreground. Warp doesn't expose an API to select
+    specific tabs by TTY.
 
     Args:
-        tty: TTY identifier (e.g., 's000' or '/dev/ttys000') - used for logging
+        tty: TTY identifier (e.g., 's000' or '/dev/ttys000') - for logging only
         message: Text to send to the session
         submit: If True, press Enter after typing the text
 
@@ -58,7 +61,7 @@ def write_to_tty(tty: str, message: str, submit: bool = True) -> dict:
     """
     import subprocess
 
-    # Normalize TTY format
+    # Normalize TTY format (for logging)
     if tty.startswith('s') and tty[1:].isdigit():
         tty_match = f"/dev/tty{tty}"
     elif not tty.startswith('/dev/'):
@@ -79,13 +82,14 @@ def write_to_tty(tty: str, message: str, submit: bool = True) -> dict:
         keystroke_cmd = f'keystroke "{escaped_message}"'
 
     # Use System Events to send keystrokes to Warp
+    # Note: Warp's process name is "stable", not "Warp"
     script = f'''
 tell application "Warp"
     activate
 end tell
-delay 0.1
+delay 0.15
 tell application "System Events"
-    tell process "Warp"
+    tell process "stable"
         {keystroke_cmd}
     end tell
 end tell
@@ -100,7 +104,7 @@ return "sent"
 
     output = result.stdout.strip()
     if result.returncode == 0:
-        return {"success": True, "tty_path": tty_match}
+        return {"success": True, "tty_path": tty_match, "note": "Sent to frontmost Warp tab"}
     else:
         raise RuntimeError(f"AppleScript error: {result.stderr or output}")
 
@@ -288,6 +292,61 @@ def get_conversation(session_id: str, limit: int = 0, follow_continuations: bool
                 "messages": messages,
                 "hasContinuation": has_continuation
             }
+
+    raise HTTPException(404, "Session not found")
+
+
+class DeleteMessageRequest(BaseModel):
+    """Request to delete a message from conversation."""
+    line_number: int
+
+
+@router.delete("/session/{session_id}/message")
+def delete_message(session_id: str, request: DeleteMessageRequest):
+    """Delete a specific message from a session's JSONL file.
+
+    Only removes the specified line, preserving all other content.
+    Returns the new total token count after deletion.
+    """
+    if not CLAUDE_PROJECTS_DIR.exists():
+        raise HTTPException(404, "Claude projects directory not found")
+
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        jsonl = project_dir / f"{session_id}.jsonl"
+        if jsonl.exists():
+            try:
+                # Read all lines
+                with open(jsonl, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+
+                # Validate line number
+                if request.line_number < 0 or request.line_number >= len(lines):
+                    raise HTTPException(400, f"Invalid line number {request.line_number}. File has {len(lines)} lines.")
+
+                # Remove the specified line
+                lines.pop(request.line_number)
+
+                # Write back to file
+                with open(jsonl, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+
+                # Re-extract conversation to get new token count
+                messages = extract_conversation(jsonl, limit=0, follow_continuations=False)
+                new_total_tokens = sum(msg.get('tokens', 0) for msg in messages)
+
+                return {
+                    "success": True,
+                    "deleted_line_number": request.line_number,
+                    "remaining_lines": len(lines),
+                    "new_total_tokens": new_total_tokens
+                }
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(500, f"Failed to delete message: {str(e)}")
 
     raise HTTPException(404, "Session not found")
 
