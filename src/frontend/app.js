@@ -1291,6 +1291,9 @@ function createCard(session, index = 0) {
     // Emoji activity trail (hieroglyphic history)
     const activityTrailHtml = renderEmojiTrail(session.activityLog, session.state === 'active');
 
+    // Tool history panel (expandable details)
+    const toolHistoryHtml = renderToolHistoryPanel(session.sessionId);
+
     // Polecat avatar for Gastown agents
     const agentType = session.isGastown ? getGastownAgentType(session.gastownRole || session.slug) : null;
     const polecatAvatarHtml = (agentType?.type === 'polecat')
@@ -1320,6 +1323,7 @@ function createCard(session, index = 0) {
             ${polecatAvatarHtml}
             ${summaryHtml}
             ${activityTrailHtml}
+            ${toolHistoryHtml}
             ${agentTreeHtml}
             ${backgroundShellsHtml}
             ${activitySummaryLogHtml}
@@ -2433,6 +2437,189 @@ function renderEmojiTrail(activityLog, isSessionActive = false) {
             <div class="trail-emojis">${emojisHtml}</div>
         </div>
     `;
+}
+
+// Render expandable tool history panel
+function renderToolHistoryPanel(sessionId) {
+    return `
+        <div class="tool-history-container" data-session-id="${escapeHtml(sessionId)}">
+            <button class="tool-history-toggle" onclick="toggleToolHistory('${escapeJsString(sessionId)}')">
+                <span class="toggle-icon">▶</span>
+                <span class="toggle-label">View Tool Details</span>
+                <span class="tool-error-badge hidden" title="Failed tools"></span>
+            </button>
+            <div class="tool-history-panel hidden"></div>
+        </div>
+    `;
+}
+
+// Toggle tool history panel visibility
+async function toggleToolHistory(sessionId) {
+    const container = document.querySelector(`.tool-history-container[data-session-id="${sessionId}"]`);
+    if (!container) return;
+
+    const panel = container.querySelector('.tool-history-panel');
+    const toggle = container.querySelector('.tool-history-toggle');
+    const icon = toggle.querySelector('.toggle-icon');
+
+    if (panel.classList.contains('hidden')) {
+        // Show panel and fetch data
+        panel.classList.remove('hidden');
+        icon.textContent = '▼';
+        panel.innerHTML = '<div class="loading">Loading tool history...</div>';
+
+        try {
+            const response = await fetch(`/api/session/${sessionId}/tools?limit=100`);
+            if (!response.ok) throw new Error('Failed to fetch tool history');
+
+            const data = await response.json();
+            renderToolHistoryContent(panel, data.tools);
+        } catch (err) {
+            panel.innerHTML = `<div class="error">Failed to load tool history: ${escapeHtml(err.message)}</div>`;
+        }
+    } else {
+        // Hide panel
+        panel.classList.add('hidden');
+        icon.textContent = '▶';
+    }
+}
+
+// Render tool history content inside the panel
+function renderToolHistoryContent(panel, tools) {
+    if (!tools || tools.length === 0) {
+        panel.innerHTML = '<div class="tool-history-empty">No tool history available</div>';
+        return;
+    }
+
+    const errorCount = tools.filter(t => t.is_error).length;
+    const container = panel.closest('.tool-history-container');
+    const badge = container?.querySelector('.tool-error-badge');
+
+    if (badge && errorCount > 0) {
+        badge.textContent = `${errorCount} failed`;
+        badge.classList.remove('hidden');
+    }
+
+    const toolsHtml = tools.map((tool, idx) => {
+        const isError = tool.is_error;
+        const toolName = tool.name || 'Unknown';
+        const timestamp = tool.timestamp ? formatActivityTime(tool.timestamp) : '';
+
+        // Get summary for the tool
+        const summary = getToolSummaryText(tool);
+
+        // Format input (truncated for display)
+        const inputStr = formatToolInput(tool);
+
+        // Format output (truncated)
+        const output = tool.output || '';
+        const outputTruncated = output.length > 500 ? output.slice(0, 500) + '...' : output;
+
+        return `
+            <div class="tool-history-item ${isError ? 'error' : ''}" data-tool-idx="${idx}">
+                <div class="tool-item-header" onclick="toggleToolItemExpand(this)">
+                    <span class="tool-status-icon">${isError ? '❌' : '✅'}</span>
+                    <span class="tool-name">${escapeHtml(toolName)}</span>
+                    <span class="tool-summary">${escapeHtml(summary)}</span>
+                    <span class="tool-time">${timestamp}</span>
+                    <span class="tool-expand-icon">▶</span>
+                </div>
+                <div class="tool-item-details hidden">
+                    ${inputStr ? `
+                        <div class="tool-input">
+                            <div class="detail-label">Input:</div>
+                            <pre class="detail-content">${escapeHtml(inputStr)}</pre>
+                        </div>
+                    ` : ''}
+                    <div class="tool-output ${isError ? 'error-output' : ''}">
+                        <div class="detail-label">Output${isError ? ' (Error)' : ''}:</div>
+                        <pre class="detail-content">${escapeHtml(outputTruncated)}</pre>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    panel.innerHTML = `
+        <div class="tool-history-list">
+            ${errorCount > 0 ? `<div class="tool-error-summary">${errorCount} tool${errorCount > 1 ? 's' : ''} failed</div>` : ''}
+            ${toolsHtml}
+        </div>
+    `;
+}
+
+// Toggle individual tool item expansion
+function toggleToolItemExpand(header) {
+    const item = header.closest('.tool-history-item');
+    const details = item.querySelector('.tool-item-details');
+    const icon = header.querySelector('.tool-expand-icon');
+
+    if (details.classList.contains('hidden')) {
+        details.classList.remove('hidden');
+        icon.textContent = '▼';
+    } else {
+        details.classList.add('hidden');
+        icon.textContent = '▶';
+    }
+}
+
+// Get summary text for a tool
+function getToolSummaryText(tool) {
+    const name = tool.name || '';
+    const input = tool.input || {};
+
+    if (name === 'Bash') {
+        return input.description || (input.command || '').slice(0, 60);
+    } else if (name === 'Read') {
+        const path = input.file_path || '';
+        return path.split('/').pop() || 'file';
+    } else if (name === 'Write' || name === 'Edit') {
+        const path = input.file_path || '';
+        return path.split('/').pop() || 'file';
+    } else if (name === 'Grep') {
+        return `'${(input.pattern || '').slice(0, 40)}'`;
+    } else if (name === 'Glob') {
+        return (input.pattern || '').slice(0, 40);
+    } else if (name === 'Task') {
+        return input.description || '';
+    } else if (name === 'WebFetch') {
+        const url = input.url || '';
+        try {
+            return new URL(url).hostname;
+        } catch {
+            return url.slice(0, 40);
+        }
+    }
+    return '';
+}
+
+// Format tool input for display
+function formatToolInput(tool) {
+    const name = tool.name || '';
+    const input = tool.input || {};
+
+    if (name === 'Bash') {
+        return input.command || '';
+    } else if (name === 'Read') {
+        return input.file_path || '';
+    } else if (name === 'Write') {
+        return `${input.file_path || ''}\n---\n${(input.content || '').slice(0, 200)}${input.content?.length > 200 ? '...' : ''}`;
+    } else if (name === 'Edit') {
+        return `${input.file_path || ''}\n---\nold: ${(input.old_string || '').slice(0, 100)}\nnew: ${(input.new_string || '').slice(0, 100)}`;
+    } else if (name === 'Grep') {
+        return `pattern: ${input.pattern || ''}\npath: ${input.path || '.'}`;
+    } else if (name === 'Glob') {
+        return `pattern: ${input.pattern || ''}\npath: ${input.path || '.'}`;
+    } else if (name === 'WebFetch') {
+        return input.url || '';
+    }
+
+    // Generic: show full input as JSON
+    try {
+        return JSON.stringify(input, null, 2);
+    } catch {
+        return String(input);
+    }
 }
 
 // Show tooltip with activity details on hover

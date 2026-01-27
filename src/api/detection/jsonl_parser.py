@@ -402,6 +402,76 @@ def get_session_metadata(session_id: str, activity_tracker: callable = None) -> 
     return None
 
 
+def extract_detailed_tool_history(jsonl_file: Path, limit: int = 50) -> list[dict]:
+    """Extract detailed tool use history from JSONL, linking tool_use with tool_result.
+
+    Args:
+        jsonl_file: Path to the JSONL file
+        limit: Max number of tool entries to return (most recent)
+
+    Returns:
+        List of tool dicts with name, input, output, is_error, timestamp
+    """
+    tool_uses = {}  # tool_use_id -> tool info
+    tools = []
+
+    try:
+        with open(jsonl_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+
+                    # Extract tool_use from assistant messages
+                    if data.get('type') == 'assistant':
+                        msg = data.get('message', {})
+                        content = msg.get('content', [])
+                        timestamp = data.get('timestamp')
+
+                        for item in content:
+                            if isinstance(item, dict) and item.get('type') == 'tool_use':
+                                tool_id = item.get('id')
+                                if tool_id:
+                                    tool_uses[tool_id] = {
+                                        'id': tool_id,
+                                        'name': item.get('name', 'Unknown'),
+                                        'input': item.get('input', {}),
+                                        'timestamp': timestamp,
+                                        'output': None,
+                                        'is_error': False
+                                    }
+
+                    # Extract tool_result from user messages
+                    elif data.get('type') == 'user':
+                        msg = data.get('message', {})
+                        content = msg.get('content', [])
+                        tool_use_result = data.get('toolUseResult', {})
+
+                        for item in content:
+                            if isinstance(item, dict) and item.get('type') == 'tool_result':
+                                tool_id = item.get('tool_use_id')
+                                if tool_id and tool_id in tool_uses:
+                                    # Link result to tool use
+                                    tool_uses[tool_id]['output'] = item.get('content', '')
+                                    tool_uses[tool_id]['is_error'] = item.get('is_error', False)
+
+                                    # Add structured result if available
+                                    if isinstance(tool_use_result, dict):
+                                        tool_uses[tool_id]['stdout'] = tool_use_result.get('stdout', '')
+                                        tool_uses[tool_id]['stderr'] = tool_use_result.get('stderr', '')
+
+                                    # Move to completed list
+                                    tools.append(tool_uses[tool_id])
+
+                except json.JSONDecodeError:
+                    continue
+
+    except Exception:
+        pass
+
+    # Return most recent tools
+    return tools[-limit:] if limit > 0 else tools
+
+
 def get_recent_session_for_project(project_slug: str, activity_tracker: callable = None) -> dict | None:
     """Get the most recently modified non-agent session for a project."""
     project_dir = CLAUDE_PROJECTS_DIR / project_slug

@@ -23,6 +23,7 @@ from .detection.jsonl_parser import (
     extract_text_content,
     extract_tool_calls,
     extract_activity,
+    extract_detailed_tool_history,
 )
 from .detection.matcher import match_process_to_session
 

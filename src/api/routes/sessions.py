@@ -20,6 +20,7 @@ from ..session_detector import (
     get_activity_periods,
     get_activity_timestamp,
     get_all_active_state_files,
+    extract_detailed_tool_history,
     CLAUDE_PROJECTS_DIR,
 )
 from ..git_tracker import (
@@ -291,6 +292,34 @@ def get_conversation(session_id: str, limit: int = 0, follow_continuations: bool
             return {
                 "messages": messages,
                 "hasContinuation": has_continuation
+            }
+
+    raise HTTPException(404, "Session not found")
+
+
+@router.get("/session/{session_id}/tools")
+def get_tool_history(session_id: str, limit: int = 50):
+    """Get detailed tool history for a session with inputs, outputs, and error status.
+
+    Returns list of tools with:
+    - name: tool name (Bash, Read, etc.)
+    - input: tool input parameters
+    - output: tool output/result
+    - is_error: whether the tool failed
+    - timestamp: when the tool was used
+    """
+    if not CLAUDE_PROJECTS_DIR.exists():
+        raise HTTPException(404, "Claude projects directory not found")
+
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        jsonl = project_dir / f"{session_id}.jsonl"
+        if jsonl.exists():
+            tools = extract_detailed_tool_history(jsonl, limit)
+            return {
+                "tools": tools,
+                "count": len(tools)
             }
 
     raise HTTPException(404, "Session not found")
