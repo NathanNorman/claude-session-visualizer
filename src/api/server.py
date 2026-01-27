@@ -4,6 +4,10 @@ This module initializes the FastAPI application, registers routes,
 and manages background tasks for session monitoring.
 """
 
+# Load environment variables before other imports
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import json
 import subprocess
@@ -12,6 +16,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+# Initialize logging early
+from .logging_config import setup_logging, get_logger, get_ws_log_handler
+setup_logging()
+
+# Create namespace loggers
+logger = get_logger(__name__)
+ws_logger = get_logger(__name__, namespace='ws')
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -43,6 +56,7 @@ from .routes import (
     processes_router,
 )
 from .process_manager import get_process_manager
+from .sdk_session_manager import get_sdk_session_manager
 
 # Export for use by routes
 _summary_cache = get_summary_cache()
@@ -249,6 +263,15 @@ async def websocket_sessions(websocket: WebSocket):
                         'sessions': sessions,
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     })
+                elif msg.get('type') == 'subscribe_logs':
+                    # Handle log subscription
+                    enabled = msg.get('enabled', True)
+                    namespaces = msg.get('namespaces')  # None = all
+                    await ws_manager.subscribe_to_logs(
+                        websocket,
+                        enabled=enabled,
+                        namespaces=namespaces
+                    )
             except json.JSONDecodeError:
                 pass
 
@@ -270,11 +293,29 @@ def get_ws_status():
 # WebSocket endpoint for process output streaming
 @app.websocket("/ws/process/{process_id}")
 async def websocket_process(websocket: WebSocket, process_id: str):
-    """Stream process output to WebSocket client."""
+    """Stream process output to WebSocket client (PTY or SDK)."""
     await websocket.accept()
 
-    process_manager = get_process_manager()
-    await process_manager.stream_output(process_id, websocket)
+    # Check if this is an SDK session first
+    sdk_manager = get_sdk_session_manager()
+    sdk_session = sdk_manager.get_session(process_id)
+
+    if sdk_session:
+        # SDK session - add WebSocket client and keep connection alive
+        await sdk_manager.add_websocket_client(process_id, websocket)
+        try:
+            while True:
+                # Keep connection alive, handle incoming messages
+                data = await websocket.receive_json()
+                # Could handle control messages here if needed
+        except WebSocketDisconnect:
+            await sdk_manager.remove_websocket_client(process_id, websocket)
+        except Exception:
+            await sdk_manager.remove_websocket_client(process_id, websocket)
+    else:
+        # PTY process - use process manager
+        process_manager = get_process_manager()
+        await process_manager.stream_output(process_id, websocket)
 
 
 # Background tasks
@@ -282,7 +323,7 @@ async def watch_sessions_loop(interval: float = 2.0):
     """Background task that watches for session changes and broadcasts updates."""
     global _last_sessions_hash
 
-    print(f"[WS] Starting session watcher (interval={interval}s)")
+    ws_logger.info(f"Starting session watcher (interval={interval}s)")
 
     while True:
         try:
@@ -314,15 +355,15 @@ async def watch_sessions_loop(interval: float = 2.0):
                         'sessions': sessions,
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     })
-                    print(f"[WS] Broadcast update to {ws_manager.connection_count} clients")
+                    ws_logger.debug(f"Broadcast update to {ws_manager.connection_count} clients")
 
             await asyncio.sleep(interval)
 
         except asyncio.CancelledError:
-            print("[WS] Session watcher cancelled")
+            ws_logger.info("Session watcher cancelled")
             break
         except Exception as e:
-            print(f"[WS] Error in session watcher: {e}")
+            ws_logger.error(f"Error in session watcher: {e}")
             await asyncio.sleep(interval)
 
 
@@ -334,14 +375,30 @@ async def record_snapshots_background():
             for session in sessions:
                 record_session_snapshot(session)
         except Exception as e:
-            print(f"Error recording snapshots: {e}")
+            logger.error(f"Error recording snapshots: {e}")
         await asyncio.sleep(60)
+
+
+def _create_log_broadcast_callback():
+    """Create a callback that bridges sync logging to async WebSocket broadcast."""
+    def callback(log_entry):
+        # Schedule the async broadcast in the event loop
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(ws_manager.broadcast_log(log_entry.to_dict()))
+        except RuntimeError:
+            pass  # No event loop running, skip
+    return callback
 
 
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on app startup."""
     global _recording_task, _file_watcher_task
+
+    # Wire up log streaming to WebSocket
+    ws_log_handler = get_ws_log_handler()
+    ws_log_handler.set_broadcast_callback(_create_log_broadcast_callback())
 
     _recording_task = asyncio.create_task(record_snapshots_background())
     _file_watcher_task = asyncio.create_task(watch_sessions_loop(interval=2.0))
@@ -375,6 +432,53 @@ async def shutdown_event():
 frontend_dir = Path(__file__).parent.parent / "frontend"
 
 
+@app.get("/api/browse-folder")
+def browse_folder():
+    """Open a native folder picker dialog and return the selected path."""
+    import platform
+
+    try:
+        if platform.system() == "Darwin":  # macOS
+            # Use osascript for native folder picker
+            script = '''
+            tell application "System Events"
+                activate
+                set folderPath to POSIX path of (choose folder with prompt "Select a directory for Claude session")
+            end tell
+            return folderPath
+            '''
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 minute timeout for user interaction
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return {"path": result.stdout.strip()}
+            else:
+                return {"error": "No folder selected", "details": result.stderr}
+        else:
+            # For Linux/Windows, fall back to tkinter
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()  # Hide the main window
+            root.attributes('-topmost', True)  # Bring dialog to front
+
+            folder_path = filedialog.askdirectory(title="Select a directory for Claude session")
+            root.destroy()
+
+            if folder_path:
+                return {"path": folder_path}
+            else:
+                return {"error": "No folder selected"}
+    except subprocess.TimeoutExpired:
+        return {"error": "Dialog timed out"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/")
 def serve_index():
     return FileResponse(frontend_dir / "index.html")
@@ -393,5 +497,11 @@ def serve_shared_page(token: str):
 def serve_static(filename: str):
     file_path = frontend_dir / filename
     if file_path.exists() and file_path.is_file():
-        return FileResponse(file_path)
+        # Disable caching for JS/CSS during development
+        headers = {}
+        if filename.endswith(('.js', '.css')):
+            headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            headers["Pragma"] = "no-cache"
+            headers["Expires"] = "0"
+        return FileResponse(file_path, headers=headers)
     return FileResponse(frontend_dir / "index.html")

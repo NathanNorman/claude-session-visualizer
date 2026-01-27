@@ -8,11 +8,25 @@ from datetime import datetime, timezone
 
 from fastapi import WebSocket
 
+from .logging_config import get_logger
+
+# Create WebSocket logger
+logger = get_logger(__name__, namespace='ws')
+
+
+@dataclass
+class LogSubscription:
+    """Tracks a WebSocket client's log subscription."""
+    websocket: WebSocket
+    namespaces: set[str] = field(default_factory=set)  # Empty = all namespaces
+    enabled: bool = True
+
 
 @dataclass
 class ConnectionManager:
     """Manages WebSocket connections and broadcasts session updates."""
     active_connections: list[WebSocket] = field(default_factory=list)
+    log_subscribers: dict[WebSocket, LogSubscription] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def connect(self, websocket: WebSocket):
@@ -20,14 +34,16 @@ class ConnectionManager:
         await websocket.accept()
         async with self._lock:
             self.active_connections.append(websocket)
-        print(f"[WS] Client connected. Total: {len(self.active_connections)}")
+        logger.info(f"Client connected. Total: {len(self.active_connections)}")
 
     async def disconnect(self, websocket: WebSocket):
         """Remove a WebSocket connection."""
         async with self._lock:
             if websocket in self.active_connections:
                 self.active_connections.remove(websocket)
-        print(f"[WS] Client disconnected. Total: {len(self.active_connections)}")
+            # Also remove from log subscribers
+            self.log_subscribers.pop(websocket, None)
+        logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
         """Broadcast message to all connected clients."""
@@ -48,9 +64,81 @@ class ConnectionManager:
         for conn in disconnected:
             await self.disconnect(conn)
 
+    async def subscribe_to_logs(
+        self,
+        websocket: WebSocket,
+        enabled: bool = True,
+        namespaces: list[str] | None = None
+    ):
+        """Subscribe a WebSocket client to log streaming.
+
+        Args:
+            websocket: The WebSocket connection
+            enabled: Whether to enable log streaming
+            namespaces: List of namespaces to filter (None = all)
+        """
+        from .logging_config import get_ws_log_handler
+
+        async with self._lock:
+            if enabled:
+                self.log_subscribers[websocket] = LogSubscription(
+                    websocket=websocket,
+                    namespaces=set(namespaces) if namespaces else set(),
+                    enabled=True
+                )
+                logger.debug(f"Log subscriber added. Total: {len(self.log_subscribers)}")
+
+                # Send log history
+                ws_handler = get_ws_log_handler()
+                history = ws_handler.get_history(100)
+                await websocket.send_json({
+                    'type': 'log_history',
+                    'logs': history,
+                    'count': len(history)
+                })
+            else:
+                self.log_subscribers.pop(websocket, None)
+                logger.debug(f"Log subscriber removed. Total: {len(self.log_subscribers)}")
+
+    async def broadcast_log(self, log_entry: dict):
+        """Broadcast a log entry to all log subscribers.
+
+        Args:
+            log_entry: Dict with timestamp, level, namespace, message
+        """
+        if not self.log_subscribers:
+            return
+
+        namespace = log_entry.get('namespace', 'general')
+        disconnected = []
+
+        async with self._lock:
+            for ws, sub in self.log_subscribers.items():
+                if not sub.enabled:
+                    continue
+                # Filter by namespace if specified
+                if sub.namespaces and namespace not in sub.namespaces:
+                    continue
+
+                try:
+                    await ws.send_json({
+                        'type': 'log',
+                        'log': log_entry
+                    })
+                except Exception:
+                    disconnected.append(ws)
+
+        # Clean up disconnected clients
+        for ws in disconnected:
+            await self.disconnect(ws)
+
     @property
     def connection_count(self) -> int:
         return len(self.active_connections)
+
+    @property
+    def log_subscriber_count(self) -> int:
+        return len(self.log_subscribers)
 
 
 def compute_sessions_hash(sessions: list[dict]) -> str:
@@ -86,7 +174,7 @@ async def watch_sessions_loop(
     """
     last_sessions_hash = ""
 
-    print(f"[WS] Starting session watcher (interval={interval}s)")
+    logger.info(f"Starting session watcher (interval={interval}s)")
 
     while True:
         try:
@@ -120,13 +208,13 @@ async def watch_sessions_loop(
                         'sessions': sessions,
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     })
-                    print(f"[WS] Broadcast update to {ws_manager.connection_count} clients")
+                    logger.debug(f"Broadcast update to {ws_manager.connection_count} clients")
 
             await asyncio.sleep(interval)
 
         except asyncio.CancelledError:
-            print("[WS] Session watcher cancelled")
+            logger.info("Session watcher cancelled")
             break
         except Exception as e:
-            print(f"[WS] Error in session watcher: {e}")
+            logger.error(f"Error in session watcher: {e}")
             await asyncio.sleep(interval)

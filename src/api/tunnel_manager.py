@@ -15,6 +15,11 @@ from pathlib import Path
 from datetime import datetime, timezone
 import requests
 
+from .logging_config import get_logger
+
+# Create tunnel logger
+logger = get_logger(__name__, namespace='tunnel')
+
 
 # Configuration file for persisting machine connections
 CONFIG_DIR = Path.home() / ".claude" / "visualizer"
@@ -206,7 +211,7 @@ class TunnelManager:
                     self.next_port = tunnel.local_port + 1
 
         except Exception as e:
-            print(f"Error loading tunnel config: {e}")
+            logger.error(f"Error loading tunnel config: {e}")
 
     def _save_config(self):
         """Save machine configurations."""
@@ -230,7 +235,7 @@ class TunnelManager:
             with open(MACHINES_CONFIG, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
-            print(f"Error saving tunnel config: {e}")
+            logger.error(f"Error saving tunnel config: {e}")
 
     def _get_next_port(self) -> int:
         """Get next available local port."""
@@ -380,7 +385,7 @@ class TunnelManager:
                 with self._lock:
                     for name, tunnel in self.tunnels.items():
                         if tunnel.auto_reconnect and not tunnel.is_connected():
-                            print(f"Reconnecting to {name}...")
+                            logger.info(f"Reconnecting to {name}...")
                             tunnel.connect()
 
         self._monitor_thread = threading.Thread(target=monitor_loop, daemon=True)

@@ -5,9 +5,13 @@ stream output to WebSocket clients, and handle stdin injection.
 """
 
 import asyncio
+import fcntl
 import os
 import pty
 import signal
+import struct
+import termios
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -15,6 +19,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import WebSocket
+
+from .logging_config import get_logger
+
+# Create PTY logger
+logger = get_logger(__name__, namespace='pty')
 
 
 @dataclass
@@ -73,6 +82,11 @@ class ProcessManager:
         # Create pseudo-terminal
         master_fd, slave_fd = pty.openpty()
 
+        # Set terminal window size (rows, cols, xpixel, ypixel)
+        # Claude Code needs this for proper TUI rendering
+        winsize = struct.pack('HHHH', 40, 120, 0, 0)  # 40 rows, 120 cols
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
+
         # Fork process
         pid = os.fork()
 
@@ -99,7 +113,6 @@ class ProcessManager:
             os.close(slave_fd)
 
             # Set non-blocking mode for master fd
-            import fcntl
             flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
             fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
@@ -142,6 +155,8 @@ class ProcessManager:
                             "timestamp": timestamp
                         })
 
+                        logger.debug(f"Read {len(data)} bytes from process {process.id}: {repr(data[:100])}")
+
                         # Broadcast to connected clients
                         await self._broadcast_output(process, data, timestamp)
                     else:
@@ -153,7 +168,7 @@ class ProcessManager:
                         break
                     raise
                 except Exception as e:
-                    print(f"[ProcessManager] Read error: {e}")
+                    logger.error(f"Read error: {e}")
                     await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
@@ -181,7 +196,9 @@ class ProcessManager:
         timestamp: str
     ):
         """Broadcast output to all connected WebSocket clients."""
+        logger.debug(f"_broadcast_output: process={process.id}, clients={len(process.websocket_clients)}, dataLen={len(data)}")
         if not process.websocket_clients:
+            logger.debug(f"No websocket clients for process {process.id}")
             return
 
         message = {
@@ -242,7 +259,7 @@ class ProcessManager:
         Args:
             process_id: ID of the process
             text: Text to send
-            newline: Whether to append newline
+            newline: Whether to append newline (sends Escape to submit for Claude Code)
         """
         process = self.processes.get(process_id)
         if not process:
@@ -251,12 +268,17 @@ class ProcessManager:
         if process.state != "running":
             raise ValueError(f"Process {process_id} is not running")
 
-        data = text
-        if newline and not text.endswith("\n"):
-            data += "\n"
+        # Write text to PTY, then Enter key after a small delay
+        # Claude Code's ink TUI needs time to process the text before Enter
+        logger.debug(f"Writing to process {process_id}: {repr(text[:50])}")
+        os.write(process.pty_master_fd, text.encode("utf-8"))
 
-        # Write to PTY master
-        os.write(process.pty_master_fd, data.encode("utf-8"))
+        if newline:
+            # Delay to let ink TUI process the text before Enter
+            # 50ms wasn't quite enough - "Wandering..." appeared but response was garbled
+            time.sleep(0.1)
+            os.write(process.pty_master_fd, b"\r")
+            logger.debug(f"Sent Enter key to process {process_id}")
 
     async def kill(self, process_id: str, force: bool = False):
         """Terminate a process.
@@ -314,6 +336,7 @@ class ProcessManager:
 
         # Add client to broadcast list
         process.websocket_clients.add(websocket)
+        logger.debug(f"WebSocket client connected for process {process_id}, total clients: {len(process.websocket_clients)}")
 
         # Send buffered history
         history_lines = [entry["data"] for entry in process.output_buffer]
@@ -344,6 +367,7 @@ class ProcessManager:
                     break
         finally:
             process.websocket_clients.discard(websocket)
+            logger.debug(f"WebSocket client disconnected for process {process_id}, remaining clients: {len(process.websocket_clients)}")
 
     def get_process(self, process_id: str) -> Optional[ManagedProcess]:
         """Get a process by ID."""
@@ -370,7 +394,7 @@ class ProcessManager:
                 try:
                     await self.kill(process_id, force=True)
                 except Exception as e:
-                    print(f"[ProcessManager] Cleanup error for {process_id}: {e}")
+                    logger.error(f"Cleanup error for {process_id}: {e}")
 
             self.processes.clear()
 

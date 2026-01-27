@@ -7,6 +7,11 @@ from pathlib import Path
 
 import httpx
 
+from ..logging_config import get_logger
+
+# Create Bedrock logger
+logger = get_logger(__name__, namespace='bedrock')
+
 from ..analytics import (
     get_last_activity_hash,
     save_activity_summary,
@@ -40,7 +45,7 @@ def get_bedrock_token() -> str | None:
             token_data = json.loads(BEDROCK_TOKEN_FILE.read_text())
             return token_data.get("access_token")
     except Exception as e:
-        print(f"Failed to read bedrock token: {e}")
+        logger.warning(f"Failed to read bedrock token: {e}")
     return None
 
 
@@ -172,7 +177,7 @@ Summary (format: "[verb]ing X -> Y", no quotes):"""
 
         return summary
     except Exception as e:
-        print(f"Activity summary generation failed for {session_id}: {e}")
+        logger.warning(f"Activity summary generation failed for {session_id}: {e}")
         return None
 
 
