@@ -82,7 +82,7 @@ Added git status to session detection:
 - All git operations have 10-second timeout
 
 ### GitHub Enterprise Support
-The `find_related_pr()` function sets `GH_HOST=github.toasttab.com` environment variable for Toast's GitHub Enterprise instance.
+The `find_related_pr()` function reads the `GH_HOST` environment variable to support GitHub Enterprise instances.
 
 ## Testing
 

@@ -1,9 +1,11 @@
 """Git operations for tracking session changes."""
 
+import os
 import subprocess
 import json
+from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -127,6 +129,55 @@ def get_git_status(cwd: str) -> Optional[GitStatus]:
     )
 
 
+def get_commits_in_range(cwd: str, start_time: datetime, end_time: datetime) -> list[GitCommit]:
+    """Get commits made within a specific time range.
+
+    Useful for finding commits that occurred during a session's active window.
+
+    Args:
+        cwd: Working directory path
+        start_time: Start of time range (datetime object)
+        end_time: End of time range (datetime object)
+
+    Returns:
+        List of GitCommit objects within the time range
+    """
+    try:
+        # Format timestamps for git --since/--until
+        since_str = start_time.strftime('%Y-%m-%dT%H:%M:%S')
+        until_str = end_time.strftime('%Y-%m-%dT%H:%M:%S')
+
+        format_str = '%H|%h|%s|%an|%aI'
+        output, success = run_git(
+            cwd, 'log',
+            f'--since={since_str}',
+            f'--until={until_str}',
+            f'--format={format_str}'
+        )
+
+        if not success or not output:
+            return []
+
+        commits = []
+        for line in output.strip().split('\n'):
+            if not line or '|' not in line:
+                continue
+            parts = line.split('|', 4)
+            if len(parts) >= 5:
+                commits.append(GitCommit(
+                    sha=parts[0],
+                    short_sha=parts[1],
+                    message=parts[2],
+                    author=parts[3],
+                    timestamp=parts[4],
+                    files_changed=0  # Skip files count for performance
+                ))
+
+        return commits
+    except Exception:
+        return []
+
+
 def get_recent_commits(cwd: str, limit: int = 5) -> list[GitCommit]:
     """Get recent commits.
 
@@ -213,7 +264,7 @@ def find_related_pr(cwd: str, branch: str) -> Optional[dict]:
             capture_output=True,
             text=True,
             timeout=10,
-            env={'GH_HOST': 'github.toasttab.com'}  # Support GitHub Enterprise
+            env={**os.environ, 'GH_HOST': os.getenv('GH_HOST', '')}  # Support GitHub Enterprise
         )
         if result.returncode == 0:
             return json.loads(result.stdout)

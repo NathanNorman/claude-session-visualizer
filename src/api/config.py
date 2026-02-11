@@ -71,10 +71,10 @@ SUMMARY_CACHE_TTL = 300
 # Bedrock API Configuration
 # ============================================================================
 
-# Toast Bedrock proxy URL for AI summaries
+# Bedrock proxy URL for AI summaries
 BEDROCK_PROXY_URL = os.getenv(
     "BEDROCK_PROXY_URL",
-    "https://bedrock-internal.eng.toasttab.com/inference"
+    "https://bedrock-runtime.us-east-1.amazonaws.com"
 )
 
 # Model to use for activity summaries (Haiku for cost efficiency)
