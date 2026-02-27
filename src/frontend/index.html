@@ -17,21 +17,21 @@
         <div id="status">
             <span id="session-count">0 sessions</span>
             <span id="last-update">--</span>
-            <button id="sound-toggle" class="icon-button" onclick="soundManager.toggle(); soundManager.updateMuteIndicator(); showToast(soundManager.enabled ? '🔊 Sound enabled' : '🔇 Sound muted');" title="Toggle sound (M)">
-                🔊
+            <button id="sound-toggle" class="icon-button" onclick="soundManager.toggle(); soundManager.updateMuteIndicator(); showToast(soundManager.enabled ? 'Sound enabled' : 'Sound muted');" title="Toggle sound (M)">
+                <span data-icon="volume-2" data-icon-size="16"></span>
             </button>
             <button id="sound-settings" class="icon-button" onclick="showSoundSettings()" title="Sound settings (Shift+S)">
-                ⚙️
+                <span data-icon="settings" data-icon-size="16"></span>
             </button>
             <button id="analytics-button" class="icon-button" title="Analytics" onclick="toggleAnalytics()">
-                📊
+                <span data-icon="bar-chart-3" data-icon-size="16"></span>
             </button>
             <button id="machines-button" class="icon-button" title="Manage machines" onclick="showMachinesModal()">
-                🖥️
+                <span data-icon="monitor" data-icon-size="16"></span>
             </button>
             <span id="machine-count" class="machine-count"></span>
             <button id="notification-toggle" class="icon-button" title="Toggle notifications">
-                🔔
+                <span data-icon="bell" data-icon-size="16"></span>
             </button>
         </div>
     </header>
@@ -39,7 +39,7 @@
     <nav class="view-tabs">
         <div class="tab-indicator"></div>
         <button class="tab-button active" onclick="switchView('mission-control')" data-view="mission-control">
-            🎛️ Mission Control
+            <span data-icon="sliders-horizontal" data-icon-size="16"></span> Mission Control
         </button>
         <button class="tab-button" onclick="switchView('sessions')" data-view="sessions">
             Sessions
@@ -51,14 +51,14 @@
             Analytics
         </button>
         <button class="tab-button" onclick="switchView('graveyard')" data-view="graveyard">
-            🪦 Graveyard
+            <span data-icon="skull" data-icon-size="16"></span> Graveyard
         </button>
     </nav>
 
     <div id="main-content" role="main">
     <div id="sessions-view" class="view">
         <div id="filters">
-            <input type="text" id="search" placeholder="🔍 Search sessions...">
+            <input type="text" id="search" placeholder="Search sessions...">
             <select id="status-filter">
                 <option value="all">All Sessions</option>
                 <option value="active">Active Only</option>
@@ -66,9 +66,9 @@
             </select>
             <button id="clear-filters">Clear</button>
             <div class="filter-divider"></div>
-            <button id="view-mode-toggle" class="icon-button" onclick="toggleCardMode()" title="Toggle compact/detailed view (v)">📋</button>
-            <button id="focus-mode-toggle" class="icon-button" onclick="toggleFocusMode()" title="Focus on active sessions (f)">🎯</button>
-            <button id="refresh-sessions" class="icon-button" onclick="forceRefreshSessions()" title="Refresh all session data">🔄</button>
+            <button id="view-mode-toggle" class="icon-button" onclick="toggleCardMode()" title="Toggle compact/detailed view (v)"><span data-icon="clipboard-list" data-icon-size="16"></span></button>
+            <button id="focus-mode-toggle" class="icon-button" onclick="toggleFocusMode()" title="Focus on active sessions (f)"><span data-icon="target" data-icon-size="16"></span></button>
+            <button id="refresh-sessions" class="icon-button" onclick="forceRefreshSessions()" title="Refresh all session data"><span data-icon="refresh-cw" data-icon-size="16"></span></button>
         </div>
         <main id="sessions-container"></main>
     </div>
@@ -86,7 +86,7 @@
                     <option value="24">Last 24 hours</option>
                     <option value="48">Last 2 days</option>
                 </select>
-                <button class="refresh-btn" onclick="refreshTimeline()" title="Refresh timeline">🔄</button>
+                <button class="refresh-btn" onclick="refreshTimeline()" title="Refresh timeline"><span data-icon="refresh-cw" data-icon-size="14"></span></button>
             </div>
         </div>
         <div class="timeline-legend">
@@ -114,7 +114,7 @@
 
     <div id="mission-control-view" class="view active">
         <div class="mission-control-header">
-            <h2>🎛️ Mission Control</h2>
+            <h2><span data-icon="sliders-horizontal" data-icon-size="18"></span> Mission Control</h2>
             <div class="mission-control-status">
                 <div class="mc-sdk-toggle">
                     <label class="toggle-label">
@@ -125,7 +125,7 @@
                     <span id="mc-sdk-status" class="sdk-status"></span>
                 </div>
                 <span id="mc-connection-status" class="mc-status-indicator">● Disconnected</span>
-                <button id="mc-refresh" class="icon-button" title="Refresh">🔄</button>
+                <button id="mc-refresh" class="icon-button" title="Refresh"><span data-icon="refresh-cw" data-icon-size="16"></span></button>
             </div>
         </div>
         <div class="mission-control-grid">
@@ -190,7 +190,7 @@
                             <!-- Compact button with optional instructions -->
                             <div class="mc-compact-group">
                                 <button id="mc-compact-btn" class="mc-compact-btn" onclick="toggleCompactInput()" title="Compact conversation">
-                                    📦 Compact
+                                    <span data-icon="package" data-icon-size="14"></span> Compact
                                 </button>
                                 <div id="mc-compact-input" class="mc-compact-input hidden">
                                     <input type="text" id="mc-compact-instructions" placeholder="Optional: focus on..."
@@ -217,7 +217,7 @@
                         </button>
                         <div id="mc-input" class="mc-input" contenteditable="true"
                              data-placeholder="Type a message..." spellcheck="false"></div>
-                        <button id="mc-send-btn" class="mc-send-btn" title="Send (Cmd+Enter)">➤</button>
+                        <button id="mc-send-btn" class="mc-send-btn" title="Send (Cmd+Enter)"><span data-icon="send" data-icon-size="16"></span></button>
                         <!-- Slash command autocomplete dropdown -->
                         <div id="mc-autocomplete" class="mc-autocomplete hidden"></div>
                         <!-- Unified slash commands picker -->
@@ -255,7 +255,7 @@
                         <input type="text" id="spawn-directory" placeholder="/path/to/project"
                                onkeydown="if(event.key==='Enter') spawnSession()">
                         <button class="spawn-browse-btn" onclick="browseForFolder()" title="Browse for folder">
-                            📂
+                            <span data-icon="folder-open" data-icon-size="16"></span>
                         </button>
                     </div>
                 </div>
@@ -275,13 +275,13 @@
 
     <div id="graveyard-view" class="view">
         <div class="graveyard-header">
-            <h2>🪦 Session Graveyard</h2>
+            <h2><span data-icon="skull" data-icon-size="18"></span> Session Graveyard</h2>
             <div class="graveyard-controls">
                 <div class="graveyard-search-container">
                     <input type="text" id="graveyard-search" class="graveyard-search"
                            placeholder="Search by name, path, or branch..."
                            onkeydown="if(event.key==='Enter') searchGraveyard()">
-                    <button class="search-btn" onclick="searchGraveyard()" title="Search sessions">🔍</button>
+                    <button class="search-btn" onclick="searchGraveyard()" title="Search sessions"><span data-icon="search" data-icon-size="14"></span></button>
                     <button id="graveyard-clear-search" class="clear-search-btn hidden"
                             onclick="clearGraveyardSearch()" title="Clear search and show all sessions">✕</button>
                     <label class="search-content-toggle" title="Search inside conversation content (slower but finds more)">
@@ -298,7 +298,7 @@
                     <option value="48">Last 2 days</option>
                     <option value="168">Last 7 days</option>
                 </select>
-                <button class="refresh-btn" onclick="refreshGraveyard()" title="Refresh graveyard">🔄</button>
+                <button class="refresh-btn" onclick="refreshGraveyard()" title="Refresh graveyard"><span data-icon="refresh-cw" data-icon-size="14"></span></button>
                 <span id="graveyard-count" class="graveyard-count">0 sessions</span>
             </div>
         </div>
@@ -317,7 +317,7 @@
     <div id="delete-message-modal" class="delete-modal hidden">
         <div class="delete-modal-content">
             <div class="delete-modal-header">
-                <span class="delete-modal-icon">🗑️</span>
+                <span class="delete-modal-icon"><span data-icon="trash-2" data-icon-size="18"></span></span>
                 <span class="delete-modal-title">Delete Message</span>
             </div>
             <div class="delete-modal-body">
@@ -336,7 +336,7 @@
     <div id="debug-panel" class="debug-panel hidden">
         <div class="debug-panel-header">
             <div class="debug-panel-title">
-                <span class="debug-icon">🐛</span>
+                <span class="debug-icon"><span data-icon="bug" data-icon-size="16"></span></span>
                 <span>Debug Console</span>
             </div>
             <div class="debug-panel-controls">
@@ -375,9 +375,10 @@
 
     <!-- Debug Panel Toggle Button -->
     <button id="debug-toggle-btn" class="debug-toggle-btn" onclick="Logger.togglePanel()" title="Toggle debug panel (Ctrl+`)">
-        🐛
+        <span data-icon="bug" data-icon-size="16"></span>
     </button>
 
+    <script src="icons.js?v=1"></script>
     <script src="app.js?v=23"></script>
 </body>
 </html>

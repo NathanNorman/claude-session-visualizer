@@ -10,6 +10,15 @@
 }
 
 /* ==========================================================================
+   SVG Icon Base Styles
+   ========================================================================== */
+
+.icon { display: inline-block; vertical-align: middle; flex-shrink: 0; }
+button .icon, .icon-button .icon { vertical-align: -0.125em; }
+.icon.status-dot { margin-right: 4px; }
+.action-menu button .icon { margin-right: 6px; }
+
+/* ==========================================================================
    Loading Spinner Animation
    ========================================================================== */
 
@@ -2572,9 +2581,6 @@ body.keyboard-mode .session-card .card-number {
     line-height: 1.4;
 }
 
-.ai-summary::before {
-    content: '🤖 ';
-}
 
 /* Feature 16: Share Modal */
 .share-modal {
@@ -8649,10 +8655,6 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.graveyard-group-header::before {
-    content: "📁";
-    font-size: 14px;
-}
 
 .graveyard-group-sessions {
     display: flex;

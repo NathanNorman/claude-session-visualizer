@@ -407,7 +407,7 @@ class SoundManager {
     updateMuteIndicator() {
         const button = document.getElementById('sound-toggle');
         if (button) {
-            button.textContent = this.enabled ? '🔊' : '🔇';
+            button.innerHTML = this.enabled ? icon('volume-2', {size:16}) : icon('volume-x', {size:16});
             button.title = this.enabled ? 'Mute sounds (M)' : 'Unmute sounds (M)';
         }
     }
@@ -887,7 +887,7 @@ async function saveAsTemplate(session) {
     const template = {
         name,
         description,
-        icon: '📝',
+        icon: 'pencil',
         config: {
             initialPrompt: '',
             sourceSession: {
@@ -1015,7 +1015,7 @@ function showSoundSettings() {
     showModal(`
         <div class="sound-settings">
             <div class="settings-header">
-                <h2>🔊 Sound Settings</h2>
+                <h2>${icon('volume-2', {size:18})} Sound Settings</h2>
                 <button onclick="closeModal()" class="modal-close">Close</button>
             </div>
 
@@ -1331,9 +1331,9 @@ function createCard(session, index = 0) {
 
     // Activity status for Mission Control style display
     const activityStatus = getActivityStatus(session.lastActivity);
-    let stateEmoji = '🟢';  // active
+    let stateEmoji = statusDot('active');
     if (session.state !== 'active') {
-        stateEmoji = activityStatus.isStale ? '🟠' : '🟡';
+        stateEmoji = activityStatus.isStale ? statusDot('stale') : statusDot('waiting');
     }
 
     // Activity badge HTML - always use activityStatus for consistent display
@@ -1348,12 +1348,12 @@ function createCard(session, index = 0) {
     // Feature 20: Git Status display
     const gitHtml = session.git ? `
         <div class="git-status" onclick="event.stopPropagation(); showGitDetails('${escapeJsString(session.sessionId)}')">
-            <span class="git-branch">🌿 ${escapeHtml(session.git.branch)}</span>
+            <span class="git-branch">${icon('git-branch', {size:14})} ${escapeHtml(session.git.branch)}</span>
             ${session.git.uncommitted ? `
                 <span class="git-uncommitted">
-                    ⚠️ ${session.git.modified_count} uncommitted
+                    ${icon('alert-triangle', {size:14})} ${session.git.modified_count} uncommitted
                 </span>
-            ` : '<span class="git-clean">✓ clean</span>'}
+            ` : `<span class="git-clean">${icon('check', {size:12})} clean</span>`}
             ${session.git.ahead > 0 ? `
                 <span class="git-ahead">↑${session.git.ahead}</span>
             ` : ''}
@@ -1364,7 +1364,7 @@ function createCard(session, index = 0) {
     const activitySummaryLogHtml = renderActivitySummaryLog(session.activitySummaries);
 
     // State source indicator (hooks = real-time, polling = heuristic)
-    const stateIcon = session.stateSource === 'hooks' ? '<span class="state-source-indicator" title="Real-time hooks detection">⚡</span>' : '';
+    const stateIcon = session.stateSource === 'hooks' ? `<span class="state-source-indicator" title="Real-time hooks detection">${icon('zap', {size:14})}</span>` : '';
 
     // Current activity display (only when hooks-based and active)
     // Agent tree display (spawned agents)
@@ -1392,15 +1392,15 @@ function createCard(session, index = 0) {
             <div class="card-actions">
                 <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${escapeJsString(session.sessionId)}')">⋮</button>
                 <div class="action-menu hidden" id="menu-${session.sessionId}">
-                    <button onclick="event.stopPropagation(); copySessionId('${escapeJsString(session.sessionId)}')">📋 Copy Session ID</button>
-                    <button onclick="event.stopPropagation(); openJsonl('${escapeJsString(session.sessionId)}')">📂 Open JSONL File</button>
-                    <button onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">🔗 Copy Resume Command</button>
+                    <button onclick="event.stopPropagation(); copySessionId('${escapeJsString(session.sessionId)}')">${icon('clipboard-list', {size:14})} Copy Session ID</button>
+                    <button onclick="event.stopPropagation(); openJsonl('${escapeJsString(session.sessionId)}')">${icon('folder-open', {size:14})} Open JSONL File</button>
+                    <button onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">${icon('link', {size:14})} Copy Resume Command</button>
                     <hr class="menu-divider">
-                    <button onclick="event.stopPropagation(); refreshSummary('${escapeJsString(session.sessionId)}')">🤖 Generate AI Summary</button>
-                    <button onclick="event.stopPropagation(); shareSession('${escapeJsString(session.sessionId)}')">📤 Share Session</button>
-                    <button onclick="event.stopPropagation(); exportSession('${escapeJsString(session.sessionId)}')">📄 Export Markdown</button>
+                    <button onclick="event.stopPropagation(); refreshSummary('${escapeJsString(session.sessionId)}')">${icon('bot', {size:14})} Generate AI Summary</button>
+                    <button onclick="event.stopPropagation(); shareSession('${escapeJsString(session.sessionId)}')">${icon('share', {size:14})} Share Session</button>
+                    <button onclick="event.stopPropagation(); exportSession('${escapeJsString(session.sessionId)}')">${icon('file', {size:14})} Export Markdown</button>
                     <hr class="menu-divider">
-                    <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeJsString(session.slug)}')">⚠️ Kill Session</button>
+                    <button class="danger" onclick="event.stopPropagation(); killSession(${session.pid}, '${escapeJsString(session.slug)}')">${icon('alert-triangle', {size:14})} Kill Session</button>
                 </div>
             </div>
         </div>
@@ -1419,9 +1419,9 @@ function createCard(session, index = 0) {
                 <span>PID: ${session.pid || '--'}</span>
             </div>
             <div class="footer-right">
-                <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
+                <span class="session-duration" title="Session duration">${icon('clock', {size:14})} ${duration}</span>
                 ${activityBadgeHtml}
-                <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${escapeJsString(session.sessionId)}')" title="View Metrics">📊</button>
+                <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${escapeJsString(session.sessionId)}')" title="View Metrics">${icon('bar-chart-3', {size:14})}</button>
             </div>
             </div>
         </div>`;
@@ -1523,7 +1523,7 @@ function toggleFocusMode() {
 function updateViewModeButton() {
     const btn = document.getElementById('view-mode-toggle');
     if (btn) {
-        btn.textContent = cardDisplayMode === 'compact' ? '📋' : '📊';
+        btn.innerHTML = cardDisplayMode === 'compact' ? icon('clipboard-list', {size:16}) : icon('bar-chart-3', {size:16});
         btn.title = cardDisplayMode === 'compact' ? 'Switch to detailed view' : 'Switch to compact view';
     }
 }
@@ -1798,14 +1798,14 @@ async function shareSession(sessionId) {
 
         showModal(`
             <div class="share-modal">
-                <h3>📤 Share Session</h3>
+                <h3>${icon('share', {size:18})} Share Session</h3>
                 <p>Share this link to let others view this session snapshot:</p>
                 <input type="text" class="share-url" value="${escapeHtml(shareUrl)}" readonly onclick="this.select()">
                 <div class="modal-actions">
                     <button onclick="navigator.clipboard.writeText('${escapeJsString(shareUrl)}'); showToast('Link copied!');">Copy Link</button>
                     <button onclick="closeModal()">Close</button>
                 </div>
-                <p class="share-expiry">⏱️ Expires: ${new Date(data.expires_at).toLocaleDateString()}</p>
+                <p class="share-expiry">${icon('clock', {size:14})} Expires: ${new Date(data.expires_at).toLocaleDateString()}</p>
             </div>
         `);
     } catch (e) {
@@ -1933,7 +1933,7 @@ async function showGitDetails(sessionId) {
         showModal(`
             <div class="git-details">
                 <div class="git-details-header">
-                    <h3>🌿 Git Details</h3>
+                    <h3>${icon('git-branch', {size:18})} Git Details</h3>
                     <button onclick="closeModal()" class="modal-close">Close</button>
                 </div>
                 ${statusHtml}
@@ -1973,13 +1973,13 @@ async function showMetricsModal(sessionId) {
         showModal(`
             <div class="metrics-modal">
                 <div class="metrics-modal-header">
-                    <h3>📊 Session Metrics</h3>
+                    <h3>${icon('bar-chart-3', {size:18})} Session Metrics</h3>
                     <button onclick="closeModal()" class="modal-close">Close</button>
                 </div>
 
                 <div class="metrics-grid">
                     <div class="metrics-section">
-                        <h4>⚡ Response Times</h4>
+                        <h4>${icon('zap', {size:14})} Response Times</h4>
                         <dl class="metrics-stats">
                             <dt>Minimum</dt><dd>${metrics.responseTime.min}s</dd>
                             <dt>Average</dt><dd>${metrics.responseTime.avg}s</dd>
@@ -1989,7 +1989,7 @@ async function showMetricsModal(sessionId) {
                     </div>
 
                     <div class="metrics-section">
-                        <h4>🔧 Tool Usage</h4>
+                        <h4>${icon('wrench', {size:14})} Tool Usage</h4>
                         <ul class="tool-list">
                             ${toolListHtml}
                         </ul>
@@ -1999,7 +1999,7 @@ async function showMetricsModal(sessionId) {
                     </div>
 
                     <div class="metrics-section">
-                        <h4>📈 Session Stats</h4>
+                        <h4>${icon('trending-up', {size:14})} Session Stats</h4>
                         <dl class="metrics-stats">
                             <dt>Total turns</dt><dd>${metrics.turns}</dd>
                             <dt>Avg tokens/turn</dt><dd>${metrics.avgTokensPerTurn.toLocaleString()}</dd>
@@ -2148,18 +2148,18 @@ function updateCard(card, session) {
             ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
             : '';
         footerRight.innerHTML = `
-            <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
+            <span class="session-duration" title="Session duration">${icon('clock', {size:14})} ${duration}</span>
             ${activityBadgeHtml}
-            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${escapeJsString(session.sessionId)}')" title="View Metrics">📊</button>`;
+            <button class="metrics-btn" onclick="event.stopPropagation(); showMetricsModal('${escapeJsString(session.sessionId)}')" title="View Metrics">${icon('bar-chart-3', {size:14})}</button>`;
     }
 
     // Update slug with state emoji
     const slugEl = card.querySelector('.slug');
     if (slugEl) {
         const activityStatus = getActivityStatus(session.lastActivity);
-        let stateEmoji = '🟢';
+        let stateEmoji = statusDot('active');
         if (session.state !== 'active') {
-            stateEmoji = activityStatus.isStale ? '🟠' : '🟡';
+            stateEmoji = activityStatus.isStale ? statusDot('stale') : statusDot('waiting');
         }
         slugEl.innerHTML = `${stateEmoji} ${escapeHtml(session.slug)}`;
     }
@@ -2240,7 +2240,7 @@ function convertActivityLogForDisplay(activityLog) {
             });
         } else if (entry.event === 'UserPromptSubmit') {
             result.push({
-                text: '💬 User message',
+                text: 'User message',
                 timestamp: entry.timestamp
             });
         }
@@ -2323,7 +2323,7 @@ const ASCII_ANIMATIONS = {
     },
     // MCP tools - plugin pulse
     mcp: {
-        frames: ['⚡', '✦', '⚡', '✦'],
+        frames: ['✧', '✦', '✧', '✦'],
         interval: 400
     },
     // Default - simple spinner
@@ -2429,38 +2429,6 @@ function cleanupAnimationState(activeSessionIds) {
 // Emoji Activity Trail - Visual history of what Claude did
 // ============================================================================
 
-const ACTIVITY_EMOJIS = {
-    // Tools
-    'Read': '📖',
-    'Write': '✏️',
-    'Edit': '✏️',
-    'Bash': '⚡',
-    'Grep': '🔍',
-    'Glob': '📁',
-    'Task': '🤖',
-    'WebFetch': '🌐',
-    'TodoWrite': '📋',
-    'NotebookEdit': '📓',
-    // Events
-    'UserPromptSubmit': '💬',
-    'Stop': '🛑',
-    'SessionStart': '🚀',
-    'SessionEnd': '🏁',
-    // MCP tools get plugin emoji
-    'mcp': '🔌',
-    // Fallback
-    'default': '⚙️'
-};
-
-// Get emoji for a tool or event
-function getActivityEmoji(toolOrEvent) {
-    if (!toolOrEvent) return ACTIVITY_EMOJIS.default;
-
-    // Check for MCP tools
-    if (toolOrEvent.startsWith('mcp__')) return ACTIVITY_EMOJIS.mcp;
-
-    return ACTIVITY_EMOJIS[toolOrEvent] || ACTIVITY_EMOJIS.default;
-}
 
 // Convert activity log to emoji trail (deduplicated, only showing completed actions)
 function buildEmojiTrail(activityLog, maxLength = 30) {
@@ -2475,7 +2443,7 @@ function buildEmojiTrail(activityLog, maxLength = 30) {
             // Skip if same tool repeated consecutively
             if (entry.tool !== lastTool) {
                 trail.push({
-                    emoji: getActivityEmoji(entry.tool),
+                    emoji: toolIcon(entry.tool, 14),
                     tool: entry.tool,
                     description: entry.description || entry.tool,
                     timestamp: entry.timestamp
@@ -2485,7 +2453,7 @@ function buildEmojiTrail(activityLog, maxLength = 30) {
         } else if (entry.event === 'UserPromptSubmit') {
             // User prompt marks a new "chapter" - reset dedup
             trail.push({
-                emoji: getActivityEmoji('UserPromptSubmit'),
+                emoji: toolIcon('UserPromptSubmit', 14),
                 tool: 'User prompt',
                 description: 'New user message',
                 timestamp: entry.timestamp,
@@ -2615,7 +2583,7 @@ function renderToolHistoryContent(panel, tools) {
         return `
             <div class="tool-history-item ${isError ? 'error' : ''}" data-tool-idx="${idx}">
                 <div class="tool-item-header" onclick="toggleToolItemExpand(this)">
-                    <span class="tool-status-icon">${isError ? '❌' : '✅'}</span>
+                    <span class="tool-status-icon">${isError ? icon('x-circle', {size:14}) : icon('check-circle', {size:14})}</span>
                     <span class="tool-name">${escapeHtml(toolName)}</span>
                     <span class="tool-summary">${escapeHtml(summary)}</span>
                     <span class="tool-time">${timestamp}</span>
@@ -2763,42 +2731,18 @@ function hideActivityTooltip() {
 
 // Get icon for current activity based on activity type/tool (fallback for non-animated contexts)
 function getActivityIcon(activity) {
-    if (!activity) return '▶';
-
+    if (!activity) return icon('play', {size: 14});
     const toolName = activity.tool_name || '';
-
-    // Map tool names to icons
-    if (toolName === 'Bash') return '⚡';
-    if (toolName === 'Read') return '📖';
-    if (toolName === 'Write') return '✏️';
-    if (toolName === 'Edit') return '✏️';
-    if (toolName === 'Grep') return '🔍';
-    if (toolName === 'Glob') return '📁';
-    if (toolName === 'Task') return '🤖';
-    if (toolName === 'WebFetch') return '🌐';
-    if (toolName.startsWith('mcp__')) return '🔌';
-
-    // Activity type fallback
-    if (activity.type === 'tool_use') return '⚙️';
-    if (activity.type === 'user_prompt') return '💬';
-    if (activity.type === 'idle') return '⏸';
-
-    return '▶';
+    if (toolName) return toolIcon(toolName, 14);
+    if (activity.type === 'tool_use') return icon('settings', {size: 14});
+    if (activity.type === 'user_prompt') return icon('message-circle', {size: 14});
+    if (activity.type === 'idle') return icon('pause', {size: 14});
+    return icon('play', {size: 14});
 }
 
 // Get icon for agent type
 function getAgentTypeIcon(subagentType) {
-    if (!subagentType) return '🤖';
-
-    const type = subagentType.toLowerCase();
-    if (type.includes('explore')) return '🔍';
-    if (type.includes('plan')) return '📋';
-    if (type.includes('haiku')) return '⚡';
-    if (type.includes('code')) return '💻';
-    if (type.includes('test')) return '🧪';
-    if (type.includes('review')) return '👁️';
-
-    return '🤖';
+    return getSubagentTypeIcon(subagentType);
 }
 
 // Format duration from ISO timestamp to human-readable
@@ -2929,7 +2873,7 @@ function renderAgentTree(agents) {
         <div class="agent-tree">
             <div class="tree-header ${collapsed}" onclick="toggleAgentTree(this)">
                 <span class="tree-toggle">▼</span>
-                <span class="tree-label">🤖 ${agents.length} agent${agents.length > 1 ? 's' : ''}</span>
+                <span class="tree-label">${icon('bot', {size:14})} ${agents.length} agent${agents.length > 1 ? 's' : ''}</span>
             </div>
             <div class="tree-children" ${collapsed ? 'style="display:none"' : ''}>
                 ${agents.map((agent, idx) => `
@@ -2937,7 +2881,7 @@ function renderAgentTree(agents) {
                         <span class="tree-connector">${idx === agents.length - 1 ? '└─' : '├─'}</span>
                         <span class="agent-type">${getAgentTypeIcon(agent.subagent_type)}</span>
                         <span class="agent-desc" title="${escapeHtml(agent.description || '')}">${escapeHtml(agent.description || agent.subagent_type || 'Agent')}</span>
-                        <span class="agent-status ${agent.status}">${agent.status}${agent.background ? ' ⚡' : ''}</span>
+                        <span class="agent-status ${agent.status}">${agent.status}${agent.background ? ` ${icon('zap', {size:12})}` : ''}</span>
                         <span class="agent-duration">${formatAgentDuration(agent.started_at)}</span>
                     </div>
                 `).join('')}
@@ -2980,13 +2924,13 @@ function renderBackgroundShells(shells) {
         <div class="background-shells">
             <div class="shells-header ${collapsed}" onclick="toggleAgentTree(this)">
                 <span class="tree-toggle">▼</span>
-                <span class="shells-label">🖥️ ${shells.length} background${shells.length > 1 ? ' tasks' : ' task'}</span>
+                <span class="shells-label">${icon('monitor', {size:14})} ${shells.length} background${shells.length > 1 ? ' tasks' : ' task'}</span>
             </div>
             <div class="tree-children" style="display:none">
                 ${shells.map((shell, idx) => `
                     <div class="tree-node ${shell.computed_status}" title="${escapeHtml(shell.command || '')}">
                         <span class="tree-connector">${idx === shells.length - 1 ? '└─' : '├─'}</span>
-                        <span class="shell-icon">⚙️</span>
+                        <span class="shell-icon">${icon('settings', {size:14})}</span>
                         <span class="agent-desc">${escapeHtml(shell.description || 'Background task')}</span>
                         <span class="agent-status ${shell.computed_status}">${shell.computed_status}</span>
                         <span class="agent-duration">${formatDurationSeconds(shell.duration_seconds)}</span>
@@ -3075,7 +3019,7 @@ function parseTaskNotifications(content) {
         const resultText = resultMatch ? resultMatch[1].trim() : '';
         const outputFile = outputFileMatch ? outputFileMatch[1].trim() : '';
 
-        const statusIcon = status === 'completed' ? '✅' : status === 'failed' ? '❌' : '⏳';
+        const statusIcon = status === 'completed' ? icon('check-circle', {size:14}) : status === 'failed' ? icon('x-circle', {size:14}) : icon('hourglass', {size:14});
         const statusClass = status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'pending';
 
         // Create styled notification card
@@ -3104,29 +3048,6 @@ function parseTaskNotifications(content) {
     return parts.length > 0 ? parts.join('') : null;
 }
 
-/**
- * Get emoji for a tool name (used in activity trails)
- */
-function getToolEmoji(tool) {
-    const toolEmojis = {
-        'Read': '📖',
-        'Write': '✍️',
-        'Edit': '✏️',
-        'Bash': '💻',
-        'Grep': '🔍',
-        'Glob': '📁',
-        'Task': '🤖',
-        'TodoWrite': '📋',
-        'WebFetch': '🌐',
-        'AskUserQuestion': '❓',
-        'NotebookEdit': '📓',
-        'MultiEdit': '✏️',
-        'Skill': '⚡',
-        'EnterPlanMode': '📝',
-        'ExitPlanMode': '✅',
-    };
-    return toolEmojis[tool] || '🔧';
-}
 
 function updateStatus(activeCount, totalCount, timestamp) {
     const label = activeCount > 0
@@ -3243,8 +3164,8 @@ function renderGroups(groups) {
         const git = firstSession?.git;
         const gitStatusHtml = git ? `
             <div class="row-git-status">
-                <span class="git-branch">🌿 ${escapeHtml(git.branch)}</span>
-                ${git.uncommitted ? `<span class="git-uncommitted">⚠️ ${git.modified_count} uncommitted</span>` : '<span class="git-clean">✓ clean</span>'}
+                <span class="git-branch">${icon('git-branch', {size:14})} ${escapeHtml(git.branch)}</span>
+                ${git.uncommitted ? `<span class="git-uncommitted">${icon('alert-triangle', {size:14})} ${git.modified_count} uncommitted</span>` : `<span class="git-clean">${icon('check', {size:12})} clean</span>`}
                 ${git.ahead > 0 ? `<span class="git-ahead">↑${git.ahead}</span>` : ''}
             </div>
         ` : '';
@@ -3520,15 +3441,15 @@ function updateNotificationToggleUI() {
 function showNotificationSettings() {
     const permissionStatus = Notification.permission;
     const permissionHtml = permissionStatus === 'granted'
-        ? '<span class="permission-granted">✓ Permission granted</span>'
+        ? `<span class="permission-granted">${icon('check', {size:12})} Permission granted</span>`
         : permissionStatus === 'denied'
-            ? '<span class="permission-denied">✗ Permission denied (check browser settings)</span>'
-            : '<span class="permission-pending">⚠ Permission not requested yet</span>';
+            ? `<span class="permission-denied">${icon('x', {size:12})} Permission denied (check browser settings)</span>`
+            : `<span class="permission-pending">${icon('alert-triangle', {size:12})} Permission not requested yet</span>`;
 
     showModal(`
         <div class="notification-settings">
             <div class="settings-header">
-                <h2>🔔 Notification Settings</h2>
+                <h2>${icon('bell', {size:18})} Notification Settings</h2>
                 <button onclick="closeModal()" class="modal-close">Close</button>
             </div>
 
@@ -3558,7 +3479,7 @@ function showNotificationSettings() {
                         <input type="checkbox" id="notify-active"
                                ${notificationSettings.onActive ? 'checked' : ''}
                                onchange="toggleNotificationSetting('onActive', this)">
-                        <span>🟢 Session became active</span>
+                        <span>${statusDot('active')} Session became active</span>
                     </label>
                     <p class="setting-desc">Notify when a waiting session starts working</p>
                 </div>
@@ -3567,7 +3488,7 @@ function showNotificationSettings() {
                         <input type="checkbox" id="notify-waiting"
                                ${notificationSettings.onWaiting ? 'checked' : ''}
                                onchange="toggleNotificationSetting('onWaiting', this)">
-                        <span>🔵 Session needs input</span>
+                        <span>${icon('info', {size:14})} Session needs input</span>
                     </label>
                     <p class="setting-desc">Notify when an active session becomes idle (can be noisy)</p>
                 </div>
@@ -3576,7 +3497,7 @@ function showNotificationSettings() {
                         <input type="checkbox" id="notify-warning"
                                ${notificationSettings.onWarning ? 'checked' : ''}
                                onchange="toggleNotificationSetting('onWarning', this)">
-                        <span>⚠️ Context warning (80%)</span>
+                        <span>${icon('alert-triangle', {size:14})} Context warning (80%)</span>
                     </label>
                     <p class="setting-desc">Notify when a session reaches 80% context capacity</p>
                 </div>
@@ -3614,7 +3535,7 @@ function testNotification() {
         return;
     }
 
-    const notification = new Notification('🔔 Test Notification', {
+    const notification = new Notification('Test Notification', {
         body: 'Notifications are working correctly!',
         icon: '/favicon.ico',
         tag: 'test-notification'
@@ -3834,7 +3755,7 @@ function renderTimeline(sessions) {
         return `
             <div class="timeline-section">
                 <div class="timeline-section-header" title="${escapeHtml(cwd)}">
-                    📁 ${escapeHtml(repoName)}
+                    ${icon('folder', {size:14})} ${escapeHtml(repoName)}
                     <span class="timeline-section-count">${repoSessions.length}</span>
                 </div>
                 <div class="timeline-rows">${rowsHtml}</div>
@@ -3947,7 +3868,7 @@ function renderTimelineRow(session, periods, eventMarkers, startTime, endTime) {
                 <span class="session-slug">${escapeHtml(session.slug)}</span>
                 <span class="session-status ${statusClass}">${session.state}</span>
                 <span class="last-active ${isZombie ? 'zombie-warning' : ''}">
-                    ${isZombie ? '⚠️ ' : ''}${lastActiveAgo}
+                    ${isZombie ? icon('alert-triangle', {size:14}) + ' ' : ''}${lastActiveAgo}
                 </span>
             </div>
             <div class="timeline-track">
@@ -4023,8 +3944,7 @@ function showTimelinePopover(event, element) {
         const toolItems = Object.entries(period.tools)
             .sort((a, b) => b[1] - a[1]) // Sort by count descending
             .map(([tool, count]) => {
-                const emoji = ACTIVITY_EMOJIS[tool] || '⚙️';
-                return `<span class="tool-count">${emoji} ${escapeHtml(tool)} ×${count}</span>`;
+                return `<span class="tool-count">${toolIcon(tool, 14)} ${escapeHtml(tool)} ×${count}</span>`;
             })
             .join('');
         toolSummary = `<div class="popover-tools">${toolItems}</div>`;
@@ -4675,7 +4595,7 @@ async function showMachinesModal() {
             <div class="machine-status">
                 <span class="status-dot ${m.connected ? 'connected' : 'disconnected'}"></span>
                 ${m.connected ? 'Connected' : 'Disconnected'}
-                ${m.last_error ? `<span class="machine-error" title="${escapeHtml(m.last_error)}">⚠️</span>` : ''}
+                ${m.last_error ? `<span class="machine-error" title="${escapeHtml(m.last_error)}">${icon('alert-triangle', {size:14})}</span>` : ''}
             </div>
             <div class="machine-actions">
                 ${!m.connected ? `
@@ -4689,7 +4609,7 @@ async function showMachinesModal() {
     showModal(`
         <div class="machines-modal">
             <div class="modal-header">
-                <h2>🖥️ Multi-Machine Management</h2>
+                <h2>${icon('monitor', {size:18})} Multi-Machine Management</h2>
                 <button onclick="closeModal()" class="modal-close">Close</button>
             </div>
 
@@ -4764,10 +4684,10 @@ async function testConnection() {
     const result = await testMachineConnection(host, sshKey);
 
     if (result.status === 'success') {
-        statusEl.textContent = '✓ Connection successful';
+        statusEl.innerHTML = `${icon('check', {size:12})} Connection successful`;
         statusEl.className = 'connection-status success';
     } else {
-        statusEl.textContent = `✗ ${result.message}`;
+        statusEl.innerHTML = `${icon('x', {size:12})} ${escapeHtml(result.message)}`;
         statusEl.className = 'connection-status error';
     }
 }
@@ -4795,7 +4715,7 @@ async function handleAddMachine() {
         closeModal();
         showMachinesModal(); // Refresh the modal
     } catch (error) {
-        statusEl.textContent = `✗ ${error.message}`;
+        statusEl.innerHTML = `${icon('x', {size:12})} ${escapeHtml(error.message)}`;
         statusEl.className = 'connection-status error';
     }
 }
@@ -4996,7 +4916,7 @@ renderGroups = function(groups) {
     groups.forEach(group => {
         const isMachineGroup = multiMachineMode && group.machineKey;
         const icon = isMachineGroup
-            ? (group.machineKey === 'local' ? '💻 ' : '🖥️ ')
+            ? (group.machineKey === 'local' ? icon('laptop', {size:14}) + ' ' : icon('monitor', {size:14}) + ' ')
             : '';
 
         const groupDiv = document.createElement('div');
@@ -5889,9 +5809,9 @@ function renderInlineToolBlocks(tools, canHaveRunningTools = false) {
             <div class="mc-inline-tool ${isError ? 'error' : ''} ${isAgent ? 'agent' : ''} ${isRunning ? 'running' : ''}" data-tool-idx="${idx}">
                 <div class="mc-inline-tool-header" onclick="toggleInlineToolExpand(this)">
                     <span class="tool-expand-icon">▶</span>
-                    <span class="tool-status-icon">${isRunning ? '<span class="tool-running-pulse"></span>' : (isError ? '❌' : '✅')}</span>
+                    <span class="tool-status-icon">${isRunning ? '<span class="tool-running-pulse"></span>' : (isError ? icon('x-circle', {size:14}) : icon('check-circle', {size:14}))}</span>
                     <span class="tool-name">${escapeHtml(toolName)}</span>
-                    ${isAgent ? '<span class="tool-agent-badge">🤖 Agent</span>' : ''}
+                    ${isAgent ? `<span class="tool-agent-badge">${icon('bot', {size:14})} Agent</span>` : ''}
                     <span class="tool-summary">${escapeHtml(summary)}</span>
                     ${durationHtml}
                     <span class="tool-tokens" title="Input: ~${inputTokens} tokens, Output: ~${outputTokens} tokens">${tokenDisplay}</span>
@@ -6084,7 +6004,7 @@ function copyToolContent(button) {
     navigator.clipboard.writeText(decoded).then(() => {
         // Show success feedback
         const originalHtml = button.innerHTML;
-        button.innerHTML = '✓';
+        button.innerHTML = icon('check', {size:12});
         button.classList.add('copied');
         setTimeout(() => {
             button.innerHTML = originalHtml;
@@ -6295,7 +6215,7 @@ function renderConversation(messages) {
     const html = filteredMessages.map((msg, idx) => {
         const role = msg.role || 'unknown';
         const roleClass = role === 'user' ? 'human' : role === 'system' ? 'system' : 'assistant';
-        const roleLabel = role === 'user' ? '👤 You' : role === 'system' ? '📋 System' : '🤖 Assistant';
+        const roleLabel = role === 'user' ? `${icon('user', {size:14})} You` : role === 'system' ? `${icon('clipboard-list', {size:14})} System` : `${icon('bot', {size:14})} Assistant`;
         const timestamp = msg.timestamp ? formatTimeAgo(new Date(msg.timestamp)) : '';
 
         // Handle continuation markers specially
@@ -6306,7 +6226,7 @@ function renderConversation(messages) {
                 <div class="mc-continuation-marker" data-idx="${idx}" data-continuation-id="${continuationId}">
                     <div class="mc-continuation-line"></div>
                     <div class="mc-continuation-content">
-                        <span class="mc-continuation-icon">⬇️</span>
+                        <span class="mc-continuation-icon">${icon('chevrons-down', {size:14})}</span>
                         <span class="mc-continuation-text">Conversation continued...</span>
                         ${shortId ? `<span class="mc-continuation-id">${shortId}</span>` : ''}
                     </div>
@@ -6344,7 +6264,7 @@ function renderConversation(messages) {
                     <div class="mc-compaction-divider">
                         <div class="mc-compaction-line"></div>
                         <div class="mc-compaction-badge" onclick="toggleCompactionDetails('${markerId}')" title="Click to ${hasMore ? 'expand' : 'view'} summary">
-                            <span class="mc-compaction-icon">📋</span>
+                            <span class="mc-compaction-icon">${icon('clipboard-list', {size:14})}</span>
                             <span class="mc-compaction-label">Compacted${statsText}</span>
                             ${hasMore ? '<span class="mc-compaction-toggle">▶</span>' : ''}
                         </div>
@@ -6620,7 +6540,7 @@ function appendToMissionControlConversation(msg) {
     // Create message element
     const role = msg.role || 'assistant';
     const roleClass = role === 'user' ? 'human' : role === 'system' ? 'system' : 'assistant';
-    const roleLabel = role === 'user' ? '👤 You' : role === 'system' ? '📋 System' : '🤖 Assistant';
+    const roleLabel = role === 'user' ? `${icon('user', {size:14})} You` : role === 'system' ? `${icon('clipboard-list', {size:14})} System` : `${icon('bot', {size:14})} Assistant`;
     const timestamp = msg.timestamp ? formatTimeAgo(new Date(msg.timestamp)) : '';
 
     let displayContent = '';
@@ -6682,7 +6602,7 @@ function appendStreamingTextToConversation(text) {
         streamingEl.className = 'mc-message assistant mc-streaming-text';
         streamingEl.innerHTML = `
             <div class="mc-message-header">
-                <span class="mc-message-role">🤖 Assistant</span>
+                <span class="mc-message-role">${icon('bot', {size:14})} Assistant</span>
                 <span class="mc-message-time">now</span>
                 <span class="mc-live-indicator streaming" title="Streaming">●</span>
             </div>
@@ -6793,7 +6713,7 @@ async function loadRecentDirectories() {
 
         listEl.innerHTML = directories.map((dir, idx) => `
             <div class="spawn-recent-item" data-path-idx="${idx}" data-path="${escapeHtml(dir.path)}">
-                <span class="dir-icon">📁</span>
+                <span class="dir-icon">${icon('folder', {size:14})}</span>
                 <div class="dir-info">
                     <div class="dir-name">${escapeHtml(dir.name)}</div>
                     <div class="dir-path">${escapeHtml(dir.path)}</div>
@@ -6958,7 +6878,7 @@ async function loadDirectoryContents(path = null) {
         if (listContainer) {
             listContainer.innerHTML = `
                 <div class="directory-error">
-                    <span>⚠️ ${error.message}</span>
+                    <span>${icon('alert-triangle', {size:14})} ${error.message}</span>
                     <button class="btn btn-small" onclick="loadDirectoryContents()">Go Home</button>
                 </div>
             `;
@@ -6980,12 +6900,12 @@ function renderDirectoryList(directories) {
 
     const html = directories.map(dir => {
         const accessibleClass = dir.accessible ? '' : 'inaccessible';
-        const icon = dir.accessible ? '📁' : '🔒';
+        const dirIcon = dir.accessible ? icon('folder', {size:14}) : icon('lock', {size:14});
         const clickHandler = dir.accessible ? `onclick="navigateToDirectory('${dir.path.replace(/'/g, "\\'")}')"` : '';
 
         return `
             <div class="directory-item ${accessibleClass}" ${clickHandler}>
-                <span class="directory-icon">${icon}</span>
+                <span class="directory-icon">${dirIcon}</span>
                 <span class="directory-name">${escapeHtml(dir.name)}</span>
             </div>
         `;
@@ -7566,7 +7486,7 @@ function appendStructuredMessage(processId, msg) {
     const isUser = msg.role === 'user';
     const roleClass = isUser ? 'user-message' : 'assistant-message';
     const roleLabel = isUser ? 'You' : 'Claude';
-    const roleIcon = isUser ? '👤' : '🤖';
+    const roleIcon = isUser ? icon('user', {size:14}) : icon('bot', {size:14});
 
     // Render markdown for assistant messages, escape for user messages
     const renderedContent = isUser
@@ -7716,18 +7636,13 @@ function appendToolUseBlock(processId, msg) {
     const inputStr = JSON.stringify(msg.input, null, 2);
 
     // Get icon for tool type
-    const toolIcons = {
-        'Read': '📖', 'Write': '✍️', 'Edit': '📝', 'Bash': '💻',
-        'Glob': '🔍', 'Grep': '🔎', 'Task': '🤖', 'WebFetch': '🌐',
-        'MultiEdit': '📝', 'NotebookEdit': '📓', 'LS': '📁'
-    };
-    const icon = toolIcons[msg.name] || '⚙️';
+    const toolIconHtml = toolIcon(msg.name, 16);
 
     const html = `
         <div class="tool-use-block running" data-tool-id="${escapeHtml(toolId)}">
             <div class="tool-use-header" onclick="toggleToolDetails(this)">
                 <span class="tool-expand-icon">▶</span>
-                <span class="tool-icon">${icon}</span>
+                <span class="tool-icon">${toolIconHtml}</span>
                 <span class="tool-name">${escapeHtml(msg.name)}</span>
                 <span class="tool-summary">${escapeHtml(summary)}</span>
                 <span class="tool-status">
@@ -7897,7 +7812,7 @@ function showUserChoiceUI(processId, msg) {
 
     // Build HTML for each question
     let html = `<div class="sdk-user-choice" data-choice-id="${escapeHtml(choiceId)}">`;
-    html += `<div class="sdk-user-choice-header"><span>🤔</span> Claude needs your input</div>`;
+    html += `<div class="sdk-user-choice-header"><span>${icon('help-circle', {size:14})}</span> Claude needs your input</div>`;
 
     questions.forEach((q, qIndex) => {
         const question = q.question || q;
@@ -8085,7 +8000,7 @@ function showEditApprovalUI(processId, msg) {
         <div class="sdk-edit-approval" data-tool-id="${escapeHtml(toolUseId)}">
             <div class="sdk-edit-header">
                 <div class="sdk-edit-file-info">
-                    <span class="sdk-edit-icon">📝</span>
+                    <span class="sdk-edit-icon">${icon('pencil', {size:14})}</span>
                     <span class="sdk-edit-file-path">${escapeHtml(filePath || 'unknown file')}</span>
                     <span class="sdk-edit-tool-name">${escapeHtml(toolName)}</span>
                 </div>
@@ -8100,11 +8015,11 @@ function showEditApprovalUI(processId, msg) {
             <div class="sdk-edit-actions">
                 <button class="sdk-edit-btn sdk-edit-btn-approve"
                         onclick="approveEdit('${escapeHtml(processId)}', '${escapeHtml(toolUseId)}', true)">
-                    ✓ Approve
+                    ${icon('check', {size:12})} Approve
                 </button>
                 <button class="sdk-edit-btn sdk-edit-btn-reject"
                         onclick="approveEdit('${escapeHtml(processId)}', '${escapeHtml(toolUseId)}', false)">
-                    ✗ Reject
+                    ${icon('x', {size:12})} Reject
                 </button>
             </div>
         </div>
@@ -8215,7 +8130,7 @@ async function approveEdit(processId, toolUseId, approved) {
             if (actionsEl) {
                 actionsEl.innerHTML = `
                     <span class="sdk-edit-resolved-badge ${approved ? 'approved' : 'rejected'}">
-                        ${approved ? '✓ Approved' : '✗ Rejected'}
+                        ${approved ? icon('check', {size:12}) + ' Approved' : icon('x', {size:12}) + ' Rejected'}
                     </span>
                 `;
             }
@@ -8290,12 +8205,12 @@ function showSavedSessions(processId) {
     const sessionList = Object.entries(sessions);
 
     if (sessionList.length === 0) {
-        showLocalSystemMessage(processId, '📂', 'No saved sessions found. Sessions are saved automatically when you use them.');
+        showLocalSystemMessage(processId, icon('folder-open', {size:14}), 'No saved sessions found. Sessions are saved automatically when you use them.');
         return;
     }
 
     let html = `<div class="sdk-system-message">
-        <div class="sdk-system-header">📂 Saved Sessions</div>
+        <div class="sdk-system-header">${icon('folder-open', {size:14})} Saved Sessions</div>
         <div class="sdk-sessions-list">`;
 
     sessionList.sort((a, b) => new Date(b[1].savedAt) - new Date(a[1].savedAt));
@@ -8380,7 +8295,7 @@ async function handleSkillsCommand(processId, args) {
     } else {
         // Invoke a specific skill - send to Claude with skill prefix
         const skillName = args.trim();
-        showLocalSystemMessage(processId, '🎯', `Invoking skill: /${skillName}`);
+        showLocalSystemMessage(processId, icon('target', {size:14}), `Invoking skill: /${skillName}`);
 
         // Send the skill command to Claude
         try {
@@ -8417,7 +8332,7 @@ async function showAvailableSkills(processId) {
     ];
 
     let html = `<div class="sdk-system-message">
-        <div class="sdk-system-header">🎯 Available Skills</div>
+        <div class="sdk-system-header">${icon('target', {size:14})} Available Skills</div>
         <div class="sdk-skills-list">
             <table class="sdk-help-table">
                 <tr><th>Skill</th><th>Description</th></tr>`;
@@ -9122,7 +9037,7 @@ function renderSlashList(container, filter, skills = DEFAULT_SKILLS) {
                  onclick="selectSlashItem('/${escapeHtml(skill.name)}')"
                  onmouseenter="showSkillPreview('${escapeHtml(skill.name)}', this)"
                  onmouseleave="hideSkillPreview()">
-                <div class="mc-picker-item-icon skill">⚡</div>
+                <div class="mc-picker-item-icon skill">${icon('zap', {size:14})}</div>
                 <div class="mc-picker-item-content">
                     <div class="mc-picker-item-name">/${escapeHtml(skill.name)}</div>
                     <div class="mc-picker-item-desc">${escapeHtml(skill.description || '')}</div>
@@ -9443,7 +9358,7 @@ async function executeCompact() {
 function showCommandHelp(processId) {
     const helpLines = [
         '<div class="sdk-system-message">',
-        '<div class="sdk-system-header">📋 Available Commands</div>',
+        `<div class="sdk-system-header">${icon('clipboard-list', {size:14})} Available Commands</div>`,
         '<div class="sdk-help-content">',
         '<table class="sdk-help-table">',
         '<tr><th>Command</th><th>Description</th></tr>'
@@ -9505,7 +9420,7 @@ async function stopCurrentOperation(processId) {
 
     // For SDK sessions, we can try to send a cancel signal
     // For now, show a message - actual implementation depends on SDK support
-    const html = `<div class="sdk-system-message"><span class="sdk-system-icon">⏹️</span> Stop requested. If Claude is mid-response, the operation may complete.</div>`;
+    const html = `<div class="sdk-system-message"><span class="sdk-system-icon">${icon('circle-stop', {size: 14})}</span> Stop requested. If Claude is mid-response, the operation may complete.</div>`;
 
     if (process) {
         process.outputBuffer = (process.outputBuffer || '') + html;
@@ -9522,14 +9437,14 @@ async function stopCurrentOperation(processId) {
  */
 function showCommandHistory(processId) {
     if (commandHistory.length === 0) {
-        const html = `<div class="sdk-system-message"><span class="sdk-system-icon">📜</span> No command history yet.</div>`;
+        const html = `<div class="sdk-system-message"><span class="sdk-system-icon">${icon('scroll', {size:14})}</span> No command history yet.</div>`;
         appendTerminalHtml(html);
         return;
     }
 
     const historyHtml = [
         '<div class="sdk-system-message">',
-        '<div class="sdk-system-header">📜 Command History</div>',
+        `<div class="sdk-system-header">${icon('scroll', {size:14})} Command History</div>`,
         '<div class="sdk-history-list">'
     ];
 
@@ -9779,7 +9694,7 @@ function renderManagedProcessesInList(container) {
     if (managedProcesses.size === 0) return '';
 
     let html = '<div class="mc-managed-section">';
-    html += '<div class="mc-section-header">🖥️  Managed Sessions</div>';
+    html += `<div class="mc-section-header">${icon('monitor', {size:14})}  Managed Sessions</div>`;
 
     for (const [id, process] of managedProcesses) {
         const dirName = process.cwd.split('/').pop() || process.cwd;
@@ -9977,7 +9892,7 @@ function renderGraveyard(data, isSearch = false) {
     if (data.regular.length > 0) {
         const regularGroups = groupGraveyardByRepo(data.regular);
         html += '<div class="graveyard-section">';
-        html += '<div class="graveyard-section-header">📁 Regular Sessions</div>';
+        html += `<div class="graveyard-section-header">${icon('folder', {size:14})} Regular Sessions</div>`;
 
         for (const group of regularGroups) {
             html += `
@@ -10055,7 +9970,7 @@ function renderGraveyardCard(session) {
         const matchTypes = (session.matchType || []).join(', ');
         previewContent = `
             <div class="graveyard-matches">
-                <div class="match-types">📍 Found in: ${escapeHtml(matchTypes)}</div>
+                <div class="match-types">${icon('map-pin', {size:14})} Found in: ${escapeHtml(matchTypes)}</div>
                 ${snippetHtml}
             </div>
         `;
@@ -10083,9 +9998,9 @@ function renderGraveyardCard(session) {
         const recentActivities = postEvents.slice(-10); // Last 10 activities for row layout
         const activityHtml = recentActivities
             .map(a => {
-                const emoji = getToolEmoji(a.tool || 'unknown');
+                const toolIconHtml = toolIcon(a.tool || 'unknown', 14);
                 const desc = a.description || a.tool || 'Activity';
-                return `<span class="activity-item" title="${escapeHtml(desc)}">${emoji}</span>`;
+                return `<span class="activity-item" title="${escapeHtml(desc)}">${toolIconHtml}</span>`;
             })
             .join('');
         activityLogContent = `
@@ -10099,7 +10014,7 @@ function renderGraveyardCard(session) {
     return `
         <div class="graveyard-card${session.matchSnippets ? ' search-match' : ''}${session.hasActivityLog ? ' has-activity' : ''}" data-session-id="${session.sessionId}">
             <div class="graveyard-card-header">
-                <span class="graveyard-name">💀 ${escapeHtml(displayName)}</span>
+                <span class="graveyard-name">${icon('skull', {size:14})} ${escapeHtml(displayName)}</span>
                 <span class="graveyard-ended">${endedAgo}</span>
             </div>
             <div class="graveyard-card-meta">
@@ -10110,7 +10025,7 @@ function renderGraveyardCard(session) {
             ${activityLogContent}
             <div class="graveyard-card-actions">
                 <button class="graveyard-btn" onclick="event.stopPropagation(); takeOverSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Take over this session in the browser">
-                    ▶️ Take Over
+                    ${icon('play', {size:14})} Take Over
                 </button>
             </div>
         </div>
@@ -10145,7 +10060,7 @@ function showGraveyardDetails(sessionId) {
     showModal(`
         <div class="graveyard-details">
             <button class="modal-close-x" onclick="closeModal()" title="Close (Esc)">&times;</button>
-            <h2>💀 ${escapeHtml(displayName)}</h2>
+            <h2>${icon('skull', {size:18})} ${escapeHtml(displayName)}</h2>
             <div class="graveyard-details-meta">
                 <p><strong>Session ID:</strong> <code>${session.sessionId}</code></p>
                 <p><strong>Ended:</strong> ${endedAgo}</p>
@@ -10164,10 +10079,10 @@ function showGraveyardDetails(sessionId) {
 
             <div class="graveyard-details-actions">
                 <button class="btn-primary" onclick="takeOverSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">
-                    ▶️ Take Over Session
+                    ${icon('play', {size:14})} Take Over Session
                 </button>
                 <button class="btn-secondary" onclick="openJsonl('${escapeJsString(session.sessionId)}')">
-                    📂 Open JSONL File
+                    ${icon('folder-open', {size:14})} Open JSONL File
                 </button>
             </div>
         </div>
@@ -10222,7 +10137,7 @@ async function takeOverSession(sessionId, cwd) {
             ws: null,
             outputBuffer: `<div class="sdk-welcome-banner sdk-placeholder">
 <div class="sdk-banner-info">
-<div class="sdk-banner-title">📋 Taken Over Session</div>
+<div class="sdk-banner-title">${icon('clipboard-list', {size:14})} Taken Over Session</div>
 <div class="sdk-banner-model">${sessionId.substring(0, 8)}...</div>
 <div class="sdk-banner-cwd">${escapeHtml(sessionCwd)}</div>
 </div>
