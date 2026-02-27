@@ -3,8 +3,6 @@
 import pytest
 from src.api.detection.jsonl_parser import (
     extract_activity,
-    is_gastown_path,
-    extract_gastown_role_from_cwd,
     cwd_to_project_slug,
     extract_text_content,
     extract_tool_calls,
@@ -131,72 +129,6 @@ class TestExtractActivity:
         assert extract_activity(content_item) == "github: create_pr"
 
 
-class TestIsGastownPath:
-    """Tests for is_gastown_path function."""
-
-    def test_gt_suffix(self):
-        """Test paths ending with /gt."""
-        assert is_gastown_path("/Users/test/project/gt") is True
-
-    def test_gt_subdirectory(self):
-        """Test paths containing /gt/."""
-        assert is_gastown_path("/Users/test/gt/subdir") is True
-
-    def test_deacon_path(self):
-        """Test deacon paths."""
-        assert is_gastown_path("/home/user/project/deacon") is True
-
-    def test_mayor_path(self):
-        """Test mayor paths."""
-        assert is_gastown_path("/path/to/mayor/work") is True
-
-    def test_polecat_path(self):
-        """Test polecat paths."""
-        assert is_gastown_path("/project/polecats/worker1") is True
-
-    def test_regular_path(self):
-        """Test regular paths return False."""
-        assert is_gastown_path("/Users/test/regular-project") is False
-        assert is_gastown_path("/home/user/work") is False
-
-    def test_empty_path(self):
-        """Test empty path returns False."""
-        assert is_gastown_path("") is False
-        assert is_gastown_path(None) is False
-
-
-class TestExtractGastownRole:
-    """Tests for extract_gastown_role_from_cwd function."""
-
-    def test_rig_role(self):
-        """Test rig role extraction."""
-        assert extract_gastown_role_from_cwd("/project/rig") == "rig"
-
-    def test_deacon_role(self):
-        """Test deacon role extraction."""
-        assert extract_gastown_role_from_cwd("/path/deacon/work") == "deacon"
-
-    def test_mayor_role(self):
-        """Test mayor role extraction."""
-        assert extract_gastown_role_from_cwd("/gt/mayor") == "mayor"
-
-    def test_witness_role(self):
-        """Test witness role extraction."""
-        assert extract_gastown_role_from_cwd("/gt/witness/logs") == "witness"
-
-    def test_polecat_role(self):
-        """Test polecat role extraction."""
-        assert extract_gastown_role_from_cwd("/gt/polecats/worker") == "polecat"
-
-    def test_generic_gastown(self):
-        """Test generic gastown path."""
-        assert extract_gastown_role_from_cwd("/project/gt") == "gastown"
-
-    def test_non_gastown(self):
-        """Test non-gastown path returns None."""
-        assert extract_gastown_role_from_cwd("/regular/project") is None
-
-
 class TestCwdToProjectSlug:
     """Tests for cwd_to_project_slug function."""
 
@@ -236,11 +168,11 @@ class TestExtractTextContent:
         assert 'First part' in result
         assert 'Second part' in result
 
-    def test_truncation(self):
-        """Test long content is truncated."""
+    def test_long_content_returned_fully(self):
+        """Test long content is returned without truncation."""
         message = {'content': 'A' * 600}
         result = extract_text_content(message)
-        assert len(result) <= 500
+        assert len(result) == 600
 
 
 class TestExtractToolCalls:

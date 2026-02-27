@@ -26,8 +26,8 @@ class TestMatchProcessToSession:
         result = match_process_to_session(proc, sessions)
         assert result['sessionId'] == 'new'
 
-    def test_matches_closest_start_time(self):
-        """Test matching session with closest start time."""
+    def test_matches_most_recently_modified(self):
+        """Test matching session with highest file_mtime (most recently modified)."""
         proc = {'start_time': 1000.0}
 
         sessions = [
@@ -49,7 +49,7 @@ class TestMatchProcessToSession:
         ]
 
         result = match_process_to_session(proc, sessions)
-        assert result['sessionId'] == 'close'
+        assert result['sessionId'] == 'late'
 
     def test_handles_missing_timestamps(self):
         """Test handling of sessions without timestamps."""

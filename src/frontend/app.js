@@ -23,22 +23,6 @@ const API_URL_CHANGED = '/api/sessions/changed';
 const API_URL_ALL = '/api/sessions/all';
 let previousSessions = new Map();
 
-// Polecat avatar images for Gastown agents
-const POLECAT_IMAGES = [
-    'assets/polecats/polecat-rider.png',
-    'assets/polecats/polecat-scout.png',
-    'assets/polecats/polecat-pyro.png',
-    'assets/polecats/polecat-bandit.png',
-    'assets/polecats/polecat-sniper.png',
-    'assets/polecats/polecat-mechanic.png'
-];
-
-// Get consistent polecat image based on session/slug hash
-function getPolecatImage(identifier) {
-    const hash = (identifier || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-    return POLECAT_IMAGES[hash % POLECAT_IMAGES.length];
-}
-
 // Track if initial render has happened (for differential updates)
 let initialRenderComplete = false;
 // Track current rendered session IDs for diffing
@@ -851,7 +835,7 @@ connectLogWebSocket();
 // MissionControlManager - centralized view state and navigation
 class MissionControlManager {
     constructor() {
-        this.views = ['mission-control', 'sessions', 'gastown', 'timeline', 'analytics', 'graveyard'];
+        this.views = ['mission-control', 'sessions', 'timeline', 'analytics', 'graveyard'];
         this.currentView = localStorage.getItem('missionControlView') || 'mission-control';
     }
 
@@ -877,7 +861,6 @@ class MissionControlManager {
     getViewDisplayName(viewName) {
         const names = {
             'sessions': 'Sessions',
-            'gastown': 'Gastown',
             'timeline': 'Timeline',
             'analytics': 'Analytics',
             'mission-control': 'Mission Control'
@@ -1396,12 +1379,6 @@ function createCard(session, index = 0) {
     // Tool history panel (expandable details)
     const toolHistoryHtml = renderToolHistoryPanel(session.sessionId);
 
-    // Polecat avatar for Gastown agents
-    const agentType = session.isGastown ? getGastownAgentType(session.gastownRole || session.slug) : null;
-    const polecatAvatarHtml = (agentType?.type === 'polecat')
-        ? `<img class="polecat-avatar" src="${getPolecatImage(session.slug)}" alt="Polecat" />`
-        : '';
-
     // Display focus summary if available, otherwise fall back to slug
     const displayTitle = session.focusSummary || session.slug;
     const hasFocusSummary = !!session.focusSummary;
@@ -1411,7 +1388,7 @@ function createCard(session, index = 0) {
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
         <div class="card-header">
-            <div class="slug${focusSummaryClass}" ${titleTooltip}>${stateEmoji} ${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> ` : ''}${escapeHtml(displayTitle)}</div>
+            <div class="slug${focusSummaryClass}" ${titleTooltip}>${stateEmoji} ${escapeHtml(displayTitle)}</div>
             <div class="card-actions">
                 <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${escapeJsString(session.sessionId)}')">⋮</button>
                 <div class="action-menu hidden" id="menu-${session.sessionId}">
@@ -1428,7 +1405,6 @@ function createCard(session, index = 0) {
             </div>
         </div>
         <div class="card-body">
-            ${polecatAvatarHtml}
             ${summaryHtml}
             ${activityTrailHtml}
             ${toolHistoryHtml}
@@ -1487,11 +1463,6 @@ function createCompactCard(session, index = 0) {
         ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
         : '<span class="idle-indicator">idle</span>';
 
-    // Gastown role icon
-    const roleIcon = session.isGastown
-        ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> `
-        : '';
-
     // Display focus summary if available, otherwise fall back to slug
     const compactTitle = session.focusSummary || session.slug;
     const compactHasFocus = !!session.focusSummary;
@@ -1500,7 +1471,7 @@ function createCompactCard(session, index = 0) {
 
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
-        <div class="compact-name${compactFocusClass}" ${compactTooltip}>${roleIcon}${escapeHtml(compactTitle)}</div>
+        <div class="compact-name${compactFocusClass}" ${compactTooltip}>${escapeHtml(compactTitle)}</div>
         <div class="compact-meta">
             <span>${duration}</span>
             <span>${Math.round(tokenPct)}% ctx</span>
@@ -2190,10 +2161,7 @@ function updateCard(card, session) {
         if (session.state !== 'active') {
             stateEmoji = activityStatus.isStale ? '🟠' : '🟡';
         }
-        const gastownIcon = session.isGastown
-            ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> `
-            : '';
-        slugEl.innerHTML = `${stateEmoji} ${gastownIcon}${escapeHtml(session.slug)}`;
+        slugEl.innerHTML = `${stateEmoji} ${escapeHtml(session.slug)}`;
     }
 }
 
@@ -3309,269 +3277,29 @@ function renderGroups(groups) {
     allVisibleSessions = groups.flatMap(g => g.sessions);
 }
 
-// Gastown dedicated tab view
-let gastownSessions = [];
-
-function renderGastownView(gastown) {
-    gastownSessions = gastown || [];
-    const container = document.getElementById('gastown-container');
-    const countEl = document.getElementById('gastown-count');
-
-    if (!container) return;
-
-    const activeCount = gastownSessions.filter(s => s.state === 'active').length;
-    const totalCount = gastownSessions.length;
-
-    // Update count badge in header
-    if (countEl) {
-        countEl.textContent = `${totalCount} agent${totalCount !== 1 ? 's' : ''}${activeCount > 0 ? ` (${activeCount} active)` : ''}`;
-    }
-
-    // Update tab badge
-    const tabButton = document.querySelector('[data-view="gastown"]');
-    if (tabButton) {
-        // Add/update badge on the tab
-        let badge = tabButton.querySelector('.tab-badge');
-        if (totalCount > 0) {
-            if (!badge) {
-                badge = document.createElement('span');
-                badge.className = 'tab-badge';
-                tabButton.appendChild(badge);
-            }
-            badge.textContent = totalCount;
-            badge.classList.toggle('has-active', activeCount > 0);
-        } else if (badge) {
-            badge.remove();
-        }
-    }
-
-    // Empty state
-    if (gastownSessions.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state gastown-empty">
-                <h2>🏭 No Gastown Agents</h2>
-                <p>No gastown agents are currently running.</p>
-                <p class="hint">Gastown agents appear here when spawned via <code>gt sling</code></p>
-            </div>`;
-        return;
-    }
-
-    // Group gastown sessions by repo/cwd
-    container.innerHTML = '';
-    container.className = 'gastown-grouped';
-
-    const groups = groupGastownByRepo(gastownSessions);
-    const createCardFn = cardDisplayMode === 'compact' ? createCompactCard : createCard;
-
-    groups.forEach(group => {
-        const groupDiv = document.createElement('div');
-        groupDiv.className = 'gastown-repo-group';
-
-        // Repo header with path and agent count
-        const header = document.createElement('div');
-        header.className = 'gastown-repo-header';
-        const activeText = group.activeCount > 0 ? ` (${group.activeCount} active)` : '';
-        header.innerHTML = `
-            <div class="repo-info">
-                <span class="repo-icon">📁</span>
-                <span class="repo-path">${escapeHtml(group.repoPath)}</span>
-            </div>
-            <span class="agent-count">${group.sessions.length} agent${group.sessions.length !== 1 ? 's' : ''}${activeText}</span>
-        `;
-        groupDiv.appendChild(header);
-
-        // Agent cards container
-        const cardsContainer = document.createElement('div');
-        cardsContainer.className = 'gastown-cards';
-        cardsContainer.dataset.cardCount = Math.min(group.sessions.length, 4);
-
-        group.sessions.forEach((session, idx) => {
-            const card = createCardFn(session, idx);
-            card.classList.add('gastown-card');
-            cardsContainer.appendChild(card);
-        });
-
-        groupDiv.appendChild(cardsContainer);
-        container.appendChild(groupDiv);
-    });
-}
-
-// Pixel-art style icons for gastown agent types
-function getGastownAgentType(slug) {
-    const s = (slug || '').toLowerCase();
-
-    // Supervisors have simple names
-    if (s === 'rig') return { type: 'rig', icon: '⛏', label: 'Rig', css: 'gt-rig' };
-    if (s === 'witness') return { type: 'witness', icon: '◉', label: 'Witness', css: 'gt-witness' };
-    if (s === 'refinery') return { type: 'refinery', icon: '⚙', label: 'Refinery', css: 'gt-refinery' };
-    if (s === 'deacon' || s.includes('deacon')) return { type: 'deacon', icon: '✟', label: 'Deacon', css: 'gt-deacon' };
-    if (s === 'mayor') return { type: 'mayor', icon: '♔', label: 'Mayor', css: 'gt-mayor' };
-    if (s === 'spa' || s === 'bff') return { type: 'service', icon: '◈', label: s.toUpperCase(), css: 'gt-service' };
-    if (s === 'gastown' || s === 'gt') return { type: 'gastown', icon: '🏭', label: 'Gas Town', css: 'gt-hq' };
-
-    // Polecats have adjective-verb-noun names (3 parts with hyphens)
-    const parts = s.split('-');
-    if (parts.length >= 3) {
-        // Generate a consistent "pixel creature" based on name hash
-        const hash = s.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-        const creatures = ['▣', '◆', '●', '■', '▲', '★', '◐', '◧'];
-        const creature = creatures[hash % creatures.length];
-        return { type: 'polecat', icon: creature, label: 'Polecat', css: 'gt-polecat' };
-    }
-
-    // Unknown
-    return { type: 'unknown', icon: '?', label: 'Agent', css: 'gt-unknown' };
-}
-
-function groupGastownByRepo(sessions) {
-    const groups = {};
-
-    // Gas Town HQ-level agents (not working on a specific rig/repo)
-    const GT_HQ_AGENTS = ['deacon', 'mayor'];
-
-    for (const session of sessions) {
-        const cwd = session.cwd || '';
-
-        // Extract repo name from path
-        // Pattern: /Users/nathan.norman/toast-analytics/... → toast-analytics
-        // Gas Town: /Users/nathan.norman/gt/<rig-name>/... → rig-name is the repo
-        // Gas Town HQ: /Users/nathan.norman/gt/deacon/... → "Gas Town HQ" (supervisor)
-        const parts = cwd.split('/').filter(Boolean);
-        let repoName = 'Unknown';
-
-        // Find the repo: skip Users, username, then take the next part
-        if (parts.length >= 3 && parts[0] === 'Users') {
-            repoName = parts[2]; // /Users/username/REPO/...
-
-            // Special case: if in 'gt' (gastown) directory
-            if (repoName === 'gt') {
-                if (parts.length >= 4) {
-                    const rigOrHq = parts[3];
-                    // Check if it's an HQ-level agent (deacon, mayor) vs a rig
-                    if (GT_HQ_AGENTS.includes(rigOrHq)) {
-                        repoName = 'Gas Town HQ';
-                    } else {
-                        repoName = rigOrHq; // It's a rig name = actual repo
-                    }
-                } else if (GT_HQ_AGENTS.includes(session.gastownRole)) {
-                    // Agent in /gt root with HQ role (e.g., mayor)
-                    repoName = 'Gas Town HQ';
-                }
-            }
-        } else if (parts.length >= 3 && parts[0] === 'home') {
-            repoName = parts[2]; // /home/username/REPO/...
-            if (repoName === 'gt') {
-                if (parts.length >= 4) {
-                    const rigOrHq = parts[3];
-                    if (GT_HQ_AGENTS.includes(rigOrHq)) {
-                        repoName = 'Gas Town HQ';
-                    } else {
-                        repoName = rigOrHq;
-                    }
-                } else if (GT_HQ_AGENTS.includes(session.gastownRole)) {
-                    repoName = 'Gas Town HQ';
-                }
-            }
-        } else if (parts.length > 0) {
-            // Fallback: use first non-hidden directory
-            repoName = parts.find(p => !p.startsWith('.')) || parts[0];
-        }
-
-        if (!groups[repoName]) {
-            groups[repoName] = {
-                repoName: repoName,
-                repoPath: repoName,
-                sessions: [],
-                activeCount: 0
-            };
-        }
-        groups[repoName].sessions.push(session);
-        if (session.state === 'active') {
-            groups[repoName].activeCount++;
-        }
-    }
-
-    // Sort: active groups first, then by session count, then by name
-    // But always put "Gas Town HQ" last
-    return Object.values(groups).sort((a, b) => {
-        if (a.repoName === 'Gas Town HQ') return 1;
-        if (b.repoName === 'Gas Town HQ') return -1;
-        if (a.activeCount > 0 && b.activeCount === 0) return -1;
-        if (b.activeCount > 0 && a.activeCount === 0) return 1;
-        if (b.sessions.length !== a.sessions.length) return b.sessions.length - a.sessions.length;
-        return a.repoName.localeCompare(b.repoName);
-    });
-}
-
-function groupGastownByRig(sessions) {
-    const groups = {};
-
-    for (const session of sessions) {
-        // Extract rig name from cwd path (e.g., /polecats/myrig/... -> myrig)
-        let rigName = 'Unknown';
-        const cwd = session.cwd || '';
-
-        // Match patterns like /polecats/rigname/ or /rig/rigname/
-        const rigMatch = cwd.match(/\/(?:polecats|rig)\/([^/]+)/);
-        if (rigMatch) {
-            rigName = rigMatch[1];
-        } else {
-            // Fallback to last directory component
-            rigName = cwd.split('/').filter(Boolean).pop() || session.slug || 'Unknown';
-        }
-
-        if (!groups[rigName]) {
-            groups[rigName] = {
-                name: rigName,
-                sessions: [],
-                activeCount: 0
-            };
-        }
-        groups[rigName].sessions.push(session);
-        if (session.state === 'active') {
-            groups[rigName].activeCount++;
-        }
-    }
-
-    // Sort by name, active groups first
-    return Object.values(groups).sort((a, b) => {
-        if (a.activeCount > 0 && b.activeCount === 0) return -1;
-        if (b.activeCount > 0 && a.activeCount === 0) return 1;
-        return a.name.localeCompare(b.name);
-    });
-}
-
 function renderCurrentSessions(sessions = null, forceFullRender = false) {
     if (!sessions) {
         sessions = Array.from(previousSessions.values());
     }
     const filtered = filterSessions(sessions);
 
-    // Separate main sessions from gastown sessions
-    const mainSessions = filtered.filter(s => !s.isGastown);
-    const gastown = filtered.filter(s => s.isGastown);
+    const sessionCount = filtered.length;
 
-    const mainCount = mainSessions.length;
-
-    // Update count display (gastown has its own tab badge)
-    const activeCount = mainSessions.filter(s => s.state === 'active').length;
+    // Update count display
+    const activeCount = filtered.filter(s => s.state === 'active').length;
     let countText = activeCount > 0
-        ? `${activeCount} active, ${mainCount - activeCount} waiting`
-        : `${mainCount} session${mainCount !== 1 ? 's' : ''}`;
+        ? `${activeCount} active, ${sessionCount - activeCount} waiting`
+        : `${sessionCount} session${sessionCount !== 1 ? 's' : ''}`;
     document.getElementById('session-count').textContent = countText;
 
     const container = document.getElementById('sessions-container');
 
-    // Always update gastown view (separate tab)
-    renderGastownView(gastown);
-
-    // Empty state for main sessions only
-    if (mainSessions.length === 0) {
+    // Empty state
+    if (filtered.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
                 <h2>No Claude sessions</h2>
                 <p>Start a Claude Code session to see it here</p>
-                ${gastown.length > 0 ? '<p class="hint">Gastown agents are in the 🏭 Gastown tab</p>' : ''}
             </div>`;
         allVisibleSessions = [];
         renderedSessionIds.clear();
@@ -3581,15 +3309,14 @@ function renderCurrentSessions(sessions = null, forceFullRender = false) {
 
     // First render or forced full render - build everything
     if (!initialRenderComplete || forceFullRender || container.children.length === 0) {
-        // Render main sessions only (gastown is in separate tab)
-        const mainGroups = groupSessionsByProject(mainSessions);
-        renderGroups(mainGroups);
+        const groups = groupSessionsByProject(filtered);
+        renderGroups(groups);
 
-        renderedSessionIds = new Set(mainSessions.map(s => s.sessionId));
+        renderedSessionIds = new Set(filtered.map(s => s.sessionId));
         initialRenderComplete = true;
     } else {
-        // Incremental update - update main session cards only
-        updateSessionsInPlace(mainSessions);
+        // Incremental update - update session cards only
+        updateSessionsInPlace(filtered);
     }
 
     if (selectedIndex >= allVisibleSessions.length) {
@@ -4077,19 +3804,14 @@ function renderTimeline(sessions) {
 
     // Group sessions by repo (cwd)
     const sessionsByRepo = new Map();
-    const gastownSessions = [];
 
     for (const session of sessions) {
-        if (session.isGastown) {
-            gastownSessions.push(session);
-        } else {
-            const cwd = session.cwd || 'Unknown';
-            const repoName = cwd.split('/').filter(Boolean).pop() || 'Unknown';
-            if (!sessionsByRepo.has(repoName)) {
-                sessionsByRepo.set(repoName, { cwd, sessions: [] });
-            }
-            sessionsByRepo.get(repoName).sessions.push(session);
+        const cwd = session.cwd || 'Unknown';
+        const repoName = cwd.split('/').filter(Boolean).pop() || 'Unknown';
+        if (!sessionsByRepo.has(repoName)) {
+            sessionsByRepo.set(repoName, { cwd, sessions: [] });
         }
+        sessionsByRepo.get(repoName).sessions.push(session);
     }
 
     // Sort repos by most recent activity
@@ -4120,31 +3842,9 @@ function renderTimeline(sessions) {
         `;
     }).join('');
 
-    // Group gastown sessions by repo (HQ, rigs, etc.)
-    const gastownGroups = groupGastownByRepo(gastownSessions);
-    const gastownSectionsHtml = gastownGroups.map(group => {
-        const rowsHtml = group.sessions.map(session => {
-            const sessionData = timelineData.get(session.sessionId) || { periods: [], eventMarkers: [] };
-            return renderTimelineRow(session, sessionData.periods, sessionData.eventMarkers, startTime, now);
-        }).join('');
-
-        return `
-            <div class="timeline-subsection">
-                <div class="timeline-subsection-header">${escapeHtml(group.repoName)}</div>
-                <div class="timeline-rows">${rowsHtml}</div>
-            </div>
-        `;
-    }).join('');
-
     container.innerHTML = `
         <div class="timeline-axis">${timeAxisHtml}</div>
         ${repoSectionsHtml}
-        ${gastownSessions.length > 0 ? `
-            <div class="timeline-section gastown-section">
-                <div class="timeline-section-header">🏭 Gas Town</div>
-                ${gastownSectionsHtml}
-            </div>
-        ` : ''}
         ${sessions.length === 0 ? `
             <div class="timeline-empty">
                 <p>No active sessions to show on timeline.</p>
@@ -4242,9 +3942,9 @@ function renderTimelineRow(session, periods, eventMarkers, startTime, endTime) {
     }).join('');
 
     return `
-        <div class="timeline-row ${isZombie ? 'zombie' : ''} ${session.isGastown ? 'gastown-row' : ''}" data-session-id="${session.sessionId}">
+        <div class="timeline-row ${isZombie ? 'zombie' : ''}" data-session-id="${session.sessionId}">
             <div class="timeline-label" onclick="focusWarpTab(previousSessions.get('${escapeJsString(session.sessionId)}'))">
-                <span class="session-slug">${session.isGastown ? '🤖 ' : ''}${escapeHtml(session.slug)}</span>
+                <span class="session-slug">${escapeHtml(session.slug)}</span>
                 <span class="session-status ${statusClass}">${session.state}</span>
                 <span class="last-active ${isZombie ? 'zombie-warning' : ''}">
                     ${isZombie ? '⚠️ ' : ''}${lastActiveAgo}
@@ -4437,13 +4137,6 @@ function switchView(viewName) {
     if (viewName === 'timeline') {
         syncTimelineRangeSelect();
         refreshTimeline();
-    }
-
-    // Refresh gastown view when switching to it
-    if (viewName === 'gastown') {
-        const sessions = Array.from(previousSessions.values());
-        const gastown = sessions.filter(s => s.isGastown);
-        renderGastownView(gastown);
     }
 
     // Load analytics if switching to analytics view
@@ -5888,15 +5581,8 @@ function renderMissionControlSessions(sessions) {
         return;
     }
 
-    // Separate gastown from regular sessions
-    const regularSessions = sessions.filter(s => !s.isGastown);
-    const gastownSessions = sessions.filter(s => s.isGastown);
-
-    // Group regular sessions by repo
-    const groups = groupSessionsByRepo(regularSessions);
-
-    // Group gastown sessions
-    const gastownGroups = groupGastownByRepo(gastownSessions);
+    // Group sessions by repo
+    const groups = groupSessionsByRepo(sessions);
 
     // Differential update: update existing items in place, only add/remove as needed
     const existingItems = new Map();
@@ -5905,7 +5591,7 @@ function renderMissionControlSessions(sessions) {
     });
 
     // Build new HTML only if structure changed (add/remove sessions)
-    const allSessions = [...regularSessions, ...gastownSessions];
+    const allSessions = sessions;
     const currentIdsSet = new Set(allSessions.map(s => s.sessionId));
     const previousIdsRaw = container.dataset.sessionIds || '';
     const previousIdsSet = new Set(previousIdsRaw ? previousIdsRaw.split(',') : []);
@@ -5931,24 +5617,6 @@ function renderMissionControlSessions(sessions) {
             `;
         }
 
-        // Gastown section (if any)
-        if (gastownSessions.length > 0) {
-            html += `<div class="mc-gastown-section">`;
-            html += `<div class="mc-section-header">🏭 Gas Town</div>`;
-
-            for (const group of gastownGroups) {
-                html += `
-                    <div class="mc-repo-group mc-gastown-group">
-                        <div class="mc-repo-header">${escapeHtml(group.repoName)}</div>
-                        <div class="mc-repo-sessions">
-                            ${group.sessions.map(session => renderMCSessionItem(session, true)).join('')}
-                        </div>
-                    </div>
-                `;
-            }
-            html += `</div>`;
-        }
-
         container.innerHTML = html;
         container.dataset.sessionIds = [...currentIdsSet].join(',');
 
@@ -5962,8 +5630,7 @@ function renderMissionControlSessions(sessions) {
             const existingEl = existingItems.get(session.sessionId);
             if (existingEl) {
                 // Update in place - just update the inner content
-                const isGastown = session.isGastown;
-                const newHtml = renderMCSessionItem(session, isGastown);
+                const newHtml = renderMCSessionItem(session);
                 const tempDiv = document.createElement('div');
                 tempDiv.innerHTML = newHtml;
                 const newEl = tempDiv.firstElementChild;
@@ -6025,7 +5692,7 @@ function groupSessionsByRepo(sessions) {
     return sortedGroups;
 }
 
-function renderMCSessionItem(session, isGastown = false) {
+function renderMCSessionItem(session) {
     const isSelected = session.sessionId === mcSelectedSessionId;
     const displayName = session.cwd ? session.cwd.split('/').pop() : session.sessionId.slice(0, 8);
     const duration = formatAgentDuration(session.startTimestamp) || '0m';
@@ -6039,22 +5706,22 @@ function renderMCSessionItem(session, isGastown = false) {
         ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
         : '<span class="idle-indicator">idle</span>';
 
-    // For gastown, show role icon
-    let roleIcon = '';
-    if (isGastown && session.gastownRole) {
-        const agentType = getGastownAgentType(session.gastownRole);
-        roleIcon = `<span class="gt-icon ${agentType.css}" title="${agentType.label}">${agentType.icon}</span> `;
-    }
+    // Take Over button: show for terminal sessions with PID that aren't already managed
+    const hasPid = session.pid && !managedProcesses.has(session.sessionId);
+    const takeOverBtn = hasPid ? `
+        <button class="mc-takeover-btn" onclick="event.stopPropagation(); takeOverSession('${escapeJsString(session.sessionId)}')" title="Take over this session in the browser">
+            Take Over
+        </button>` : '';
 
     return `
         <div class="mc-session-item ${session.state === 'active' ? 'active' : ''} ${isSelected ? 'selected' : ''}"
              data-session-id="${session.sessionId}">
-            <div class="mc-session-name">${roleIcon}${escapeHtml(displayName)}</div>
+            <div class="mc-session-name">${escapeHtml(displayName)}</div>
             <div class="mc-session-meta">
                 <span>${duration}</span>
                 <span>${contextPct}% ctx</span>
             </div>
-            <div class="mc-session-activity">${activityHtml}</div>
+            <div class="mc-session-activity">${activityHtml}${takeOverBtn}</div>
         </div>
     `;
 }
@@ -6095,6 +5762,11 @@ function selectMissionControlSession(sessionId) {
         killBtn.classList.toggle('hidden', !mcSelectedSessionPid);
         killBtn.textContent = 'Kill';
         killBtn.title = mcSelectedSessionPid ? `Kill process ${mcSelectedSessionPid}` : '';
+    }
+    // Hide release button for terminal sessions (only for managed processes)
+    const releaseBtn = document.getElementById('mc-release-btn');
+    if (releaseBtn) {
+        releaseBtn.classList.add('hidden');
     }
 
     // Update context indicator with session's token data
@@ -7595,6 +7267,29 @@ function handleProcessMessage(processId, msg) {
                 showSDKWelcomeBanner(processId, msg);
             }
             break;
+
+        case 'heartbeat':
+            // Reset stale detection timer
+            {
+                const hbProc = managedProcesses.get(processId);
+                if (hbProc) {
+                    hbProc.lastHeartbeat = Date.now();
+                }
+            }
+            break;
+
+        case 'process_exited':
+            // Process died - update state
+            {
+                const exitProc = managedProcesses.get(processId);
+                if (exitProc) {
+                    exitProc.state = 'stopped';
+                    exitProc.exitCode = msg.exit_code;
+                    updateProcessUI(processId);
+                    showToast(`Process exited (code ${msg.exit_code || 0})`, 'info');
+                }
+            }
+            break;
     }
 }
 
@@ -8797,12 +8492,16 @@ async function sendSDKMessage(processId, text) {
 function updateProcessUI(processId) {
     refreshManagedProcessList();
 
-    // Update kill button visibility
+    // Update kill/release button visibility
     if (selectedProcessId === processId) {
         const killBtn = document.getElementById('mc-kill-btn');
+        const releaseBtn = document.getElementById('mc-release-btn');
         const process = managedProcesses.get(processId);
         if (killBtn && process) {
             killBtn.classList.toggle('hidden', process.state === 'stopped');
+        }
+        if (releaseBtn && process) {
+            releaseBtn.classList.toggle('hidden', process.state === 'stopped');
         }
     }
 }
@@ -8905,6 +8604,12 @@ function selectManagedProcess(processId) {
 
     if (killBtn) {
         killBtn.classList.toggle('hidden', process.state === 'stopped');
+    }
+
+    // Show release button for managed processes
+    const releaseBtn = document.getElementById('mc-release-btn');
+    if (releaseBtn) {
+        releaseBtn.classList.toggle('hidden', process.state === 'stopped');
     }
 
     // Update context indicator (SDK sessions track tokens via WebSocket updates)
@@ -10157,7 +9862,7 @@ renderMissionControlSessions = function(sessions) {
 // Session Graveyard - View dead/ended sessions
 // ============================================================================
 
-let graveyardData = { gastown: [], regular: [] };
+let graveyardData = { regular: [] };
 let graveyardSearchActive = false;
 
 /**
@@ -10287,25 +9992,6 @@ function renderGraveyard(data, isSearch = false) {
         html += '</div>';
     }
 
-    // Gastown section
-    if (data.gastown.length > 0) {
-        const gastownGroups = groupGraveyardByRepo(data.gastown);
-        html += '<div class="graveyard-section graveyard-gastown">';
-        html += '<div class="graveyard-section-header">🏭 Gas Town</div>';
-
-        for (const group of gastownGroups) {
-            html += `
-                <div class="graveyard-group">
-                    <div class="graveyard-group-header">${escapeHtml(group.name)}</div>
-                    <div class="graveyard-group-sessions">
-                        ${group.sessions.map(s => renderGraveyardCard(s, true)).join('')}
-                    </div>
-                </div>
-            `;
-        }
-        html += '</div>';
-    }
-
     container.innerHTML = html;
 
     // Attach click handlers
@@ -10350,7 +10036,7 @@ function groupGraveyardByRepo(sessions) {
 /**
  * Render a single graveyard card
  */
-function renderGraveyardCard(session, isGastown = false) {
+function renderGraveyardCard(session) {
     // Show branch name or short session ID (repo name is already in group header)
     const displayName = session.gitBranch || session.sessionId.slice(0, 8);
     const contextPct = Math.round(session.tokenPercentage || 0);
@@ -10358,13 +10044,6 @@ function renderGraveyardCard(session, isGastown = false) {
 
     // Format ended time
     const endedAgo = formatRecency(session.recency);
-
-    // Gastown role icon
-    let roleIcon = '';
-    if (isGastown && session.gastownRole) {
-        const agentType = getGastownAgentType(session.gastownRole);
-        roleIcon = `<span class="gt-icon ${agentType.css}">${agentType.icon}</span> `;
-    }
 
     // Summary preview or match snippets (for search results)
     let previewContent = '';
@@ -10420,7 +10099,7 @@ function renderGraveyardCard(session, isGastown = false) {
     return `
         <div class="graveyard-card${session.matchSnippets ? ' search-match' : ''}${session.hasActivityLog ? ' has-activity' : ''}" data-session-id="${session.sessionId}">
             <div class="graveyard-card-header">
-                <span class="graveyard-name">💀 ${roleIcon}${escapeHtml(displayName)}</span>
+                <span class="graveyard-name">💀 ${escapeHtml(displayName)}</span>
                 <span class="graveyard-ended">${endedAgo}</span>
             </div>
             <div class="graveyard-card-meta">
@@ -10430,8 +10109,8 @@ function renderGraveyardCard(session, isGastown = false) {
             ${previewContent}
             ${activityLogContent}
             <div class="graveyard-card-actions">
-                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Resume session (copies command if SDK unavailable)">
-                    ▶️ Resume
+                <button class="graveyard-btn" onclick="event.stopPropagation(); takeOverSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Take over this session in the browser">
+                    ▶️ Take Over
                 </button>
             </div>
         </div>
@@ -10457,7 +10136,7 @@ function formatRecency(recencySeconds) {
  * Show detailed modal for a graveyard session
  */
 function showGraveyardDetails(sessionId) {
-    const session = [...graveyardData.regular, ...graveyardData.gastown].find(s => s.sessionId === sessionId);
+    const session = graveyardData.regular.find(s => s.sessionId === sessionId);
     if (!session) return;
 
     const displayName = session.cwd ? session.cwd.split('/').pop() : session.slug;
@@ -10484,8 +10163,8 @@ function showGraveyardDetails(sessionId) {
             ` : ''}
 
             <div class="graveyard-details-actions">
-                <button class="btn-primary" onclick="resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">
-                    ▶️ Resume Session
+                <button class="btn-primary" onclick="takeOverSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">
+                    ▶️ Take Over Session
                 </button>
                 <button class="btn-secondary" onclick="openJsonl('${escapeJsString(session.sessionId)}')">
                     📂 Open JSONL File
@@ -10496,60 +10175,60 @@ function showGraveyardDetails(sessionId) {
 }
 
 /**
- * Resume a dead session via SDK spawn or fallback to clipboard
+ * Take over a session (active or dead) via the takeover endpoint.
+ * Kills the terminal process (if alive), spawns a stream subprocess with --resume.
+ * @param {string} sessionId - Claude session ID
+ * @param {string} [cwd] - Working directory (optional, for graveyard sessions)
  */
-async function resumeSession(sessionId, cwd) {
+async function takeOverSession(sessionId, cwd) {
     try {
         // Check SDK availability
         const sdkResponse = await fetch('/api/sdk-mode');
         const sdkMode = await sdkResponse.json();
 
         if (!sdkMode.sdk_available) {
-            // Fallback to copy command
             copyResumeCmd(sessionId, cwd);
             showToast('SDK not available - command copied to clipboard', 'info');
             return;
         }
 
-        showToast('Resuming session...', 'info');
+        showToast('Taking over session...', 'info');
 
-        // Spawn session with resume parameter
-        const response = await fetch('/api/spawn', {
+        // Call takeover endpoint (handles kill + spawn)
+        const response = await fetch(`/api/session/${sessionId}/takeover`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                cwd: cwd || process.env?.HOME || '/tmp',
-                resume: sessionId
-            })
+            body: JSON.stringify({ fork: false })
         });
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-            throw new Error(error.detail || 'Failed to spawn session');
+            throw new Error(error.detail || 'Takeover failed');
         }
 
         const data = await response.json();
+        const processId = data.process_id;
+        const sessionCwd = data.cwd || cwd || '/tmp';
 
         // Close graveyard modal if open
         closeModal();
 
         // Add to managed processes
-        const processId = data.process_id;
         managedProcesses.set(processId, {
             id: processId,
-            cwd: data.cwd,
-            state: data.state,
+            cwd: sessionCwd,
+            state: 'running',
             isSDK: true,
             ws: null,
             outputBuffer: `<div class="sdk-welcome-banner sdk-placeholder">
 <div class="sdk-banner-info">
-<div class="sdk-banner-title">📋 Resumed Session</div>
+<div class="sdk-banner-title">📋 Taken Over Session</div>
 <div class="sdk-banner-model">${sessionId.substring(0, 8)}...</div>
-<div class="sdk-banner-cwd">${escapeHtml(cwd)}</div>
+<div class="sdk-banner-cwd">${escapeHtml(sessionCwd)}</div>
 </div>
 </div>
-<div class="sdk-ready-message">Session restored — send a message to continue</div>`,
-            startedAt: data.started_at || new Date().toISOString()
+<div class="sdk-ready-message">Session taken over — send a message to continue</div>`,
+            startedAt: new Date().toISOString()
         });
 
         // Switch to Mission Control view
@@ -10562,15 +10241,59 @@ async function resumeSession(sessionId, cwd) {
         await refreshManagedProcessList();
         refreshMissionControl();
 
-        // Select the newly resumed process
+        // Select the newly taken over process
         selectManagedProcess(processId);
 
-        showToast('Session resumed in Mission Control', 'success');
+        showToast('Session taken over in Mission Control', 'success');
 
     } catch (e) {
-        console.error('Resume failed:', e);
+        console.error('Takeover failed:', e);
         copyResumeCmd(sessionId, cwd);
-        showToast(`Resume failed: ${e.message} - command copied`, 'info');
+        showToast(`Takeover failed: ${e.message} - command copied`, 'info');
+    }
+}
+
+// Backwards compat alias
+function resumeSession(sessionId, cwd) {
+    return takeOverSession(sessionId, cwd);
+}
+
+/**
+ * Release a managed process back to the terminal.
+ */
+async function releaseSelectedProcess() {
+    if (!selectedProcessId) return;
+
+    try {
+        const response = await fetch(`/api/process/${selectedProcessId}/release`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            throw new Error('Release failed');
+        }
+
+        const data = await response.json();
+
+        // Clean up the managed process
+        const proc = managedProcesses.get(selectedProcessId);
+        if (proc && proc.ws) {
+            proc.ws.close();
+        }
+        managedProcesses.delete(selectedProcessId);
+
+        // Clear selection
+        selectedProcessId = null;
+        clearMissionControlConversation();
+
+        const sessionId = data.session_id || 'unknown';
+        showToast(`Released to terminal. Resume with: claude --resume ${sessionId}`, 'success');
+
+        await refreshManagedProcessList();
+        refreshMissionControl();
+    } catch (e) {
+        console.error('Release failed:', e);
+        showToast(`Release failed: ${e.message}`, 'error');
     }
 }
 

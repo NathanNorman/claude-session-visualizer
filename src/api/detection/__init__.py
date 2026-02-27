@@ -25,8 +25,6 @@ from .jsonl_parser import (
     extract_text_content,
     extract_tool_calls,
     cwd_to_project_slug,
-    is_gastown_path,
-    extract_gastown_role_from_cwd,
     get_session_metadata,
     get_recent_session_for_project,
 )
@@ -55,8 +53,6 @@ __all__ = [
     'extract_text_content',
     'extract_tool_calls',
     'cwd_to_project_slug',
-    'is_gastown_path',
-    'extract_gastown_role_from_cwd',
     'get_session_metadata',
     'get_recent_session_for_project',
     # Activity timeline

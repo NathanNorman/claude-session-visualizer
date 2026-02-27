@@ -149,18 +149,17 @@ html {
 
 /* Cards animate in when they appear */
 .session-card,
-.gastown-card,
 .graveyard-card {
     animation: scroll-fade-up 0.4s cubic-bezier(0.4, 0, 0.2, 1) backwards;
 }
 
 /* Staggered animation delays for cards */
-.session-card:nth-child(1), .gastown-card:nth-child(1), .graveyard-card:nth-child(1) { animation-delay: 0ms; }
-.session-card:nth-child(2), .gastown-card:nth-child(2), .graveyard-card:nth-child(2) { animation-delay: 50ms; }
-.session-card:nth-child(3), .gastown-card:nth-child(3), .graveyard-card:nth-child(3) { animation-delay: 100ms; }
-.session-card:nth-child(4), .gastown-card:nth-child(4), .graveyard-card:nth-child(4) { animation-delay: 150ms; }
-.session-card:nth-child(5), .gastown-card:nth-child(5), .graveyard-card:nth-child(5) { animation-delay: 200ms; }
-.session-card:nth-child(6), .gastown-card:nth-child(6), .graveyard-card:nth-child(6) { animation-delay: 250ms; }
+.session-card:nth-child(1), .graveyard-card:nth-child(1) { animation-delay: 0ms; }
+.session-card:nth-child(2), .graveyard-card:nth-child(2) { animation-delay: 50ms; }
+.session-card:nth-child(3), .graveyard-card:nth-child(3) { animation-delay: 100ms; }
+.session-card:nth-child(4), .graveyard-card:nth-child(4) { animation-delay: 150ms; }
+.session-card:nth-child(5), .graveyard-card:nth-child(5) { animation-delay: 200ms; }
+.session-card:nth-child(6), .graveyard-card:nth-child(6) { animation-delay: 250ms; }
 
 /* Views fade in on switch */
 .view {
@@ -3236,38 +3235,6 @@ body.keyboard-mode .session-card .card-number {
     font-weight: 500;
 }
 
-.timeline-section.gastown-section {
-    margin-top: 24px;
-    padding-top: 16px;
-    border-top: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-.timeline-section.gastown-section .timeline-section-header {
-    color: #a78bfa;
-}
-
-.timeline-row.gastown-row .timeline-label .session-slug {
-    color: #c4b5fd;
-}
-
-.timeline-row.gastown-row .timeline-bar.active {
-    background: linear-gradient(90deg, #8b5cf6, #a78bfa);
-}
-
-/* Timeline subsections (for gastown grouping) */
-.timeline-subsection {
-    margin-bottom: 12px;
-}
-
-.timeline-subsection-header {
-    font-size: 11px;
-    font-weight: 500;
-    color: #d97706;
-    padding: 4px 16px 4px 32px;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-}
-
 /* Activity indicators */
 .idle-indicator {
     color: #f59e0b;
@@ -4130,432 +4097,6 @@ body.keyboard-mode .session-card .card-number {
 }
 
 /* ============================================================================
-   Gastown Section (Multi-Agent Orchestration)
-   ============================================================================ */
-
-.gastown-section {
-    margin-top: 32px;
-    padding-top: 24px;
-    border-top: 1px solid rgba(255,255,255,0.1);
-}
-
-.gastown-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    background: rgba(139, 92, 246, 0.1);
-    border-radius: 8px;
-    cursor: pointer;
-    margin-bottom: 12px;
-    transition: background 0.2s;
-    border: 1px solid rgba(139, 92, 246, 0.2);
-}
-
-.gastown-header:hover {
-    background: rgba(139, 92, 246, 0.15);
-}
-
-.gastown-title {
-    font-weight: 600;
-    font-size: 16px;
-    color: #a78bfa;
-}
-
-.gastown-stats {
-    color: var(--text-secondary);
-    font-size: 14px;
-    margin-left: auto;
-}
-
-.gastown-section.collapsed .gastown-sessions {
-    display: none;
-}
-
-.gastown-sessions {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 16px;
-}
-
-.gastown-card {
-    opacity: 0.8;
-    border-color: rgba(139, 92, 246, 0.3) !important;
-}
-
-.gastown-card:hover {
-    opacity: 1;
-}
-
-.gastown-card .session-badge {
-    background: rgba(139, 92, 246, 0.3) !important;
-}
-
-/* ============================================================================
-   Gastown Tab View (Dedicated Tab)
-   ============================================================================ */
-
-/* Tab badge for gastown count */
-.tab-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 6px;
-    margin-left: 8px;
-    font-size: 11px;
-    font-weight: 600;
-    background: rgba(139, 92, 246, 0.3);
-    color: #a78bfa;
-    border-radius: 9px;
-}
-
-.tab-badge.has-active {
-    background: rgba(74, 222, 128, 0.3);
-    color: var(--active-color);
-}
-
-/* Gastown view header */
-.gastown-view-header {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-bottom: 24px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid rgba(139, 92, 246, 0.2);
-}
-
-.gastown-view-header h2 {
-    font-size: 24px;
-    font-weight: 600;
-    color: #a78bfa;
-}
-
-#gastown-count {
-    color: var(--text-secondary);
-    font-size: 14px;
-}
-
-/* Gastown horizontal layout */
-.gastown-horizontal {
-    display: flex;
-    flex-direction: row;
-    gap: 16px;
-    overflow-x: auto;
-    padding-bottom: 16px; /* Space for scrollbar */
-    scroll-behavior: smooth;
-}
-
-/* Card sizing based on count */
-.gastown-horizontal .gastown-card {
-    flex: 0 0 auto;
-    min-width: 25%; /* Never smaller than 25% */
-    max-width: 50%; /* Never larger than 50% */
-}
-
-/* 1 card: 50% width */
-.gastown-horizontal[data-card-count="1"] .gastown-card {
-    flex: 0 0 50%;
-    max-width: 50%;
-}
-
-/* 2 cards: 50% each */
-.gastown-horizontal[data-card-count="2"] .gastown-card {
-    flex: 0 0 calc(50% - 8px);
-    max-width: calc(50% - 8px);
-}
-
-/* 3 cards: 25% each */
-.gastown-horizontal[data-card-count="3"] .gastown-card {
-    flex: 0 0 calc(25% - 12px);
-    max-width: calc(25% - 12px);
-}
-
-/* 4+ cards: 25% each, scroll if needed */
-.gastown-horizontal[data-card-count="4"] .gastown-card {
-    flex: 0 0 calc(25% - 12px);
-    min-width: calc(25% - 12px);
-}
-
-/* Custom scrollbar for gastown */
-.gastown-horizontal::-webkit-scrollbar {
-    height: 8px;
-}
-
-.gastown-horizontal::-webkit-scrollbar-track {
-    background: rgba(139, 92, 246, 0.1);
-    border-radius: 4px;
-}
-
-.gastown-horizontal::-webkit-scrollbar-thumb {
-    background: rgba(139, 92, 246, 0.3);
-    border-radius: 4px;
-}
-
-.gastown-horizontal::-webkit-scrollbar-thumb:hover {
-    background: rgba(139, 92, 246, 0.5);
-}
-
-/* Gastown empty state */
-@keyframes gastown-border-pulse {
-    0%, 100% { border-color: rgba(139, 92, 246, 0.15); }
-    50% { border-color: rgba(139, 92, 246, 0.25); }
-}
-
-.gastown-empty {
-    text-align: center;
-    padding: 60px 40px;
-    background: rgba(139, 92, 246, 0.03);
-    border: 1px dashed rgba(139, 92, 246, 0.15);
-    border-radius: 12px;
-    animation: empty-fade-in 0.4s ease-out, gastown-border-pulse 4s ease-in-out infinite;
-}
-
-.gastown-empty::before {
-    content: '';
-    display: block;
-    width: 56px;
-    height: 56px;
-    margin: 0 auto 16px;
-    background: rgba(139, 92, 246, 0.1);
-    border-radius: 50%;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%238b5cf6'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z'/%3E%3C/svg%3E");
-    background-size: 28px;
-    background-repeat: no-repeat;
-    background-position: center;
-    animation: empty-float 3s ease-in-out infinite;
-}
-
-.gastown-empty h2 {
-    color: #a78bfa;
-    margin-bottom: 12px;
-    font-size: 16px;
-    font-weight: 500;
-}
-
-.gastown-empty p {
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    font-size: 13px;
-}
-
-.gastown-empty .hint {
-    font-size: 12px;
-    opacity: 0.7;
-}
-
-.gastown-empty code {
-    background: rgba(139, 92, 246, 0.2);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: 'SF Mono', Monaco, Consolas, monospace;
-}
-
-/* Gastown card styling in dedicated tab */
-#gastown-container .gastown-card {
-    opacity: 1;
-    border: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-#gastown-container .gastown-card::before {
-    background: #8b5cf6;
-}
-
-#gastown-container .gastown-card.active::before {
-    background: var(--active-color);
-}
-
-#gastown-container .gastown-card.active {
-    box-shadow: 0 0 15px rgba(74, 222, 128, 0.2);
-}
-
-/* Gastown Grouped by Repo Layout */
-.gastown-grouped {
-    display: flex;
-    flex-direction: column;
-    gap: 24px;
-}
-
-.gastown-repo-group {
-    background: rgba(139, 92, 246, 0.05);
-    border: 1px solid rgba(139, 92, 246, 0.2);
-    border-radius: 12px;
-    padding: 16px;
-}
-
-.gastown-repo-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding-bottom: 12px;
-    margin-bottom: 12px;
-    border-bottom: 1px solid rgba(139, 92, 246, 0.2);
-}
-
-.gastown-repo-header .repo-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.gastown-repo-header .repo-icon {
-    font-size: 18px;
-}
-
-.gastown-repo-header .repo-path {
-    font-family: 'SF Mono', Monaco, Consolas, monospace;
-    font-size: 14px;
-    color: #c4b5fd;
-    font-weight: 500;
-}
-
-.gastown-repo-header .agent-count {
-    font-size: 12px;
-    color: var(--text-secondary);
-    background: rgba(139, 92, 246, 0.2);
-    padding: 4px 10px;
-    border-radius: 12px;
-}
-
-.gastown-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 12px;
-}
-
-/* Adjust card sizing within groups */
-.gastown-cards[data-card-count="1"] {
-    grid-template-columns: 1fr 1fr;
-}
-
-.gastown-cards[data-card-count="2"] {
-    grid-template-columns: 1fr 1fr;
-}
-
-.gastown-repo-group .gastown-card {
-    margin: 0;
-}
-
-/* Gastown Agent Type Icons - Pixel Art Style */
-.gt-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    font-size: 14px;
-    font-family: 'SF Mono', Monaco, 'Courier New', monospace;
-    font-weight: bold;
-    border-radius: 3px;
-    margin-right: 6px;
-    text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
-    image-rendering: pixelated;
-}
-
-/* Rig - Gold/Yellow - The main orchestrator */
-.gt-icon.gt-rig {
-    background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
-    color: #1a1a2e;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(217, 119, 6, 0.4);
-}
-
-/* Witness - Cyan/Teal - The watcher */
-.gt-icon.gt-witness {
-    background: linear-gradient(135deg, #22d3ee 0%, #0891b2 100%);
-    color: #1a1a2e;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(8, 145, 178, 0.4);
-}
-
-/* Refinery - Orange - The processor */
-.gt-icon.gt-refinery {
-    background: linear-gradient(135deg, #fb923c 0%, #ea580c 100%);
-    color: #1a1a2e;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(234, 88, 12, 0.4);
-    animation: refinery-spin 3s linear infinite;
-}
-
-@keyframes refinery-spin {
-    0%, 100% { transform: rotate(0deg); }
-    50% { transform: rotate(180deg); }
-}
-
-/* Deacon - Purple - The healer/monitor */
-.gt-icon.gt-deacon {
-    background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
-    color: white;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(124, 58, 237, 0.4);
-}
-
-/* Mayor - Red/Crimson - The leader */
-.gt-icon.gt-mayor {
-    background: linear-gradient(135deg, #f87171 0%, #dc2626 100%);
-    color: #fef3c7;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(220, 38, 38, 0.4);
-}
-
-/* Service (SPA/BFF) - Blue - Infrastructure */
-.gt-icon.gt-service {
-    background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%);
-    color: white;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(37, 99, 235, 0.4);
-}
-
-/* Polecat - Green - The workers */
-.gt-icon.gt-polecat {
-    background: linear-gradient(135deg, #4ade80 0%, #16a34a 100%);
-    color: #1a1a2e;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2),
-        0 2px 4px rgba(22, 163, 74, 0.4);
-}
-
-/* Unknown - Gray */
-.gt-icon.gt-unknown {
-    background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%);
-    color: white;
-    box-shadow:
-        inset 1px 1px 0 rgba(255, 255, 255, 0.3),
-        inset -1px -1px 0 rgba(0, 0, 0, 0.2);
-}
-
-/* Pixel art hover effect */
-.gt-icon:hover {
-    transform: scale(1.1);
-    filter: brightness(1.1);
-}
-
-/* Polecat avatar image */
-.polecat-avatar {
-    width: 80px;
-    height: 80px;
-    object-fit: contain;
-    float: right;
-    margin: 0 0 8px 12px;
-    image-rendering: pixelated;
-    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
-}
-
-/* ============================================================================
    UX Enhancement: Focus Mode
    ============================================================================ */
 
@@ -4855,37 +4396,6 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 .mc-repo-sessions {
     padding-left: 0;
-}
-
-.mc-gastown-section {
-    margin-top: 24px;
-    padding-top: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.15);
-}
-
-.mc-section-header {
-    font-size: 12px;
-    font-weight: 600;
-    color: #f59e0b;
-    padding: 8px 12px;
-    margin-bottom: 8px;
-}
-
-.mc-gastown-group .mc-repo-header {
-    color: #d97706;
-}
-
-.mc-gastown-group .mc-session-item {
-    background: rgba(245, 158, 11, 0.05);
-}
-
-.mc-gastown-group .mc-session-item:hover {
-    background: rgba(245, 158, 11, 0.1);
-}
-
-.mc-gastown-group .mc-session-item.active {
-    background: rgba(245, 158, 11, 0.15);
-    border-left-color: #f59e0b;
 }
 
 /* Conversation stream */
@@ -6316,6 +5826,47 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 }
 
 .mc-kill-btn.hidden {
+    display: none;
+}
+
+/* Take Over button on session cards */
+.mc-takeover-btn {
+    font-size: 10px;
+    padding: 2px 6px;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s;
+    margin-left: 4px;
+}
+.mc-session-item:hover .mc-takeover-btn {
+    opacity: 1;
+}
+.mc-takeover-btn:hover {
+    background: #1d4ed8;
+}
+
+/* Release button for managed processes */
+.mc-release-btn {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 4px rgba(245, 158, 11, 0.3);
+}
+.mc-release-btn:hover {
+    background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+    transform: translateY(-1px);
+}
+.mc-release-btn.hidden {
     display: none;
 }
 
@@ -9072,14 +8623,6 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     padding-bottom: 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     color: var(--text-primary);
-}
-
-.graveyard-gastown {
-    border-left: 3px solid #f59e0b;
-}
-
-.graveyard-gastown .graveyard-section-header {
-    color: #f59e0b;
 }
 
 .graveyard-group {

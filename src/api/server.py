@@ -62,9 +62,9 @@ from .routes import (
     sharing_router,
     processes_router,
     skills_router,
+    stream_processes_router,
 )
-from .process_manager import get_process_manager
-from .sdk_session_manager import get_sdk_session_manager
+from .stream_process_manager import get_stream_process_manager
 
 # Export for use by routes
 _summary_cache = get_summary_cache()
@@ -84,6 +84,9 @@ app.add_middleware(
 )
 
 # Register route modules
+# stream_processes_router MUST be before processes_router so new endpoints
+# (/api/sdk-mode, /api/processes, /api/spawn) take precedence over old ones
+app.include_router(stream_processes_router)
 app.include_router(sessions_router)
 app.include_router(analytics_router)
 app.include_router(machines_router)
@@ -186,7 +189,7 @@ async def get_session_summary_endpoint(session_id: str, force_refresh: bool = Fa
 
 @app.post("/api/sessions/refresh-all-summaries")
 async def refresh_all_summaries():
-    """Refresh AI summaries for all non-gastown sessions that have new activity."""
+    """Refresh AI summaries for all sessions that have new activity."""
     sessions = get_sessions()
 
     refreshed = []
@@ -196,10 +199,6 @@ async def refresh_all_summaries():
     for session in sessions:
         session_id = session.get('sessionId')
         if not session_id:
-            continue
-
-        if session.get('isGastown'):
-            skipped.append({'sessionId': session_id, 'reason': 'gastown'})
             continue
 
         last_activity = session.get('lastActivity', '')
@@ -302,29 +301,36 @@ def get_ws_status():
 # WebSocket endpoint for process output streaming
 @app.websocket("/ws/process/{process_id}")
 async def websocket_process(websocket: WebSocket, process_id: str):
-    """Stream process output to WebSocket client (PTY or SDK)."""
+    """Stream process output via WebSocket."""
     await websocket.accept()
 
-    # Check if this is an SDK session first
-    sdk_manager = get_sdk_session_manager()
-    sdk_session = sdk_manager.get_session(process_id)
+    manager = get_stream_process_manager()
+    proc = manager.get_process(process_id)
 
-    if sdk_session:
-        # SDK session - add WebSocket client and keep connection alive
-        await sdk_manager.add_websocket_client(process_id, websocket)
-        try:
-            while True:
-                # Keep connection alive, handle incoming messages
-                data = await websocket.receive_json()
-                # Could handle control messages here if needed
-        except WebSocketDisconnect:
-            await sdk_manager.remove_websocket_client(process_id, websocket)
-        except Exception:
-            await sdk_manager.remove_websocket_client(process_id, websocket)
-    else:
-        # PTY process - use process manager
-        process_manager = get_process_manager()
-        await process_manager.stream_output(process_id, websocket)
+    if not proc:
+        await websocket.send_json({"type": "error", "message": f"Process {process_id} not found"})
+        await websocket.close()
+        return
+
+    await manager.add_websocket_client(process_id, websocket)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if msg.get('type') == 'ping':
+                await websocket.send_json({'type': 'pong'})
+            elif msg.get('type') == 'user_message':
+                await manager.send_message(process_id, msg.get('text', ''))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await manager.remove_websocket_client(process_id, websocket)
 
 
 # Background tasks
@@ -344,8 +350,6 @@ async def watch_sessions_loop(interval: float = 2.0):
                     _last_sessions_hash = current_hash
 
                     for session in sessions:
-                        if session.get('isGastown'):
-                            continue
                         session_id = session.get('sessionId')
                         if session_id:
                             activities = session.get('recentActivity', [])
@@ -356,8 +360,6 @@ async def watch_sessions_loop(interval: float = 2.0):
 
                     # Focus Summary Generation
                     for session in sessions:
-                        if session.get('isGastown'):
-                            continue
                         session_id = session.get('sessionId')
                         cwd = session.get('cwd', '')
                         if not session_id or not cwd:
@@ -479,8 +481,8 @@ async def shutdown_event():
         _file_watcher_task.cancel()
 
     # Clean up managed processes
-    process_manager = get_process_manager()
-    await process_manager.cleanup()
+    stream_manager = get_stream_process_manager()
+    await stream_manager.cleanup()
 
     manager = get_tunnel_manager()
     manager.stop_monitor()

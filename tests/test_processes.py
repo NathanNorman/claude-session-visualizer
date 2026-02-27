@@ -101,7 +101,6 @@ user             12345   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 c
         assert len(processes) == 1
         assert processes[0]['pid'] == 12345
         assert processes[0]['cwd'] == '/Users/test/project'
-        assert processes[0]['is_gastown'] is False
 
     @patch('subprocess.run')
     def test_skips_non_cli_processes(self, mock_run):
@@ -116,44 +115,6 @@ user             12348   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 n
 
         processes = get_claude_processes()
         assert len(processes) == 0
-
-    @patch('src.api.detection.processes.get_process_start_time')
-    @patch('src.api.detection.processes.get_process_cwd')
-    @patch('subprocess.run')
-    def test_detects_gastown_by_command(self, mock_run, mock_cwd, mock_start):
-        """Test detection of gastown process by command markers."""
-        ps_output = '''USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
-user             12345   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 claude [GAS TOWN] mayor <- human
-'''
-        mock_run.return_value = MagicMock(stdout=ps_output)
-        mock_cwd.return_value = '/Users/test/project'
-        mock_start.return_value = 1000.0
-
-        with patch('pathlib.Path.exists', return_value=True):
-            processes = get_claude_processes()
-
-        assert len(processes) == 1
-        assert processes[0]['is_gastown'] is True
-        assert processes[0]['gastown_role'] == 'mayor'
-
-    @patch('src.api.detection.processes.get_process_start_time')
-    @patch('src.api.detection.processes.get_process_cwd')
-    @patch('subprocess.run')
-    def test_detects_gastown_by_cwd(self, mock_run, mock_cwd, mock_start):
-        """Test detection of gastown process by cwd patterns."""
-        ps_output = '''USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
-user             12345   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 claude
-'''
-        mock_run.return_value = MagicMock(stdout=ps_output)
-        mock_cwd.return_value = '/Users/test/project/gt/deacon'
-        mock_start.return_value = 1000.0
-
-        with patch('pathlib.Path.exists', return_value=True):
-            processes = get_claude_processes()
-
-        assert len(processes) == 1
-        assert processes[0]['is_gastown'] is True
-        assert processes[0]['gastown_role'] == 'deacon'
 
     @patch('src.api.detection.processes.get_process_start_time')
     @patch('src.api.detection.processes.get_process_cwd')
@@ -244,63 +205,7 @@ class TestGetClaudeProcessesCached:
         assert mock_get.call_count == 2
 
 
-class TestGastownRoleExtraction:
-    """Tests for gastown role extraction from various sources."""
 
-    @patch('src.api.detection.processes.get_process_start_time')
-    @patch('src.api.detection.processes.get_process_cwd')
-    @patch('subprocess.run')
-    def test_role_from_gt_role_env(self, mock_run, mock_cwd, mock_start):
-        """Test role extraction from GT_ROLE environment variable."""
-        # The env var appears in the full ps aux line, and command must be 'claude'
-        ps_output = '''USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
-user             12345   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 claude GT_ROLE=witness
-'''
-        mock_run.return_value = MagicMock(stdout=ps_output)
-        mock_cwd.return_value = '/Users/test/project/gt/witness'  # Gastown cwd triggers detection
-        mock_start.return_value = 1000.0
-
-        with patch('pathlib.Path.exists', return_value=True):
-            processes = get_claude_processes()
-
-        assert len(processes) == 1
-        assert processes[0]['is_gastown'] is True
-        assert processes[0]['gastown_role'] == 'witness'
-
-    @patch('src.api.detection.processes.get_process_start_time')
-    @patch('src.api.detection.processes.get_process_cwd')
-    @patch('subprocess.run')
-    def test_rig_role_from_cwd(self, mock_run, mock_cwd, mock_start):
-        """Test rig role from cwd ending in /rig."""
-        ps_output = '''USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
-user             12345   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 claude
-'''
-        mock_run.return_value = MagicMock(stdout=ps_output)
-        mock_cwd.return_value = '/Users/test/project/rig'
-        mock_start.return_value = 1000.0
-
-        with patch('pathlib.Path.exists', return_value=True):
-            processes = get_claude_processes()
-
-        assert len(processes) == 1
-        assert processes[0]['is_gastown'] is True
-        assert processes[0]['gastown_role'] == 'rig'
-
-    @patch('src.api.detection.processes.get_process_start_time')
-    @patch('src.api.detection.processes.get_process_cwd')
-    @patch('subprocess.run')
-    def test_polecat_role_from_cwd(self, mock_run, mock_cwd, mock_start):
-        """Test polecat role from cwd containing /polecats/."""
-        ps_output = '''USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
-user             12345   0.5  1.0   123456  12345 s000  S+   10:00AM   0:05.00 claude
-'''
-        mock_run.return_value = MagicMock(stdout=ps_output)
-        mock_cwd.return_value = '/Users/test/project/polecats/worker1'
-        mock_start.return_value = 1000.0
-
-        with patch('pathlib.Path.exists', return_value=True):
-            processes = get_claude_processes()
-
-        assert len(processes) == 1
-        assert processes[0]['is_gastown'] is True
-        assert processes[0]['gastown_role'] == 'polecat'
+# TestGastownRoleExtraction removed:
+# Gastown detection code was removed from get_claude_processes()
+# in the browser-session-takeover change.

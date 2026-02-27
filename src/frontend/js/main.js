@@ -14,8 +14,6 @@
 import { state, setState, toggleCardMode, toggleGroupByProject } from './state.js';
 import { fetchSessions, checkSessionsChanged, connectWebSocket, disconnectWebSocket } from './api.js';
 import { escapeHtml, formatTime, formatTokens, formatCost, formatDuration, getActivityStatus, showToast, debounce } from './utils.js';
-import { createCard, createCompactCard, formatTokenBar, renderEmojiTrail } from './sessions.js';
-
 // Constants
 const DIRTY_CHECK_INTERVAL = 500;
 const FULL_POLL_FALLBACK = 30000;

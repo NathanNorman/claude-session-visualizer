@@ -21,42 +21,6 @@ _metadata_cache: dict[str, tuple[float, float, dict]] = {}
 METADATA_CACHE_TTL = 60  # Max cache age in seconds
 
 
-def is_gastown_path(cwd: str) -> bool:
-    """Check if a cwd path indicates a gastown session."""
-    if not cwd:
-        return False
-    # Check for gastown directory patterns
-    # Note: '/gt' matches both '/gt/' and paths ending in '/gt'
-    if cwd.endswith('/gt') or '/gt/' in cwd:
-        return True
-    return any(pattern in cwd for pattern in [
-        '/deacon', '/witness', '/mayor', '/polecats/',
-        '/refinery/', '/rig'
-    ])
-
-
-def extract_gastown_role_from_cwd(cwd: str) -> str | None:
-    """Extract gastown role from cwd path."""
-    if not cwd:
-        return None
-    if cwd.endswith('/rig'):
-        return 'rig'
-    if '/deacon' in cwd:
-        return 'deacon'
-    if '/mayor' in cwd:
-        return 'mayor'
-    if '/witness' in cwd:
-        return 'witness'
-    if '/refinery' in cwd and '/rig' not in cwd:
-        return 'refinery'
-    if '/polecats/' in cwd:
-        return 'polecat'
-    # Generic gastown directory (e.g., /gt or /gt/something)
-    if cwd.endswith('/gt') or '/gt/' in cwd:
-        return 'gastown'
-    return None
-
-
 def extract_activity(content_item: dict) -> str | None:
     """Extract a one-sentence activity description from a content item."""
     item_type = content_item.get('type')
@@ -298,12 +262,6 @@ def extract_jsonl_metadata(jsonl_file: Path, activity_tracker: callable = None) 
 
     # Clean up internal field
     metadata.pop('_fallback_slug', None)
-
-    # Detect gastown sessions from cwd path
-    cwd = metadata.get('cwd', '')
-    metadata['isGastown'] = is_gastown_path(cwd)
-    if metadata['isGastown']:
-        metadata['gastownRole'] = extract_gastown_role_from_cwd(cwd)
 
     # Cache the result and update activity timestamp
     _metadata_cache[path_str] = (current_mtime, time.time(), metadata)

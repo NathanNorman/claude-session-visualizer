@@ -187,8 +187,6 @@ async def watch_sessions_loop(
 
                     # Generate activity summaries for sessions with changed activity
                     for session in sessions:
-                        if session.get('isGastown'):
-                            continue
                         session_id = session.get('sessionId')
                         if session_id:
                             activities = session.get('recentActivity', [])

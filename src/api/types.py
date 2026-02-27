@@ -26,8 +26,6 @@ class ProcessInfo(TypedDict):
     session_id: str | None
     cwd: str | None
     start_time: float | None
-    is_gastown: bool
-    gastown_role: str | None
 
 
 class SessionMetadata(TypedDict):
@@ -45,8 +43,6 @@ class SessionMetadata(TypedDict):
     tokenPercentage: NotRequired[float]
     estimatedCost: NotRequired[float]
     cumulativeUsage: NotRequired[TokenUsage]
-    isGastown: NotRequired[bool]
-    gastownRole: NotRequired[str | None]
 
 
 class SessionInfo(TypedDict):
@@ -68,8 +64,6 @@ class SessionInfo(TypedDict):
     recentActivity: list[str]
     tokenPercentage: NotRequired[float]
     estimatedCost: NotRequired[float]
-    isGastown: NotRequired[bool]
-    gastownRole: NotRequired[str | None]
     backgroundShells: NotRequired[list[dict]]
     currentActivity: NotRequired[dict]
 

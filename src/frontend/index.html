@@ -44,9 +44,6 @@
         <button class="tab-button" onclick="switchView('sessions')" data-view="sessions">
             Sessions
         </button>
-        <button class="tab-button" onclick="switchView('gastown')" data-view="gastown">
-            🏭 Gastown
-        </button>
         <button class="tab-button" onclick="switchView('timeline')" data-view="timeline">
             Timeline
         </button>
@@ -74,14 +71,6 @@
             <button id="refresh-sessions" class="icon-button" onclick="forceRefreshSessions()" title="Refresh all session data">🔄</button>
         </div>
         <main id="sessions-container"></main>
-    </div>
-
-    <div id="gastown-view" class="view">
-        <div class="gastown-view-header">
-            <h2>🏭 Gastown Agents</h2>
-            <span id="gastown-count" class="gastown-stats"></span>
-        </div>
-        <main id="gastown-container"></main>
     </div>
 
     <div id="timeline-view" class="view">
@@ -160,6 +149,9 @@
                     <div class="mc-panel-header-right">
                         <span id="mc-session-type" class="mc-session-type-badge hidden"></span>
                         <span id="mc-selected-session" class="mc-selected-label">Select a session</span>
+                        <button id="mc-release-btn" class="mc-release-btn hidden" onclick="releaseSelectedProcess()" title="Release back to terminal">
+                            Release
+                        </button>
                         <button id="mc-kill-btn" class="mc-kill-btn hidden" onclick="killSelectedMcSession()" title="Kill session">
                             Kill
                         </button>

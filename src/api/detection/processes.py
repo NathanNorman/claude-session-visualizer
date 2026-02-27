@@ -99,52 +99,6 @@ def get_claude_processes() -> list[dict]:
         # Get actual working directory and start time of the process
         cwd = get_process_cwd(pid)
 
-        # Detect gastown agent sessions (multi-agent orchestration)
-        # Check command line markers
-        is_gastown_cmd = (
-            '[GAS TOWN]' in cmd or      # gastown prompt marker
-            'gt boot' in cmd or          # gastown boot command
-            'GT_ROLE=' in line           # gastown env var (tmux-spawned agents)
-        )
-        # Check cwd for gastown directory patterns
-        is_gastown_cwd = cwd and any(pattern in cwd for pattern in [
-            '/deacon',      # deacon service
-            '/witness',     # witness monitor
-            '/mayor',       # mayor orchestrator
-            '/polecats/',   # polecat workers
-            '/refinery/',   # rig refineries
-            '/rig',         # rig directories
-            '/gt/',         # general gastown directory
-        ])
-        is_gastown = is_gastown_cmd or is_gastown_cwd
-
-        # Extract gastown role from command/env/cwd
-        gastown_role = None
-        if is_gastown:
-            # Try GT_ROLE env var first (e.g., "GT_ROLE=mayor")
-            role_match = re.search(r'GT_ROLE=(\w+)', line)
-            if role_match:
-                gastown_role = role_match.group(1)
-            # Try [GAS TOWN] prompt format (e.g., "[GAS TOWN] mayor <- human")
-            elif '[GAS TOWN]' in cmd:
-                prompt_match = re.search(r'\[GAS TOWN\]\s+(\w+)', cmd)
-                if prompt_match:
-                    gastown_role = prompt_match.group(1)
-            # Fallback: extract role from cwd path
-            if not gastown_role and cwd:
-                if cwd.endswith('/rig'):
-                    gastown_role = 'rig'
-                elif '/deacon' in cwd:
-                    gastown_role = 'deacon'
-                elif '/mayor' in cwd:
-                    gastown_role = 'mayor'
-                elif '/witness' in cwd:
-                    gastown_role = 'witness'
-                elif '/refinery' in cwd and '/rig' not in cwd:
-                    gastown_role = 'refinery'
-                elif '/polecats/' in cwd:
-                    gastown_role = 'polecat'
-
         # Extract session ID from --resume flag if present
         session_id = None
         if '--resume' in cmd:
@@ -152,7 +106,7 @@ def get_claude_processes() -> list[dict]:
             if match:
                 session_id = match.group(1)
 
-        # Get process start time (cwd already fetched above for gastown check)
+        # Get process start time
         start_time = get_process_start_time(pid)
 
         processes.append({
@@ -164,8 +118,6 @@ def get_claude_processes() -> list[dict]:
             'session_id': session_id,
             'cwd': cwd,
             'start_time': start_time,
-            'is_gastown': is_gastown,
-            'gastown_role': gastown_role,
         })
 
     return processes

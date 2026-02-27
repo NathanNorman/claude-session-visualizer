@@ -128,13 +128,13 @@ class TestGetBedrockToken:
         assert token is None
 
     @patch('src.api.services.summary.BEDROCK_TOKEN_FILE')
-    def test_returns_none_on_invalid_json(self, mock_path):
-        """Test returns None on invalid JSON."""
+    def test_returns_plain_text_token(self, mock_path):
+        """Test returns plain text as raw JWT token."""
         mock_path.exists.return_value = True
-        mock_path.read_text.return_value = 'not valid json'
+        mock_path.read_text.return_value = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9'
 
         token = get_bedrock_token()
-        assert token is None
+        assert token == 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9'
 
     @patch('src.api.services.summary.BEDROCK_TOKEN_FILE')
     def test_returns_none_on_read_error(self, mock_path):

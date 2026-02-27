@@ -205,32 +205,3 @@ export function throttle(func, limit) {
     };
 }
 
-/**
- * Get Gastown agent type info from role/slug.
- * @param {string} roleOrSlug - Role name or slug
- * @returns {Object} {icon, label, css}
- */
-export function getGastownAgentType(roleOrSlug) {
-    const role = (roleOrSlug || '').toLowerCase();
-
-    if (role.includes('coord') || role.includes('queen')) {
-        return { icon: '👑', label: 'Coordinator', css: 'gt-coord' };
-    }
-    if (role.includes('code') || role.includes('impl')) {
-        return { icon: '💻', label: 'Coder', css: 'gt-coder' };
-    }
-    if (role.includes('test') || role.includes('qa')) {
-        return { icon: '🧪', label: 'Tester', css: 'gt-tester' };
-    }
-    if (role.includes('review')) {
-        return { icon: '👁️', label: 'Reviewer', css: 'gt-reviewer' };
-    }
-    if (role.includes('doc')) {
-        return { icon: '📝', label: 'Documenter', css: 'gt-doc' };
-    }
-    if (role.includes('research') || role.includes('explore')) {
-        return { icon: '🔍', label: 'Researcher', css: 'gt-research' };
-    }
-
-    return { icon: '🤖', label: 'Agent', css: 'gt-agent' };
-}
