@@ -420,8 +420,18 @@ def main():
         metavar='ID',
         help='Process only this specific session'
     )
+    parser.add_argument(
+        '--recent',
+        action='store_true',
+        help='Quick mode: last 48 hours, rate limit 30/min'
+    )
 
     args = parser.parse_args()
+
+    # --recent is a shortcut for --max-age-days 2 --rate-limit 30
+    if args.recent:
+        args.max_age_days = 2
+        args.rate_limit = 30
 
     # Check for Bedrock token
     if not args.dry_run:

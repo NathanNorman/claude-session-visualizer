@@ -1,5 +1,7 @@
 """Session management routes."""
 
+import asyncio
+import logging
 import os
 import signal
 import time
@@ -27,6 +29,7 @@ from ..session_detector import (
     get_all_active_state_files,
     extract_detailed_tool_history,
     extract_jsonl_metadata,
+    extract_first_user_message,
     CLAUDE_PROJECTS_DIR,
 )
 from ..detection.activity import extract_event_markers
@@ -37,9 +40,32 @@ from ..git_tracker import (
     find_related_pr,
     get_commits_in_range,
 )
-from ..analytics import get_activity_summaries as db_get_activity_summaries, get_focus_summary
+from ..analytics import get_activity_summaries as db_get_activity_summaries, get_focus_summary, save_focus_summary
+from ..services.summary import generate_focus_summary
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["sessions"])
+
+# Dedup guard and concurrency limit for background summary generation
+_inflight_summaries: set[str] = set()
+_summary_semaphore = asyncio.Semaphore(3)
+
+
+async def _generate_summary_background(session_id: str, jsonl_path: str):
+    """Generate a focus summary for a dead session in the background."""
+    try:
+        async with _summary_semaphore:
+            first_msg = extract_first_user_message(Path(jsonl_path))
+            if not first_msg:
+                return
+            summary = await generate_focus_summary(session_id, first_user_message=first_msg)
+            if summary:
+                save_focus_summary(session_id, summary)
+    except Exception as e:
+        logger.warning(f"Background summary generation failed for {session_id}: {e}")
+    finally:
+        _inflight_summaries.discard(session_id)
 
 
 class KillRequest(BaseModel):
@@ -147,8 +173,6 @@ async def api_get_sessions(include_summaries: bool = False):
 
     # Generate activity summaries for sessions with new activity
     for session in sessions:
-        if session.get('isGastown'):
-            continue
         session_id = session.get('sessionId')
         if session_id:
             activities = session.get('recentActivity', [])
@@ -180,7 +204,7 @@ def check_sessions_changed(since: float = 0):
 
 
 @router.get("/sessions/graveyard")
-def get_graveyard_sessions(hours: int = 24):
+async def get_graveyard_sessions(hours: int = 24):
     """Get dead (ended) sessions for the graveyard view."""
     sessions = get_dead_sessions(max_age_hours=hours)
 
@@ -191,13 +215,17 @@ def get_graveyard_sessions(hours: int = 24):
             session['focusSummary'] = get_focus_summary(session_id)
             session['activitySummaries'] = db_get_activity_summaries(session_id)
 
-    gastown = [s for s in sessions if s.get('isGastown')]
-    regular = [s for s in sessions if not s.get('isGastown')]
+    # Trigger background generation for sessions without summaries
+    for session in sessions:
+        sid = session.get('sessionId')
+        if sid and not session.get('focusSummary') and sid not in _inflight_summaries:
+            jsonl_path = session.get('jsonlPath')
+            if jsonl_path:
+                _inflight_summaries.add(sid)
+                asyncio.create_task(_generate_summary_background(sid, jsonl_path))
 
     return {
         "sessions": sessions,
-        "gastown": gastown,
-        "regular": regular,
         "count": len(sessions),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
@@ -209,8 +237,6 @@ def search_graveyard_sessions(q: str, hours: int = 168, content: bool = False):
     if not q or not q.strip():
         return {
             "sessions": [],
-            "gastown": [],
-            "regular": [],
             "count": 0,
             "query": q,
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -225,13 +251,8 @@ def search_graveyard_sessions(q: str, hours: int = 168, content: bool = False):
             session['focusSummary'] = get_focus_summary(session_id)
             session['activitySummaries'] = db_get_activity_summaries(session_id)
 
-    gastown = [s for s in sessions if s.get('isGastown')]
-    regular = [s for s in sessions if not s.get('isGastown')]
-
     return {
         "sessions": sessions,
-        "gastown": gastown,
-        "regular": regular,
         "count": len(sessions),
         "query": q,
         "searchedContent": content,
