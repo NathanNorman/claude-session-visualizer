@@ -62,6 +62,7 @@ async def _generate_summary_background(session_id: str, jsonl_path: str):
             summary = await generate_focus_summary(session_id, first_user_message=first_msg)
             if summary:
                 save_focus_summary(session_id, summary)
+                logger.info(f"Graveyard summary for {session_id[:8]}: {summary}")
     except Exception as e:
         logger.warning(f"Background summary generation failed for {session_id}: {e}")
     finally:

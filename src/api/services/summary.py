@@ -23,8 +23,8 @@ from ..analytics import (
 )
 
 # Bedrock configuration
-BEDROCK_PROXY_URL = os.getenv("BEDROCK_PROXY_URL", "https://bedrock-runtime.us-east-1.amazonaws.com")
-BEDROCK_TOKEN_FILE = Path(os.getenv("BEDROCK_TOKEN_FILE", str(Path.home() / ".config" / "bedrock-proxy" / "token")))
+BEDROCK_PROXY_URL = os.getenv("BEDROCK_PROXY_URL", "https://llm-proxy.build.eng.toasttab.com/bedrock")
+BEDROCK_TOKEN_FILE = Path(os.getenv("BEDROCK_TOKEN_FILE", str(Path.home() / ".config" / "bedrock-proxy" / "token"))).expanduser()
 HAIKU_MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # Summary cache
@@ -43,11 +43,20 @@ GENERIC_ACTIVITY_PATTERNS = [
 
 
 def get_bedrock_token() -> str | None:
-    """Read JWT token from bedrock proxy config."""
+    """Read JWT token from bedrock proxy config.
+
+    Supports two formats:
+    - JSON: {"access_token": "eyJ..."} (legacy)
+    - Plain text: raw JWT string from toastApiKeyHelper
+    """
     try:
         if BEDROCK_TOKEN_FILE.exists():
-            token_data = json.loads(BEDROCK_TOKEN_FILE.read_text())
-            return token_data.get("access_token")
+            raw = BEDROCK_TOKEN_FILE.read_text().strip()
+            if raw.startswith('{'):
+                token_data = json.loads(raw)
+                return token_data.get("access_token")
+            # Plain JWT text (from toastApiKeyHelper > file)
+            return raw if raw else None
     except Exception as e:
         logger.warning(f"Failed to read bedrock token: {e}")
     return None
