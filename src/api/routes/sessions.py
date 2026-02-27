@@ -3,11 +3,16 @@
 import os
 import signal
 import time
+import tempfile
+import base64
+import binascii
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Optional, List
 
 from ..session_detector import (
     get_sessions,
@@ -21,15 +26,18 @@ from ..session_detector import (
     get_activity_timestamp,
     get_all_active_state_files,
     extract_detailed_tool_history,
+    extract_jsonl_metadata,
     CLAUDE_PROJECTS_DIR,
 )
+from ..detection.activity import extract_event_markers
 from ..git_tracker import (
     get_git_status,
     get_recent_commits,
     get_diff_stats,
     find_related_pr,
+    get_commits_in_range,
 )
-from ..analytics import get_activity_summaries as db_get_activity_summaries
+from ..analytics import get_activity_summaries as db_get_activity_summaries, get_focus_summary
 
 router = APIRouter(prefix="/api", tags=["sessions"])
 
@@ -41,6 +49,18 @@ class KillRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     message: str
     submit: bool = True
+    images: Optional[List[str]] = None  # List of image file paths to include
+
+
+class ImageUploadRequest(BaseModel):
+    data: str  # Base64 encoded image data
+    filename: Optional[str] = None  # Optional original filename
+    mime_type: Optional[str] = None  # e.g., "image/png"
+
+
+# Temp directory for uploaded images
+IMAGE_UPLOAD_DIR = Path(tempfile.gettempdir()) / "claude-session-images"
+IMAGE_UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 def write_to_tty(tty: str, message: str, submit: bool = True) -> dict:
@@ -163,6 +183,14 @@ def check_sessions_changed(since: float = 0):
 def get_graveyard_sessions(hours: int = 24):
     """Get dead (ended) sessions for the graveyard view."""
     sessions = get_dead_sessions(max_age_hours=hours)
+
+    # Attach stored summaries from database
+    for session in sessions:
+        session_id = session.get('sessionId')
+        if session_id:
+            session['focusSummary'] = get_focus_summary(session_id)
+            session['activitySummaries'] = db_get_activity_summaries(session_id)
+
     gastown = [s for s in sessions if s.get('isGastown')]
     regular = [s for s in sessions if not s.get('isGastown')]
 
@@ -189,6 +217,14 @@ def search_graveyard_sessions(q: str, hours: int = 168, content: bool = False):
         }
 
     sessions = search_dead_sessions(query=q.strip(), max_age_hours=hours, search_content=content)
+
+    # Attach stored summaries from database
+    for session in sessions:
+        session_id = session.get('sessionId')
+        if session_id:
+            session['focusSummary'] = get_focus_summary(session_id)
+            session['activitySummaries'] = db_get_activity_summaries(session_id)
+
     gastown = [s for s in sessions if s.get('isGastown')]
     regular = [s for s in sessions if not s.get('isGastown')]
 
@@ -221,7 +257,12 @@ def get_timeline_sessions(hours: int = 24):
 
 @router.get("/session/{session_id}/timeline")
 def get_session_timeline(session_id: str, bucket_minutes: int = 5):
-    """Get activity timeline for a specific session."""
+    """Get activity timeline for a specific session.
+
+    Returns:
+        - activityPeriods: Time buckets showing when session was active
+        - eventMarkers: Discrete point events (commits, compactions, agent spawns, tests)
+    """
     if not CLAUDE_PROJECTS_DIR.exists():
         raise HTTPException(404, "Claude projects directory not found")
 
@@ -240,9 +281,40 @@ def get_session_timeline(session_id: str, bucket_minutes: int = 5):
     events = extract_session_timeline(jsonl_file)
     periods = get_activity_periods(events, bucket_minutes=bucket_minutes)
 
+    # Extract discrete event markers for timeline visualization
+    session_info = extract_jsonl_metadata(jsonl_file)
+    event_markers = extract_event_markers(events, session_info)
+
+    # Add git commit markers if session has a working directory
+    cwd = session_info.get('cwd', '')
+    if cwd and events:
+        # Get session time range from events
+        try:
+            timestamps: list[str] = [e['timestamp'] for e in events if e.get('timestamp')]
+            if timestamps:
+                start_ts = datetime.fromisoformat(min(timestamps).replace('Z', '+00:00'))
+                end_ts = datetime.fromisoformat(max(timestamps).replace('Z', '+00:00'))
+
+                # Get commits in this time range
+                commits = get_commits_in_range(cwd, start_ts, end_ts)
+                for commit in commits:
+                    event_markers.append({
+                        'type': 'commit',
+                        'icon': '\U0001F4DD',  # 📝
+                        'timestamp': commit.timestamp,
+                        'label': f'Commit: {commit.message[:40]}',
+                        'sha': commit.short_sha
+                    })
+        except (ValueError, AttributeError):
+            pass  # Skip commit markers if timestamp parsing fails
+
+    # Sort markers by timestamp
+    event_markers.sort(key=lambda m: m.get('timestamp', ''))
+
     return {
         "sessionId": session_id,
         "activityPeriods": periods,
+        "eventMarkers": event_markers,
         "eventCount": len(events),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
@@ -476,3 +548,57 @@ def send_message_to_session(session_id: str, request: SendMessageRequest):
         raise HTTPException(500, f"Permission denied writing to TTY: {tty}")
     except Exception as e:
         raise HTTPException(500, f"Failed to write to TTY: {str(e)}")
+
+
+@router.post("/upload-image")
+def upload_image(request: ImageUploadRequest):
+    """Upload a base64 encoded image and save to temp directory.
+
+    Returns the file path that can be included in messages to Claude.
+    """
+    try:
+        # Decode base64 data
+        # Handle data URLs (e.g., "data:image/png;base64,...")
+        data = request.data
+        if data.startswith('data:'):
+            # Extract the base64 part after the comma
+            data = data.split(',', 1)[1]
+
+        image_data = base64.b64decode(data)
+
+        # Determine file extension from mime type or filename
+        ext = '.png'  # Default
+        if request.mime_type:
+            mime_to_ext = {
+                'image/png': '.png',
+                'image/jpeg': '.jpg',
+                'image/jpg': '.jpg',
+                'image/gif': '.gif',
+                'image/webp': '.webp',
+                'image/bmp': '.bmp',
+            }
+            ext = mime_to_ext.get(request.mime_type, '.png')
+        elif request.filename:
+            ext = Path(request.filename).suffix or '.png'
+
+        # Generate unique filename
+        unique_id = uuid.uuid4().hex[:12]
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"image_{timestamp}_{unique_id}{ext}"
+        filepath = IMAGE_UPLOAD_DIR / filename
+
+        # Write the file
+        with open(filepath, 'wb') as f:
+            f.write(image_data)
+
+        return {
+            "success": True,
+            "path": str(filepath),
+            "filename": filename,
+            "size": len(image_data)
+        }
+
+    except binascii.Error as e:
+        raise HTTPException(400, f"Invalid base64 data: {str(e)}")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save image: {str(e)}")

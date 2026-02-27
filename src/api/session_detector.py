@@ -14,6 +14,7 @@ from .config import (
     ACTIVE_RECENCY_SECONDS,
 )
 from .utils import calculate_cost, get_token_percentage
+from .analytics import get_focus_summary
 
 # Import stateless helper functions from detection modules to reduce duplication
 from .detection.jsonl_parser import (
@@ -75,7 +76,12 @@ _last_cache_cleanup: float = 0.0
 
 # Process list cache: (timestamp, processes_list)
 _process_cache: tuple[float, list] | None = None
-PROCESS_CACHE_TTL = 2  # Cache processes for 2 seconds (faster stale session detection)
+PROCESS_CACHE_TTL = 5  # Cache processes for 5 seconds (reduced from 2s for performance)
+
+# Conversation extraction cache: {file_path: (mtime, messages)}
+# Uses mtime validation to avoid re-reading unchanged files
+_conversation_cache: dict[str, tuple[float, list[dict]]] = {}
+CONVERSATION_CACHE_MAX_SIZE = 50  # Max cached conversations to prevent memory bloat
 
 # Note: MAX_CONTEXT_TOKENS, PRICING, calculate_cost, and get_token_percentage
 # are now imported from config.py and utils.py
@@ -670,6 +676,13 @@ def extract_jsonl_metadata(jsonl_file: Path) -> dict:
     if metadata['isGastown']:
         metadata['gastownRole'] = extract_gastown_role_from_cwd(cwd)
 
+    # Focus Summary: Load from database (generation happens in background loop)
+    session_id = metadata.get('sessionId')
+    if session_id:
+        metadata['focusSummary'] = get_focus_summary(session_id)
+    else:
+        metadata['focusSummary'] = None
+
     # Cache the result and update activity timestamp
     _metadata_cache[path_str] = (current_mtime, time.time(), metadata)
     update_activity_timestamp()
@@ -1250,7 +1263,10 @@ def get_sessions() -> list[dict]:
             # Fallback to CPU/recency heuristics
             file_recently_modified = recency < ACTIVE_RECENCY_SECONDS
             high_cpu = proc['cpu'] > ACTIVE_CPU_THRESHOLD
-            state = 'active' if (file_recently_modified or high_cpu) else 'waiting'
+            # Only trust CPU readings if file was modified somewhat recently (within 5 min)
+            # This prevents CPU fluctuations from marking long-idle sessions as active
+            cpu_is_relevant = recency < 300  # 5 minutes
+            state = 'active' if (file_recently_modified or (high_cpu and cpu_is_relevant)) else 'waiting'
             state_source = 'polling'
             current_activity = None
 
@@ -1490,6 +1506,21 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
     Returns:
         List of message dicts with role, content, timestamp, and optionally toolsDetailed
     """
+    global _conversation_cache
+
+    file_key = str(jsonl_file)
+
+    # Check cache with mtime validation
+    try:
+        current_mtime = jsonl_file.stat().st_mtime
+        if file_key in _conversation_cache:
+            cached_mtime, cached_messages = _conversation_cache[file_key]
+            if cached_mtime == current_mtime:
+                # Cache hit - return deep copy to prevent mutation
+                return [msg.copy() for msg in cached_messages]
+    except OSError:
+        current_mtime = 0.0
+
     messages = []
     pending_tools = {}  # tool_id -> reference to tool dict in most recent assistant message
 
@@ -1569,6 +1600,15 @@ def _extract_single_file_conversation(jsonl_file: Path) -> list[dict]:
                     continue
     except Exception:
         pass
+
+    # Store in cache (with size limit to prevent memory bloat)
+    if current_mtime > 0:
+        # Evict oldest entries if cache is full
+        if len(_conversation_cache) >= CONVERSATION_CACHE_MAX_SIZE:
+            # Remove oldest entry (first key in dict)
+            oldest_key = next(iter(_conversation_cache))
+            del _conversation_cache[oldest_key]
+        _conversation_cache[file_key] = (current_mtime, messages)
 
     return messages
 
@@ -1657,3 +1697,103 @@ def extract_metrics(jsonl_file: Path) -> dict:
         'durationSeconds': int(duration_seconds),
         'toolsPerHour': round(sum(tool_counts.values()) / (duration_seconds / 3600), 1) if duration_seconds > 0 else 0,
     }
+
+
+# ============================================================================
+# Focus Summary Helpers
+# ============================================================================
+
+def extract_first_user_message(jsonl_file: Path) -> str | None:
+    """Extract the first user message from a JSONL file.
+
+    This is used for generating initial focus summaries.
+
+    Returns:
+        First user message content, or None if not found
+    """
+    try:
+        with open(jsonl_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    if data.get('type') == 'user':
+                        msg = data.get('message', {})
+                        content = extract_text_content(msg)
+                        if content and len(content.strip()) > 5:
+                            return content.strip()
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        logger.debug(f"Failed to extract first user message from {jsonl_file}")
+    return None
+
+
+def get_recent_messages(jsonl_file: Path, limit: int = 5) -> list[dict]:
+    """Extract recent conversation messages for focus summary updates.
+
+    Args:
+        jsonl_file: Path to JSONL file
+        limit: Number of recent messages to return
+
+    Returns:
+        List of {role, content, timestamp} dicts
+    """
+    messages = []
+
+    try:
+        # Read from end of file for efficiency
+        file_size = jsonl_file.stat().st_size
+        read_size = min(file_size, 50000)  # Read last 50KB
+
+        with open(jsonl_file, 'rb') as f:
+            if file_size > read_size:
+                f.seek(file_size - read_size)
+                f.readline()  # Skip partial line
+
+            for line in f:
+                try:
+                    data = json.loads(line.decode('utf-8').strip())
+                    msg_type = data.get('type')
+
+                    if msg_type == 'user':
+                        content = extract_text_content(data.get('message', {}))
+                        if content:
+                            messages.append({
+                                'role': 'user',
+                                'content': content[:200],  # Truncate for efficiency
+                                'timestamp': data.get('timestamp')
+                            })
+
+                    elif msg_type == 'assistant':
+                        content = extract_text_content(data.get('message', {}))
+                        if content:
+                            messages.append({
+                                'role': 'assistant',
+                                'content': content[:200],
+                                'timestamp': data.get('timestamp')
+                            })
+
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+    except Exception:
+        logger.debug(f"Failed to get recent messages from {jsonl_file}")
+
+    return messages[-limit:] if messages else []
+
+
+def count_user_messages(jsonl_file: Path) -> int:
+    """Count user messages in a JSONL file (for trigger thresholds).
+
+    Uses efficient scanning - only counts 'type': 'user' lines.
+    """
+    count = 0
+    try:
+        with open(jsonl_file, 'rb') as f:
+            for line in f:
+                # Quick check without full JSON parse
+                if b'"type":"user"' in line or b'"type": "user"' in line:
+                    count += 1
+    except Exception:
+        pass
+    return count

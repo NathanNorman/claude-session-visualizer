@@ -26,6 +26,7 @@ class SpawnRequest(BaseModel):
 
     cwd: str
     args: Optional[list[str]] = None
+    resume: Optional[str] = None  # Session ID to resume (for SDK mode)
 
     @field_validator("cwd")
     @classmethod
@@ -89,6 +90,10 @@ class ProcessInfo(BaseModel):
     started_at: str
     exit_code: Optional[int] = None
     client_count: int
+    # Token usage (SDK sessions only)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 @router.post("/spawn", response_model=SpawnResponse)
@@ -107,7 +112,10 @@ async def spawn_process(request: SpawnRequest):
     if USE_SDK_SESSIONS and SDK_AVAILABLE:
         sdk_manager = get_sdk_session_manager()
         try:
-            session = await sdk_manager.create_session(cwd=request.cwd)
+            session = await sdk_manager.create_session(
+                cwd=request.cwd,
+                resume=request.resume
+            )
             return SpawnResponse(
                 process_id=session.id,
                 cwd=session.cwd,
@@ -251,6 +259,58 @@ async def get_process(process_id: str):
         exit_code=process.exit_code,
         client_count=len(process.websocket_clients)
     )
+
+
+@router.get("/list-directory")
+async def list_directory(path: Optional[str] = None):
+    """List directories in a given path for the web-based folder browser.
+
+    Args:
+        path: Directory path to list (defaults to $HOME)
+
+    Returns:
+        List of directories and parent path for navigation
+    """
+    # Default to home directory
+    if not path:
+        path = str(Path.home())
+
+    target = Path(path).expanduser().resolve()
+
+    # Security: Validate path exists and is a directory
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Path does not exist: {path}")
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {path}")
+
+    # Get parent path for navigation (None if at root)
+    parent = str(target.parent) if target.parent != target else None
+
+    directories = []
+    try:
+        for entry in sorted(target.iterdir(), key=lambda x: x.name.lower()):
+            # Only include directories, skip hidden files unless explicitly navigating there
+            if entry.is_dir():
+                try:
+                    # Check if readable (will raise PermissionError if not)
+                    list(entry.iterdir())[:1]
+                    accessible = True
+                except PermissionError:
+                    accessible = False
+
+                directories.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "accessible": accessible
+                })
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {path}")
+
+    return {
+        "current": str(target),
+        "parent": parent,
+        "directories": directories
+    }
 
 
 @router.get("/recent-directories")

@@ -95,6 +95,29 @@ def init_database():
             )
         ''')
 
+        # Focus summary state tracking for intelligent update triggers
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS focus_summary_state (
+                session_id TEXT PRIMARY KEY,
+                focus_summary TEXT,
+                message_count INTEGER DEFAULT 0,
+                context_pct INTEGER DEFAULT 0,
+                last_activity_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+
+        c.execute('''
+            CREATE INDEX IF NOT EXISTS idx_focus_summary_updated
+            ON focus_summary_state(updated_at)
+        ''')
+
+        # Migration: add focus_summary column if missing
+        try:
+            c.execute('SELECT focus_summary FROM sessions LIMIT 1')
+        except sqlite3.OperationalError:
+            c.execute('ALTER TABLE sessions ADD COLUMN focus_summary TEXT')
+
         conn.commit()
 
 
@@ -489,3 +512,106 @@ def get_session_history(page: int = 1, per_page: int = 20, repo: str | None = No
         'per_page': per_page,
         'total_pages': total_pages
     }
+
+
+# ============================================================================
+# Focus Summary CRUD Functions
+# ============================================================================
+
+def get_focus_summary(session_id: str) -> str | None:
+    """Get the focus summary for a session."""
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('SELECT focus_summary FROM focus_summary_state WHERE session_id = ?', (session_id,))
+        row = c.fetchone()
+        return row[0] if row else None
+
+
+def save_focus_summary(session_id: str, summary: str) -> None:
+    """Save a focus summary for a session."""
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+
+        c.execute('''
+            INSERT INTO focus_summary_state (session_id, focus_summary, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                focus_summary = excluded.focus_summary,
+                updated_at = excluded.updated_at
+        ''', (session_id, summary, now))
+
+        # Also update sessions table for persistence
+        c.execute('''
+            UPDATE sessions SET focus_summary = ? WHERE id = ?
+        ''', (summary, session_id))
+
+        conn.commit()
+
+
+def get_focus_summary_state(session_id: str) -> dict | None:
+    """Get full focus summary state for a session."""
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT focus_summary, message_count, context_pct, last_activity_at, updated_at
+            FROM focus_summary_state
+            WHERE session_id = ?
+        ''', (session_id,))
+        row = c.fetchone()
+        if row:
+            return {
+                'focus_summary': row[0],
+                'message_count': row[1] or 0,
+                'context_pct': row[2] or 0,
+                'last_activity_at': row[3],
+                'updated_at': row[4]
+            }
+        return None
+
+
+def update_focus_summary_state(
+    session_id: str,
+    message_count: int | None = None,
+    context_pct: int | None = None,
+    last_activity_at: str | None = None
+) -> None:
+    """Update focus summary tracking state (without changing the summary itself)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Build dynamic update
+        updates = []
+        params = []
+
+        if message_count is not None:
+            updates.append('message_count = ?')
+            params.append(message_count)
+        if context_pct is not None:
+            updates.append('context_pct = ?')
+            params.append(context_pct)
+        if last_activity_at is not None:
+            updates.append('last_activity_at = ?')
+            params.append(last_activity_at)
+
+        if not updates:
+            return
+
+        params.append(session_id)
+
+        # Try update first
+        c.execute(f'''
+            UPDATE focus_summary_state
+            SET {', '.join(updates)}
+            WHERE session_id = ?
+        ''', params)
+
+        # If no row existed, insert with defaults
+        if c.rowcount == 0:
+            c.execute('''
+                INSERT INTO focus_summary_state (session_id, message_count, context_pct, last_activity_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (session_id, message_count or 0, context_pct or 0, last_activity_at, now))
+
+        conn.commit()

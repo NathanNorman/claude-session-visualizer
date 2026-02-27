@@ -1,5 +1,5 @@
 // Dirty-check polling intervals (fast lightweight checks)
-const DIRTY_CHECK_INTERVAL = 500;     // 500ms dirty-check frequency
+const DIRTY_CHECK_INTERVAL = 200;     // 200ms dirty-check frequency (reduced from 500ms)
 const FULL_POLL_FALLBACK = 30000;     // 30s fallback if dirty-check fails
 
 // Legacy adaptive intervals (used when dirty-check unavailable)
@@ -12,6 +12,11 @@ let pollTimeoutId = null;
 let lastKnownTimestamp = 0;
 let dirtyCheckEnabled = true;
 let dirtyCheckTimeoutId = null;
+
+// WebSocket session updates state - when active, reduces polling overhead
+let wsSessionUpdatesActive = false;
+let lastWsUpdateTime = 0;
+const WS_UPDATE_TIMEOUT = 10000;  // Fall back to polling if no WS update for 10s
 
 const API_URL = '/api/sessions';
 const API_URL_CHANGED = '/api/sessions/changed';
@@ -790,6 +795,10 @@ function connectLogWebSocket() {
                 case 'pong':
                     // Keep-alive response, ignore
                     break;
+                case 'sessions_update':
+                    // Real-time session updates via WebSocket - much faster than polling!
+                    handleWebSocketSessionsUpdate(msg);
+                    break;
                 default:
                     // Other session messages - ignore for log streaming
                     break;
@@ -802,14 +811,15 @@ function connectLogWebSocket() {
     logWebSocket.onclose = () => {
         Logger.ws.debug('Log WebSocket closed');
         logWebSocket = null;
-        // Reconnect after delay if server logs enabled
-        if (Logger.serverLogsEnabled) {
-            setTimeout(connectLogWebSocket, 5000);
-        }
+        // Reset WebSocket session updates state
+        wsSessionUpdatesActive = false;
+        // Always reconnect - WebSocket is essential for real-time session updates
+        setTimeout(connectLogWebSocket, 2000);
     };
 
     logWebSocket.onerror = (error) => {
         Logger.ws.error('Log WebSocket error');
+        wsSessionUpdatesActive = false;
     };
 
     // Keep-alive ping every 30 seconds
@@ -834,10 +844,9 @@ function setServerLogsEnabled(enabled) {
     }
 }
 
-// Auto-connect if debug mode is enabled
-if (Logger.debugPanelVisible || Logger.serverLogsEnabled) {
-    connectLogWebSocket();
-}
+// Always connect WebSocket - essential for real-time session updates
+// Also needed if debug mode is enabled for log streaming
+connectLogWebSocket();
 
 // MissionControlManager - centralized view state and navigation
 class MissionControlManager {
@@ -991,12 +1000,30 @@ function showModal(content) {
     const modalContent = document.getElementById('modal-content');
     modalContent.innerHTML = content;
     overlay.classList.remove('hidden');
+
+    // Close on backdrop click (not on content click)
+    overlay.onclick = (e) => {
+        if (e.target === overlay) {
+            closeModal();
+        }
+    };
 }
 
 function closeModal() {
     const overlay = document.getElementById('modal-overlay');
     overlay.classList.add('hidden');
+    overlay.onclick = null;
 }
+
+// Global escape key handler for modals
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const overlay = document.getElementById('modal-overlay');
+        if (overlay && !overlay.classList.contains('hidden')) {
+            closeModal();
+        }
+    }
+});
 
 function showSoundSettings() {
     const settings = soundManager.settings;
@@ -1133,10 +1160,83 @@ async function forceRefreshSessions() {
     }
 }
 
+// Handle real-time session updates from WebSocket (much faster than polling!)
+function handleWebSocketSessionsUpdate(msg) {
+    const sessions = msg.sessions || [];
+    const timestamp = msg.timestamp;
+
+    // Mark WebSocket as active for session updates
+    wsSessionUpdatesActive = true;
+    lastWsUpdateTime = Date.now();
+
+    // Update timestamp for dirty-check fallback
+    if (timestamp) {
+        lastKnownTimestamp = new Date(timestamp).getTime();
+    }
+
+    // Store in previousSessions map for change detection
+    const newSessionsMap = new Map();
+    sessions.forEach(s => newSessionsMap.set(s.sessionId, { ...s }));
+
+    // Check if anything actually changed (avoid unnecessary renders)
+    let hasChanges = false;
+    if (newSessionsMap.size !== previousSessions.size) {
+        hasChanges = true;
+    } else {
+        for (const [id, session] of newSessionsMap) {
+            const prev = previousSessions.get(id);
+            if (!prev) {
+                hasChanges = true;
+                break;
+            }
+            // Quick comparison of key fields that affect display
+            if (prev.state !== session.state ||
+                prev.totalTokens !== session.totalTokens ||
+                prev.inputTokens !== session.inputTokens ||
+                prev.outputTokens !== session.outputTokens ||
+                prev.cacheReadTokens !== session.cacheReadTokens ||
+                prev.turns !== session.turns ||
+                prev.conversationPreview !== session.conversationPreview ||
+                JSON.stringify(prev.activitySummaries) !== JSON.stringify(session.activitySummaries)) {
+                hasChanges = true;
+                break;
+            }
+        }
+    }
+
+    if (!hasChanges) {
+        return; // No changes, skip render
+    }
+
+    previousSessions = newSessionsMap;
+
+    // Render updates (incremental if initial render done)
+    const forceFullRender = !initialRenderComplete;
+    renderCurrentSessions(sessions, forceFullRender);
+
+    // Update status bar
+    const activeCount = sessions.filter(s => s.state === 'active').length;
+    updateStatus(activeCount, sessions.length, timestamp);
+}
+
 // Dirty-check polling: fast lightweight checks with full refresh only when needed
 async function pollForChanges() {
     if (dirtyCheckTimeoutId) {
         clearTimeout(dirtyCheckTimeoutId);
+    }
+
+    // If WebSocket is actively delivering updates, skip polling
+    const timeSinceWsUpdate = Date.now() - lastWsUpdateTime;
+    if (wsSessionUpdatesActive && timeSinceWsUpdate < WS_UPDATE_TIMEOUT) {
+        // WebSocket is working, just schedule next check as fallback
+        scheduleDirtyCheck();
+        return;
+    }
+
+    // WebSocket hasn't updated recently, fall back to HTTP polling
+    if (wsSessionUpdatesActive && timeSinceWsUpdate >= WS_UPDATE_TIMEOUT) {
+        console.warn('WebSocket session updates stale, falling back to HTTP polling');
+        wsSessionUpdatesActive = false;
     }
 
     try {
@@ -1171,7 +1271,9 @@ function scheduleDirtyCheck() {
     if (dirtyCheckTimeoutId) {
         clearTimeout(dirtyCheckTimeoutId);
     }
-    dirtyCheckTimeoutId = setTimeout(pollForChanges, DIRTY_CHECK_INTERVAL);
+    // Use longer interval when WebSocket is active (just a safety check)
+    const interval = wsSessionUpdatesActive ? 5000 : DIRTY_CHECK_INTERVAL;
+    dirtyCheckTimeoutId = setTimeout(pollForChanges, interval);
 }
 
 // Legacy adaptive polling: used as fallback when dirty-check unavailable
@@ -1253,7 +1355,7 @@ function createCard(session, index = 0) {
 
     // Activity badge HTML - always use activityStatus for consistent display
     const activityBadgeHtml = activityStatus.text
-        ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+        ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
         : '<span class="idle-indicator">idle</span>';
 
     // Session duration
@@ -1300,10 +1402,16 @@ function createCard(session, index = 0) {
         ? `<img class="polecat-avatar" src="${getPolecatImage(session.slug)}" alt="Polecat" />`
         : '';
 
+    // Display focus summary if available, otherwise fall back to slug
+    const displayTitle = session.focusSummary || session.slug;
+    const hasFocusSummary = !!session.focusSummary;
+    const focusSummaryClass = hasFocusSummary ? ' focus-summary' : '';
+    const titleTooltip = hasFocusSummary ? `title="${escapeHtml(session.slug)}"` : '';
+
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
         <div class="card-header">
-            <div class="slug">${stateEmoji} ${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> ` : ''}${escapeHtml(session.slug)}</div>
+            <div class="slug${focusSummaryClass}" ${titleTooltip}>${stateEmoji} ${session.isGastown ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}" title="${getGastownAgentType(session.gastownRole || session.slug).label}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> ` : ''}${escapeHtml(displayTitle)}</div>
             <div class="card-actions">
                 <button class="action-menu-btn" onclick="event.stopPropagation(); toggleActionMenu('${escapeJsString(session.sessionId)}')">⋮</button>
                 <div class="action-menu hidden" id="menu-${session.sessionId}">
@@ -1376,29 +1484,29 @@ function createCompactCard(session, index = 0) {
     // Show activity status - always use activityStatus for consistent display
     const activityStatus = getActivityStatus(session.lastActivity);
     const activityHtml = activityStatus.text
-        ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+        ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
         : '<span class="idle-indicator">idle</span>';
-
-    // State emoji like Mission Control
-    let stateEmoji = '🟢';  // active
-    if (session.state !== 'active') {
-        stateEmoji = activityStatus.isStale ? '🟠' : '🟡';  // orange for stale, yellow for idle
-    }
 
     // Gastown role icon
     const roleIcon = session.isGastown
         ? `<span class="gt-icon ${getGastownAgentType(session.gastownRole || session.slug).css}">${getGastownAgentType(session.gastownRole || session.slug).icon}</span> `
         : '';
 
+    // Display focus summary if available, otherwise fall back to slug
+    const compactTitle = session.focusSummary || session.slug;
+    const compactHasFocus = !!session.focusSummary;
+    const compactFocusClass = compactHasFocus ? ' focus-summary' : '';
+    const compactTooltip = compactHasFocus ? `title="${escapeHtml(session.slug)}"` : '';
+
     card.innerHTML = `
         <span class="card-number">${index + 1}</span>
-        <div class="compact-name">${stateEmoji} ${roleIcon}${escapeHtml(session.slug)}</div>
+        <div class="compact-name${compactFocusClass}" ${compactTooltip}>${roleIcon}${escapeHtml(compactTitle)}</div>
         <div class="compact-meta">
             <span>${duration}</span>
             <span>${Math.round(tokenPct)}% ctx</span>
-            ${activityHtml}
             <button class="compact-expand" onclick="event.stopPropagation(); expandCard('${escapeJsString(session.sessionId)}')" title="Show details">▼</button>
         </div>
+        <div class="compact-activity">${activityHtml}</div>
     `;
 
     card.style.cursor = 'pointer';
@@ -1640,6 +1748,24 @@ function formatTokenCount(tokens) {
         return `${(tokens / 1000).toFixed(1)}k`;
     }
     return tokens.toString();
+}
+
+/**
+ * Kill the currently selected Mission Control session (detected or managed)
+ */
+async function killSelectedMcSession() {
+    // Check for managed process first
+    if (selectedProcessId) {
+        await killSelectedProcess();
+        return;
+    }
+
+    // Otherwise kill detected session
+    if (mcSelectedSessionPid) {
+        await killSession(mcSelectedSessionPid, mcSelectedSessionSlug);
+    } else {
+        showToast('No session selected or no PID available', 'error');
+    }
 }
 
 async function killSession(pid, slug) {
@@ -2035,8 +2161,11 @@ function updateCard(card, session) {
     // Update current activity display (hooks-based real-time activity)
     updateCurrentActivity(card, session, prev);
 
-    card.querySelector('.meta').innerHTML = `
-        <span>PID: ${session.pid || '--'}</span>`;
+    // Update meta info (may not exist on all card types)
+    const metaEl = card.querySelector('.meta');
+    if (metaEl) {
+        metaEl.innerHTML = `<span>PID: ${session.pid || '--'}</span>`;
+    }
 
     // Update footer-right with duration and activity badge
     const footerRight = card.querySelector('.footer-right');
@@ -2045,7 +2174,7 @@ function updateCard(card, session) {
         const activityStatus = getActivityStatus(session.lastActivity);
         // Always use activityStatus for consistent display (avoids flicker when state changes)
         const activityBadgeHtml = activityStatus.text
-            ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+            ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
             : '';
         footerRight.innerHTML = `
             <span class="session-duration" title="Session duration">⏱️ ${duration}</span>
@@ -2728,10 +2857,44 @@ function formatAgentDuration(startedAt) {
     }
 }
 
+/**
+ * Compute idle badge color as gradient from green → yellow → orange → red
+ * @param {number} idleMins - minutes idle
+ * @returns {string} - CSS color value
+ */
+function getIdleColor(idleMins) {
+    // 0-5 min: bright green
+    // 5-20 min: green → yellow
+    // 20-40 min: yellow → orange
+    // 40-60 min: orange → red
+    // 60+ min: red
+
+    if (idleMins <= 5) {
+        return '#4ade80'; // bright green
+    } else if (idleMins <= 20) {
+        // Green to yellow (hue 120 → 60)
+        const t = (idleMins - 5) / 15;
+        const hue = 120 - (t * 60); // 120 (green) to 60 (yellow)
+        return `hsl(${hue}, 85%, 55%)`;
+    } else if (idleMins <= 40) {
+        // Yellow to orange (hue 60 → 30)
+        const t = (idleMins - 20) / 20;
+        const hue = 60 - (t * 30); // 60 (yellow) to 30 (orange)
+        return `hsl(${hue}, 90%, 50%)`;
+    } else if (idleMins <= 60) {
+        // Orange to red (hue 30 → 0)
+        const t = (idleMins - 40) / 20;
+        const hue = 30 - (t * 30); // 30 (orange) to 0 (red)
+        return `hsl(${hue}, 90%, 50%)`;
+    } else {
+        return '#ef4444'; // red
+    }
+}
+
 // Format activity status based on lastActivity timestamp
-// Returns { isActive: bool, text: string, class: string }
+// Returns { isActive: bool, text: string, class: string, color: string, idleMins: number }
 function getActivityStatus(lastActivity) {
-    if (!lastActivity) return { isActive: false, isStale: false, text: '', class: '' };
+    if (!lastActivity) return { isActive: false, isStale: false, text: '', class: '', color: '', idleMins: 0 };
     try {
         const last = new Date(lastActivity);
         const now = new Date();
@@ -2745,31 +2908,39 @@ function getActivityStatus(lastActivity) {
                 isActive: true,
                 isStale: false,
                 text: diffSecs < 5 ? 'just now' : `${diffSecs}s active`,
-                class: 'active-indicator'
+                class: 'active-indicator',
+                color: '#4ade80',
+                idleMins: 0
             };
         }
 
-        // Stale: >1 min and <1 hour idle (orange)
+        // Idle: use gradient color based on idle time
+        const color = getIdleColor(diffMins);
+
         if (diffMins < 60) {
             return {
                 isActive: false,
-                isStale: true,
+                isStale: diffMins > 15,
                 text: `${diffMins}m idle`,
-                class: 'stale-indicator'
+                class: 'idle-badge',
+                color: color,
+                idleMins: diffMins
             };
         }
 
-        // Idle: >= 1 hour (yellow)
+        // Idle: >= 1 hour
         const hours = Math.floor(diffMins / 60);
         const mins = diffMins % 60;
         return {
             isActive: false,
-            isStale: false,
+            isStale: true,
             text: `${hours}h ${mins}m idle`,
-            class: 'idle-indicator'
+            class: 'idle-badge',
+            color: color,
+            idleMins: diffMins
         };
     } catch {
-        return { isActive: false, isStale: false, text: '', class: '' };
+        return { isActive: false, isStale: false, text: '', class: '', color: '', idleMins: 0 };
     }
 }
 
@@ -2878,6 +3049,91 @@ function escapeJsString(str) {
         .replace(/\n/g, '\\n')      // Newlines
         .replace(/\r/g, '\\r')      // Carriage returns
         .replace(/\t/g, '\\t');     // Tabs
+}
+
+/**
+ * Parse task notification XML blocks and render as styled cards
+ * @param {string} content - Raw content that may contain <task-notification> blocks
+ * @returns {string} - HTML with task notifications rendered as styled cards
+ */
+function parseTaskNotifications(content) {
+    // Normalize literal \n to actual newlines for regex matching
+    const normalized = content.replace(/\\n/g, '\n');
+
+    // Check if content is primarily a task notification (starts with it or very short preamble)
+    // This prevents matching example XML inside long plan documents
+    const notificationStart = normalized.indexOf('<task-notification>');
+    if (notificationStart > 100) {
+        // Task notification is too far into the content - likely an example in documentation
+        return null;
+    }
+
+    // Flexible regex to match task-notification blocks with various field orders
+    const notificationRegex = /<task-notification>\s*([\s\S]*?)<\/task-notification>/g;
+
+    const parts = [];
+    let lastIndex = 0;
+    let match;
+
+    while ((match = notificationRegex.exec(normalized)) !== null) {
+        // Skip if this appears to be inside a code block (preceded by ```)
+        const textBefore = normalized.slice(0, match.index);
+        const codeBlockCount = (textBefore.match(/```/g) || []).length;
+        if (codeBlockCount % 2 === 1) {
+            // Inside a code block - skip this match
+            continue;
+        }
+
+        // Add escaped text before this notification
+        if (match.index > lastIndex) {
+            const textBeforeNotif = normalized.slice(lastIndex, match.index).trim();
+            if (textBeforeNotif) {
+                parts.push(`<div class="task-notification-text">${escapeHtml(textBeforeNotif)}</div>`);
+            }
+        }
+
+        const innerContent = match[1];
+
+        // Extract fields flexibly
+        const taskIdMatch = innerContent.match(/<task-id>([^<]*)<\/task-id>/);
+        const statusMatch = innerContent.match(/<status>([^<]*)<\/status>/);
+        const summaryMatch = innerContent.match(/<summary>([^<]*)<\/summary>/);
+        const resultMatch = innerContent.match(/<result>([\s\S]*?)<\/result>/);
+        const outputFileMatch = innerContent.match(/<output-file>([^<]*)<\/output-file>/);
+
+        const taskId = taskIdMatch ? taskIdMatch[1].trim() : 'unknown';
+        const status = statusMatch ? statusMatch[1].trim() : 'pending';
+        const summary = summaryMatch ? summaryMatch[1].trim() : 'Task notification';
+        const resultText = resultMatch ? resultMatch[1].trim() : '';
+        const outputFile = outputFileMatch ? outputFileMatch[1].trim() : '';
+
+        const statusIcon = status === 'completed' ? '✅' : status === 'failed' ? '❌' : '⏳';
+        const statusClass = status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'pending';
+
+        // Create styled notification card
+        const card = `<div class="task-notification ${statusClass}">
+            <div class="task-notification-header">
+                <span class="task-notification-icon">${statusIcon}</span>
+                <span class="task-notification-summary">${escapeHtml(summary)}</span>
+                <span class="task-notification-id">${escapeHtml(taskId.slice(0,7))}</span>
+            </div>
+            ${resultText ? `<div class="task-notification-result">${escapeHtml(resultText.slice(0, 300))}${resultText.length > 300 ? '...' : ''}</div>` : ''}
+            ${outputFile ? `<div class="task-notification-output">Output: ${escapeHtml(outputFile.split('/').pop())}</div>` : ''}
+        </div>`;
+
+        parts.push(card);
+        lastIndex = match.index + match[0].length;
+    }
+
+    // Add any remaining text after the last notification
+    if (lastIndex < normalized.length) {
+        const textAfter = normalized.slice(lastIndex).trim();
+        if (textAfter) {
+            parts.push(`<div class="task-notification-text">${escapeHtml(textAfter)}</div>`);
+        }
+    }
+
+    return parts.length > 0 ? parts.join('') : null;
 }
 
 /**
@@ -3346,11 +3602,17 @@ function updateSessionsInPlace(sessions) {
     const container = document.getElementById('sessions-container');
     const currentIds = new Set(sessions.map(s => s.sessionId));
 
+    // Build element map ONCE for O(1) lookups (instead of O(n) querySelector per session)
+    const elementMap = new Map();
+    container.querySelectorAll('[data-session-id]').forEach(card => {
+        elementMap.set(card.dataset.sessionId, card);
+    });
+
     // Update existing cards and track what needs to be added/removed
     const sessionsToAdd = [];
 
     for (const session of sessions) {
-        const card = container.querySelector(`[data-session-id="${session.sessionId}"]`);
+        const card = elementMap.get(session.sessionId);  // O(1) lookup
         if (card) {
             // Update existing card
             updateCard(card, session);
@@ -3362,12 +3624,11 @@ function updateSessionsInPlace(sessions) {
 
     // Remove cards for sessions that no longer exist
     const cardsToRemove = [];
-    container.querySelectorAll('[data-session-id]').forEach(card => {
-        const sessionId = card.dataset.sessionId;
+    for (const [sessionId, card] of elementMap) {
         if (!currentIds.has(sessionId)) {
             cardsToRemove.push(card);
         }
-    });
+    }
     cardsToRemove.forEach(card => {
         // Clean up any StickyScroll instances to prevent memory leaks
         card.querySelectorAll('[data-sticky-scroll-id]').forEach(el => StickyScroll.cleanup(el));
@@ -3699,7 +3960,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ============================================================================
 
 let timelineHours = parseInt(localStorage.getItem('timelineHours') || '8', 10); // Show last 8 hours (configurable)
-let timelineData = new Map(); // sessionId -> activityPeriods
+let timelineData = new Map(); // sessionId -> { periods, eventMarkers }
 let timelineViewActive = false;
 
 function changeTimelineRange(hours) {
@@ -3720,7 +3981,10 @@ async function fetchSessionTimeline(sessionId) {
         const response = await fetch(`/api/session/${sessionId}/timeline?bucket_minutes=5`);
         if (!response.ok) return null;
         const data = await response.json();
-        return data.activityPeriods || [];
+        return {
+            periods: data.activityPeriods || [],
+            eventMarkers: data.eventMarkers || []
+        };
     } catch (error) {
         console.error(`Failed to fetch timeline for ${sessionId}:`, error);
         return null;
@@ -3753,8 +4017,8 @@ async function refreshTimeline() {
 
         // Fetch timeline data for all sessions in parallel
         const timelinePromises = sessions.map(async (session) => {
-            const periods = await fetchSessionTimeline(session.sessionId);
-            return { session, periods };
+            const timelineResult = await fetchSessionTimeline(session.sessionId);
+            return { session, timelineResult };
         });
 
         const results = await Promise.all(timelinePromises);
@@ -3765,8 +4029,10 @@ async function refreshTimeline() {
 
         // Store timeline data and filter to sessions with activity IN THE VISIBLE WINDOW
         const sessionsWithActivity = [];
-        results.forEach(({ session, periods }) => {
-            if (!periods || periods.length === 0) return;
+        results.forEach(({ session, timelineResult }) => {
+            if (!timelineResult || !timelineResult.periods || timelineResult.periods.length === 0) return;
+
+            const periods = timelineResult.periods;
 
             // Check if any period overlaps with the visible time window
             const hasVisibleActivity = periods.some(period => {
@@ -3777,7 +4043,10 @@ async function refreshTimeline() {
             });
 
             if (hasVisibleActivity) {
-                timelineData.set(session.sessionId, periods);
+                timelineData.set(session.sessionId, {
+                    periods: periods,
+                    eventMarkers: timelineResult.eventMarkers || []
+                });
                 sessionsWithActivity.push(session);
             }
         });
@@ -3836,8 +4105,8 @@ function renderTimeline(sessions) {
     // Generate timeline sections for each repo
     const repoSectionsHtml = sortedRepos.map(([repoName, { cwd, sessions: repoSessions }]) => {
         const rowsHtml = repoSessions.map(session => {
-            const periods = timelineData.get(session.sessionId) || [];
-            return renderTimelineRow(session, periods, startTime, now);
+            const sessionData = timelineData.get(session.sessionId) || { periods: [], eventMarkers: [] };
+            return renderTimelineRow(session, sessionData.periods, sessionData.eventMarkers, startTime, now);
         }).join('');
 
         return `
@@ -3855,8 +4124,8 @@ function renderTimeline(sessions) {
     const gastownGroups = groupGastownByRepo(gastownSessions);
     const gastownSectionsHtml = gastownGroups.map(group => {
         const rowsHtml = group.sessions.map(session => {
-            const periods = timelineData.get(session.sessionId) || [];
-            return renderTimelineRow(session, periods, startTime, now);
+            const sessionData = timelineData.get(session.sessionId) || { periods: [], eventMarkers: [] };
+            return renderTimelineRow(session, sessionData.periods, sessionData.eventMarkers, startTime, now);
         }).join('');
 
         return `
@@ -3915,7 +4184,7 @@ function generateTimeAxis(startTime, endTime, hoursBack) {
     return markers.join('');
 }
 
-function renderTimelineRow(session, periods, startTime, endTime) {
+function renderTimelineRow(session, periods, eventMarkers, startTime, endTime) {
     const duration = endTime - startTime;
 
     // Determine session status for styling (closed = historical session no longer running)
@@ -3956,6 +4225,22 @@ function renderTimelineRow(session, periods, startTime, endTime) {
                      data-period="${periodData}"></div>`;
     }).join('');
 
+    // Generate event markers (discrete point icons above the timeline track)
+    const markersHtml = (eventMarkers || []).map(marker => {
+        const ts = new Date(marker.timestamp).getTime();
+        // Skip markers outside visible range
+        if (ts < startTime || ts > endTime) return '';
+
+        const left = ((ts - startTime) / duration) * 100;
+        const tooltipText = `${marker.label} - ${formatTimeShort(marker.timestamp)}`;
+
+        return `<div class="timeline-marker ${marker.type}"
+                     style="left: ${left}%"
+                     title="${escapeHtml(tooltipText)}"
+                     data-marker-type="${marker.type}"
+                     data-timestamp="${marker.timestamp}">${marker.icon}</div>`;
+    }).join('');
+
     return `
         <div class="timeline-row ${isZombie ? 'zombie' : ''} ${session.isGastown ? 'gastown-row' : ''}" data-session-id="${session.sessionId}">
             <div class="timeline-label" onclick="focusWarpTab(previousSessions.get('${escapeJsString(session.sessionId)}'))">
@@ -3967,9 +4252,15 @@ function renderTimelineRow(session, periods, startTime, endTime) {
             </div>
             <div class="timeline-track">
                 ${barsHtml || '<span class="no-activity">No activity in last ' + timelineHours + ' hours</span>'}
+                ${markersHtml}
             </div>
         </div>
     `;
+}
+
+function formatTimeShort(timestamp) {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 }
 
 function getLastActivityTime(periods) {
@@ -4164,6 +4455,11 @@ function switchView(viewName) {
     if (viewName === 'mission-control') {
         // Fetch managed processes first, then render
         refreshManagedProcessList().then(() => refreshMissionControl());
+    } else {
+        // Clean up MC process WebSocket when leaving Mission Control view
+        if (typeof disconnectMissionControlProcess === 'function') {
+            disconnectMissionControlProcess();
+        }
     }
 
     // Refresh Graveyard when switching to it
@@ -5052,9 +5348,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Mission Control state
 let mcSelectedSessionId = null;
+let mcSelectedSessionPid = null;  // PID of selected detected session (for kill button)
+let mcSelectedSessionSlug = null;  // Slug of selected detected session
 let mcConversationCache = new Map();
 let mcStickyScroll = null;  // StickyScroll instance for Mission Control
 let mcLastMessageCount = 0;
+let mcAttachedImages = [];  // Array of {path, dataUrl, filename} for attached images
+let mcProcessWebSocket = null;  // WebSocket for real-time conversation updates
 
 /**
  * Initialize Mission Control event listeners
@@ -5152,11 +5452,48 @@ function initMCInput() {
         }
     });
 
-    // Handle paste - strip formatting
-    inputEl.addEventListener('paste', (e) => {
+    // Handle paste - strip formatting for text, handle images
+    inputEl.addEventListener('paste', async (e) => {
+        // Check for images in clipboard
+        const items = Array.from(e.clipboardData.items);
+        const imageItem = items.find(item => item.type.startsWith('image/'));
+
+        if (imageItem) {
+            e.preventDefault();
+            const file = imageItem.getAsFile();
+            if (file) {
+                await handleImageAttachment(file);
+            }
+            return;
+        }
+
+        // Plain text - strip formatting
         e.preventDefault();
         const text = e.clipboardData.getData('text/plain');
         document.execCommand('insertText', false, text);
+    });
+
+    // Handle drag and drop for images
+    inputEl.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        inputEl.classList.add('drag-over');
+    });
+
+    inputEl.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        inputEl.classList.remove('drag-over');
+    });
+
+    inputEl.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        inputEl.classList.remove('drag-over');
+
+        const files = Array.from(e.dataTransfer.files);
+        const imageFiles = files.filter(f => f.type.startsWith('image/'));
+
+        for (const file of imageFiles) {
+            await handleImageAttachment(file);
+        }
     });
 
     // Send button click
@@ -5195,6 +5532,104 @@ function initMCInput() {
             }
         }
     });
+}
+
+/**
+ * Handle an image file attachment - upload to server and add to preview
+ */
+async function handleImageAttachment(file) {
+    // Read file as data URL for preview
+    const dataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(file);
+    });
+
+    // Upload to server
+    try {
+        const response = await fetch('/api/upload-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                data: dataUrl,
+                filename: file.name,
+                mime_type: file.type
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Upload failed' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        // Add to attached images
+        mcAttachedImages.push({
+            path: result.path,
+            dataUrl: dataUrl,
+            filename: result.filename
+        });
+
+        // Update preview UI
+        renderImagePreviews();
+        showToast(`Image attached: ${file.name}`, 'success');
+
+    } catch (error) {
+        console.error('Failed to upload image:', error);
+        showToast(`Failed to attach image: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Remove an attached image by index
+ */
+function removeAttachedImage(index) {
+    mcAttachedImages.splice(index, 1);
+    renderImagePreviews();
+}
+
+/**
+ * Render image preview thumbnails in the input area
+ */
+function renderImagePreviews() {
+    let previewContainer = document.getElementById('mc-image-previews');
+
+    // Create container if it doesn't exist
+    if (!previewContainer) {
+        previewContainer = document.createElement('div');
+        previewContainer.id = 'mc-image-previews';
+        previewContainer.className = 'mc-image-previews';
+
+        // Insert before the input wrapper
+        const inputWrapper = document.querySelector('.mc-input-wrapper');
+        if (inputWrapper) {
+            inputWrapper.parentNode.insertBefore(previewContainer, inputWrapper);
+        }
+    }
+
+    // Render thumbnails
+    if (mcAttachedImages.length === 0) {
+        previewContainer.innerHTML = '';
+        previewContainer.classList.add('hidden');
+        return;
+    }
+
+    previewContainer.classList.remove('hidden');
+    previewContainer.innerHTML = mcAttachedImages.map((img, index) => `
+        <div class="mc-image-preview" title="${escapeHtml(img.filename)}">
+            <img src="${img.dataUrl}" alt="${escapeHtml(img.filename)}">
+            <button class="mc-image-remove" onclick="removeAttachedImage(${index})" title="Remove image">×</button>
+        </div>
+    `).join('');
+}
+
+/**
+ * Clear all attached images
+ */
+function clearAttachedImages() {
+    mcAttachedImages = [];
+    renderImagePreviews();
 }
 
 /**
@@ -5296,7 +5731,14 @@ async function sendMCMessage() {
     if (!inputEl || !mcSelectedSessionId) return;
 
     // Get plain text content
-    const message = inputEl.innerText.trim();
+    let message = inputEl.innerText.trim();
+
+    // Prepend image paths if any attached
+    if (mcAttachedImages.length > 0) {
+        const imagePaths = mcAttachedImages.map(img => img.path).join(' ');
+        message = message ? `${imagePaths} ${message}` : imagePaths;
+    }
+
     if (!message) return;
 
     // Disable input during send
@@ -5319,8 +5761,9 @@ async function sendMCMessage() {
             throw new Error(error.detail || `HTTP ${response.status}`);
         }
 
-        // Success - clear input
+        // Success - clear input and attached images
         inputEl.innerHTML = '';
+        clearAttachedImages();
         if (statusEl) {
             statusEl.textContent = 'Sent!';
             statusEl.className = '';
@@ -5461,16 +5904,18 @@ function renderMissionControlSessions(sessions) {
         existingItems.set(el.dataset.sessionId, el);
     });
 
-    // Track which sessions we've seen (to detect removals)
-    const seenSessionIds = new Set();
-
-    // Build new HTML only if structure changed significantly
+    // Build new HTML only if structure changed (add/remove sessions)
     const allSessions = [...regularSessions, ...gastownSessions];
-    const currentSessionIds = allSessions.map(s => s.sessionId).join(',');
-    const previousSessionIds = container.dataset.sessionIds || '';
+    const currentIdsSet = new Set(allSessions.map(s => s.sessionId));
+    const previousIdsRaw = container.dataset.sessionIds || '';
+    const previousIdsSet = new Set(previousIdsRaw ? previousIdsRaw.split(',') : []);
+
+    // Efficient Set comparison for detecting adds/removes
+    const structureChanged = currentIdsSet.size !== previousIdsSet.size ||
+        [...currentIdsSet].some(id => !previousIdsSet.has(id));
 
     // If session list structure changed (add/remove), do full rebuild
-    if (currentSessionIds !== previousSessionIds) {
+    if (structureChanged) {
         // Build HTML
         let html = '';
 
@@ -5505,7 +5950,7 @@ function renderMissionControlSessions(sessions) {
         }
 
         container.innerHTML = html;
-        container.dataset.sessionIds = currentSessionIds;
+        container.dataset.sessionIds = [...currentIdsSet].join(',');
 
         // Reattach click handlers
         container.querySelectorAll('.mc-session-item').forEach(el => {
@@ -5586,17 +6031,12 @@ function renderMCSessionItem(session, isGastown = false) {
     const duration = formatAgentDuration(session.startTimestamp) || '0m';
     const contextPct = Math.round(session.tokenPercentage || 0);
 
-    // Determine state emoji based on activity status
-    // Green = active, Orange = stale (1-60 min idle), Yellow = idle (>1hr)
+    // Activity status for the pill
     const activityStatus = getActivityStatus(session.lastActivity);
-    let stateEmoji = '🟢';  // active
-    if (session.state !== 'active') {
-        stateEmoji = activityStatus.isStale ? '🟠' : '🟡';  // orange for stale, yellow for idle
-    }
 
     // Show activity status - always use activityStatus for consistent display
     const activityHtml = activityStatus.text
-        ? `<span class="${activityStatus.class}">${activityStatus.text}</span>`
+        ? `<span class="idle-badge" style="background: ${activityStatus.color}; color: ${activityStatus.idleMins > 30 ? '#fff' : '#000'}">${activityStatus.text}</span>`
         : '<span class="idle-indicator">idle</span>';
 
     // For gastown, show role icon
@@ -5609,12 +6049,12 @@ function renderMCSessionItem(session, isGastown = false) {
     return `
         <div class="mc-session-item ${session.state === 'active' ? 'active' : ''} ${isSelected ? 'selected' : ''}"
              data-session-id="${session.sessionId}">
-            <div class="mc-session-name">${stateEmoji} ${roleIcon}${escapeHtml(displayName)}</div>
+            <div class="mc-session-name">${roleIcon}${escapeHtml(displayName)}</div>
             <div class="mc-session-meta">
                 <span>${duration}</span>
                 <span>${contextPct}% ctx</span>
-                ${activityHtml}
             </div>
+            <div class="mc-session-activity">${activityHtml}</div>
         </div>
     `;
 }
@@ -5623,6 +6063,9 @@ function renderMCSessionItem(session, isGastown = false) {
  * Select a session in Mission Control
  */
 function selectMissionControlSession(sessionId) {
+    // Disconnect any existing process WebSocket when switching sessions
+    disconnectMissionControlProcess();
+
     mcSelectedSessionId = sessionId;
     // Reset auto-scroll when selecting a new session
     if (mcStickyScroll) {
@@ -5642,6 +6085,18 @@ function selectMissionControlSession(sessionId) {
         labelEl.textContent = displayName;
     }
 
+    // Store PID/slug for kill button
+    mcSelectedSessionPid = session?.pid || null;
+    mcSelectedSessionSlug = session?.slug || session?.cwd?.split('/').pop() || sessionId.slice(0, 8);
+
+    // Show kill button if session has a PID
+    const killBtn = document.getElementById('mc-kill-btn');
+    if (killBtn) {
+        killBtn.classList.toggle('hidden', !mcSelectedSessionPid);
+        killBtn.textContent = 'Kill';
+        killBtn.title = mcSelectedSessionPid ? `Kill process ${mcSelectedSessionPid}` : '';
+    }
+
     // Update context indicator with session's token data
     if (session && session.contextTokens) {
         updateContextIndicator(session.contextTokens, MAX_CONTEXT_TOKENS);
@@ -5658,6 +6113,13 @@ function selectMissionControlSession(sessionId) {
 
     // Load conversation
     loadConversationHistory(sessionId);
+
+    // Connect to process WebSocket for real-time updates if there's a matching managed process
+    const matchingProcessId = findMatchingManagedProcess(session);
+    if (matchingProcessId) {
+        console.log(`[MC] Found matching managed process ${matchingProcessId} for session, enabling real-time updates`);
+        connectMissionControlToProcess(matchingProcessId);
+    }
 }
 
 /**
@@ -5695,8 +6157,10 @@ async function loadConversationHistory(sessionId, skipLoadingState = false) {
 
 /**
  * Render inline expandable tool blocks for a message
+ * @param {Array} tools - Array of tool objects
+ * @param {boolean} canHaveRunningTools - Whether this message can have running tools (only true for last assistant msg)
  */
-function renderInlineToolBlocks(tools) {
+function renderInlineToolBlocks(tools, canHaveRunningTools = false) {
     if (!tools || tools.length === 0) return '';
 
     const errorCount = tools.filter(t => t.is_error).length;
@@ -5706,7 +6170,9 @@ function renderInlineToolBlocks(tools) {
         const toolName = tool.name || 'Unknown';
         const summary = getInlineToolSummary(tool);
         const isAgent = toolName === 'Task';
-        const isRunning = !tool.output && tool.output !== '';
+        // Tool is only running if: no output AND this message can have running tools
+        const hasNoOutput = !tool.output && tool.output !== '';
+        const isRunning = hasNoOutput && canHaveRunningTools;
 
         // Calculate duration
         const durationHtml = getToolDurationHtml(tool, isRunning);
@@ -5722,8 +6188,9 @@ function renderInlineToolBlocks(tools) {
         const inputStr = inputResult.text;
         const inputType = inputResult.type;
 
-        // Format output (truncated if too long)
-        const output = tool.output || '';
+        // Format output (truncated if too long) - ensure string
+        const rawOutput = tool.output;
+        const output = typeof rawOutput === 'string' ? rawOutput : (rawOutput ? JSON.stringify(rawOutput, null, 2) : '');
         const outputIsTruncated = output.length > 1000;
         const outputTruncated = outputIsTruncated ? output.slice(0, 1000) : output;
 
@@ -5886,6 +6353,55 @@ function toggleOutputExpand(button) {
 }
 
 /**
+ * Toggle expanded user message content
+ */
+function toggleUserMessage(msgId) {
+    const preview = document.getElementById(`${msgId}-preview`);
+    const full = document.getElementById(`${msgId}-full`);
+    const btn = preview?.parentElement?.querySelector('.user-message-toggle');
+
+    if (!preview || !full || !btn) return;
+
+    const isExpanded = full.classList.contains('hidden');
+
+    if (isExpanded) {
+        preview.classList.add('hidden');
+        full.classList.remove('hidden');
+        btn.textContent = 'Show less';
+    } else {
+        preview.classList.remove('hidden');
+        full.classList.add('hidden');
+        btn.textContent = 'Show more';
+    }
+}
+
+/**
+ * Toggle compaction details accordion
+ */
+function toggleCompactionDetails(markerId) {
+    const preview = document.getElementById(`${markerId}-preview`);
+    const details = document.getElementById(`${markerId}-details`);
+    const badge = preview?.parentElement?.querySelector('.mc-compaction-badge');
+    const toggle = badge?.querySelector('.mc-compaction-toggle');
+
+    if (!preview || !details) return;
+
+    const isExpanded = !details.classList.contains('hidden');
+
+    if (isExpanded) {
+        // Collapse
+        details.classList.add('hidden');
+        preview.classList.remove('hidden');
+        if (toggle) toggle.textContent = '▶';
+    } else {
+        // Expand
+        preview.classList.add('hidden');
+        details.classList.remove('hidden');
+        if (toggle) toggle.textContent = '▼';
+    }
+}
+
+/**
  * Copy tool input/output content to clipboard
  */
 function copyToolContent(button) {
@@ -6010,14 +6526,14 @@ function getToolDurationHtml(tool, isRunning) {
     if (isRunning) {
         // Tool still running - show elapsed time
         const elapsed = Date.now() - startTime;
-        const duration = formatDuration(elapsed);
-        return `<span class="tool-duration running" data-start="${startTime}">${duration}</span>`;
+        const durationStr = formatDurationMs(elapsed);
+        return `<span class="tool-duration running" data-start="${startTime}">${durationStr}</span>`;
     } else if (tool.resultTimestamp) {
         // Tool completed - calculate actual duration
         const endTime = new Date(tool.resultTimestamp).getTime();
-        const duration = endTime - startTime;
-        if (duration > 0) {
-            return `<span class="tool-duration completed">${formatDuration(duration)}</span>`;
+        const durationMs = endTime - startTime;
+        if (durationMs > 0) {
+            return `<span class="tool-duration completed">${formatDurationMs(durationMs)}</span>`;
         }
     }
 
@@ -6026,9 +6542,9 @@ function getToolDurationHtml(tool, isRunning) {
 }
 
 /**
- * Format duration in human-readable form
+ * Format duration in human-readable form (takes milliseconds)
  */
-function formatDuration(ms) {
+function formatDurationMs(ms) {
     if (ms < 1000) return '<1s';
     const seconds = Math.floor(ms / 1000);
     if (seconds < 60) return `${seconds}s`;
@@ -6091,6 +6607,18 @@ function renderConversation(messages) {
     }
 
     // Full render
+    // Capture expanded tool states before re-rendering
+    const expandedTools = new Set();
+    streamEl.querySelectorAll('.mc-message').forEach(msgEl => {
+        const msgIdx = msgEl.dataset.idx;
+        msgEl.querySelectorAll('.mc-inline-tool.expanded').forEach(toolEl => {
+            const toolIdx = toolEl.dataset.toolIdx;
+            if (msgIdx !== undefined && toolIdx !== undefined) {
+                expandedTools.add(`${msgIdx}-${toolIdx}`);
+            }
+        });
+    });
+
     // Build all message HTML
     const html = filteredMessages.map((msg, idx) => {
         const role = msg.role || 'unknown';
@@ -6115,6 +6643,51 @@ function renderConversation(messages) {
             `;
         }
 
+        // Handle compaction markers with accordion-style divider
+        if (msg.isCompaction) {
+            const markerId = `compaction-${idx}`;
+            const content = msg.content || '';
+
+            // Check if this is a trailing compaction (no real messages after it)
+            // Trailing compactions are just context saves, not historical compaction points
+            const isTrailingCompaction = !filteredMessages.slice(idx + 1).some(m =>
+                m.role === 'user' || m.role === 'assistant' || m.isContinuation
+            );
+
+            // For trailing compactions, don't show anything - it's just an internal summary
+            // that doesn't affect the user's view of the conversation
+            if (isTrailingCompaction) {
+                return '';
+            }
+
+            // Get preview (first 120 chars, clean up newlines)
+            const preview = content.replace(/\n/g, ' ').slice(0, 120);
+            const hasMore = content.length > 120;
+            const escapedContent = escapeHtml(content).replace(/\n/g, '<br>');
+            const messagesCompacted = msg.messagesCompacted || '';
+            const statsText = messagesCompacted ? ` · ${messagesCompacted} messages` : '';
+
+            return `
+                <div class="mc-compaction-marker" data-idx="${idx}">
+                    <div class="mc-compaction-divider">
+                        <div class="mc-compaction-line"></div>
+                        <div class="mc-compaction-badge" onclick="toggleCompactionDetails('${markerId}')" title="Click to ${hasMore ? 'expand' : 'view'} summary">
+                            <span class="mc-compaction-icon">📋</span>
+                            <span class="mc-compaction-label">Compacted${statsText}</span>
+                            ${hasMore ? '<span class="mc-compaction-toggle">▶</span>' : ''}
+                        </div>
+                        <div class="mc-compaction-line"></div>
+                    </div>
+                    <div class="mc-compaction-preview" id="${markerId}-preview">
+                        ${escapeHtml(preview)}${hasMore ? '...' : ''}
+                    </div>
+                    <div class="mc-compaction-details hidden" id="${markerId}-details">
+                        ${escapedContent}
+                    </div>
+                </div>
+            `;
+        }
+
         let displayContent = '';
         let isToolOnly = false;
         let toolsText = '';
@@ -6123,18 +6696,33 @@ function renderConversation(messages) {
         // Render inline tool blocks if detailed tools are available
         const toolsDetailed = msg.toolsDetailed || [];
         if (toolsDetailed.length > 0) {
-            inlineToolsHtml = renderInlineToolBlocks(toolsDetailed);
+            // Only the last assistant message can have running tools
+            const isLastAssistantMsg = idx === filteredMessages.length - 1 ||
+                filteredMessages.slice(idx + 1).every(m => m.role !== 'assistant');
+            inlineToolsHtml = renderInlineToolBlocks(toolsDetailed, isLastAssistantMsg);
             toolsText = (msg.tools || []).join(', ');
         }
 
         if (msg.content && msg.content.trim()) {
-            if (msg.isCompaction) {
-                displayContent = `<div class="mc-compaction">${escapeHtml(msg.content).replace(/\n/g, '<br>')}</div>`;
-            } else if (role === 'user') {
-                // User messages: escape HTML, basic formatting
-                const content = escapeHtml(msg.content).slice(0, 500);
-                const truncated = msg.content.length > 500 ? '...' : '';
-                displayContent = content + truncated;
+            if (role === 'user') {
+                // Check for task notifications first (only at start of message)
+                const parsed = msg.content.includes('<task-notification>') ? parseTaskNotifications(msg.content) : null;
+                if (parsed) {
+                    displayContent = parsed;
+                } else {
+                    // User messages: escape HTML with expand toggle for long content
+                    const escapedContent = escapeHtml(msg.content);
+                    if (msg.content.length > 300) {
+                        const msgId = `user-msg-${idx}`;
+                        displayContent = `<div class="user-message-expandable">
+                            <div class="user-message-preview" id="${msgId}-preview">${escapedContent.slice(0, 300)}...</div>
+                            <div class="user-message-full hidden" id="${msgId}-full">${escapedContent.replace(/\n/g, '<br>')}</div>
+                            <button class="user-message-toggle" onclick="toggleUserMessage('${msgId}')">Show more</button>
+                        </div>`;
+                    } else {
+                        displayContent = escapedContent;
+                    }
+                }
             } else {
                 // Assistant/system messages: full markdown rendering
                 displayContent = renderMarkdown(msg.content);
@@ -6193,6 +6781,24 @@ function renderConversation(messages) {
 
     streamEl.innerHTML = html;
 
+    // Restore expanded tool states
+    if (expandedTools.size > 0) {
+        streamEl.querySelectorAll('.mc-message').forEach(msgEl => {
+            const msgIdx = msgEl.dataset.idx;
+            msgEl.querySelectorAll('.mc-inline-tool').forEach(toolEl => {
+                const toolIdx = toolEl.dataset.toolIdx;
+                if (msgIdx !== undefined && toolIdx !== undefined && expandedTools.has(`${msgIdx}-${toolIdx}`)) {
+                    // Restore expanded state
+                    toolEl.classList.add('expanded');
+                    const details = toolEl.querySelector('.mc-inline-tool-details');
+                    const icon = toolEl.querySelector('.tool-expand-icon');
+                    if (details) details.classList.remove('hidden');
+                    if (icon) icon.textContent = '▼';
+                }
+            });
+        });
+    }
+
     // Auto-scroll to bottom if auto-scroll is enabled
     if (mcStickyScroll && filteredMessages.length > 0) {
         mcStickyScroll.scrollToBottom();
@@ -6215,6 +6821,242 @@ function clearMissionControlConversation() {
 
     // Hide message input
     hideMCInput();
+}
+
+/**
+ * Connect Mission Control conversation view to a process WebSocket for real-time updates
+ * @param {string} processId - The process ID to connect to
+ */
+function connectMissionControlToProcess(processId) {
+    // Close existing connection if any
+    if (mcProcessWebSocket) {
+        mcProcessWebSocket.close();
+        mcProcessWebSocket = null;
+    }
+
+    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/process/${processId}`;
+    console.log(`[MC-WS] Connecting conversation view to process ${processId}`);
+
+    mcProcessWebSocket = new WebSocket(wsUrl);
+
+    mcProcessWebSocket.onopen = () => {
+        console.log(`[MC-WS] Connected to process ${processId} for real-time updates`);
+    };
+
+    mcProcessWebSocket.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            handleMissionControlProcessMessage(msg);
+        } catch (e) {
+            console.warn('[MC-WS] Failed to parse message:', e);
+        }
+    };
+
+    mcProcessWebSocket.onerror = (e) => {
+        console.warn('[MC-WS] WebSocket error:', e);
+    };
+
+    mcProcessWebSocket.onclose = () => {
+        console.log('[MC-WS] WebSocket closed');
+        mcProcessWebSocket = null;
+    };
+}
+
+/**
+ * Disconnect Mission Control process WebSocket
+ */
+function disconnectMissionControlProcess() {
+    if (mcProcessWebSocket) {
+        mcProcessWebSocket.close();
+        mcProcessWebSocket = null;
+    }
+}
+
+/**
+ * Handle incoming WebSocket messages for Mission Control conversation view
+ * @param {Object} msg - The parsed WebSocket message
+ */
+function handleMissionControlProcessMessage(msg) {
+    if (!mcSelectedSessionId) return;
+
+    switch (msg.type) {
+        case 'message':
+            // Structured assistant message - append to conversation
+            appendToMissionControlConversation({
+                role: 'assistant',
+                content: msg.content || msg.text || '',
+                timestamp: new Date().toISOString(),
+                tools: msg.tools || [],
+                toolsDetailed: msg.toolsDetailed || []
+            });
+            break;
+
+        case 'tool_use':
+            // Tool being invoked - could show as activity indicator
+            // For now, we'll let the next full message include the tool
+            console.log('[MC-WS] Tool use:', msg.name);
+            break;
+
+        case 'tool_result':
+            // Tool completed - the result will be in the next message
+            console.log('[MC-WS] Tool result:', msg.tool_use_id, msg.is_error ? 'error' : 'success');
+            break;
+
+        case 'output':
+            // Streaming text output - append to streaming element
+            if (msg.data) {
+                appendStreamingTextToConversation(msg.data);
+            }
+            break;
+
+        case 'result':
+            // Final result with usage stats - conversation complete
+            console.log('[MC-WS] Result received, refreshing conversation');
+            // Clear streaming element and do a full refresh to get final state
+            clearStreamingText();
+            if (mcSelectedSessionId) {
+                loadConversationHistory(mcSelectedSessionId, true);
+            }
+            break;
+
+        case 'state':
+            // Process state changed - might need to update UI
+            if (msg.state === 'stopped') {
+                disconnectMissionControlProcess();
+            }
+            break;
+    }
+}
+
+/**
+ * Append a new message to the Mission Control conversation view
+ * @param {Object} msg - Message object with role, content, timestamp, etc.
+ */
+function appendToMissionControlConversation(msg) {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
+
+    // Clear any streaming text first
+    clearStreamingText();
+
+    // Remove "no conversation" placeholder if present
+    const emptyEl = streamEl.querySelector('.mc-empty');
+    if (emptyEl) {
+        emptyEl.remove();
+    }
+
+    // Create message element
+    const role = msg.role || 'assistant';
+    const roleClass = role === 'user' ? 'human' : role === 'system' ? 'system' : 'assistant';
+    const roleLabel = role === 'user' ? '👤 You' : role === 'system' ? '📋 System' : '🤖 Assistant';
+    const timestamp = msg.timestamp ? formatTimeAgo(new Date(msg.timestamp)) : '';
+
+    let displayContent = '';
+    if (msg.content && msg.content.trim()) {
+        displayContent = role === 'user' ? escapeHtml(msg.content) : renderMarkdown(msg.content);
+    }
+
+    // Render inline tools if present
+    let inlineToolsHtml = '';
+    if (msg.toolsDetailed && msg.toolsDetailed.length > 0) {
+        inlineToolsHtml = renderInlineToolBlocks(msg.toolsDetailed, true);
+    }
+
+    const idx = streamEl.querySelectorAll('.mc-message').length;
+    const messageHtml = `
+        <div class="mc-message ${roleClass} mc-live-message" data-idx="${idx}">
+            <div class="mc-message-header">
+                <span class="mc-message-role">${roleLabel}</span>
+                <span class="mc-message-time">${timestamp}</span>
+                <span class="mc-live-indicator" title="Live update">●</span>
+            </div>
+            <div class="mc-message-content">${displayContent}</div>
+            ${inlineToolsHtml}
+        </div>
+    `;
+
+    streamEl.insertAdjacentHTML('beforeend', messageHtml);
+
+    // Auto-scroll to bottom
+    if (mcStickyScroll) {
+        mcStickyScroll.scrollToBottom();
+    }
+
+    // Update cache
+    const cached = mcConversationCache.get(mcSelectedSessionId) || [];
+    cached.push(msg);
+    mcConversationCache.set(mcSelectedSessionId, cached);
+    mcLastMessageCount = cached.length;
+}
+
+/**
+ * Append streaming text to a dedicated streaming element in the conversation
+ * @param {string} text - Text chunk to append
+ */
+function appendStreamingTextToConversation(text) {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
+
+    // Find or create streaming element for current assistant message
+    let streamingEl = streamEl.querySelector('.mc-streaming-text');
+    if (!streamingEl) {
+        // Remove "no conversation" placeholder if present
+        const emptyEl = streamEl.querySelector('.mc-empty');
+        if (emptyEl) {
+            emptyEl.remove();
+        }
+
+        streamingEl = document.createElement('div');
+        streamingEl.className = 'mc-message assistant mc-streaming-text';
+        streamingEl.innerHTML = `
+            <div class="mc-message-header">
+                <span class="mc-message-role">🤖 Assistant</span>
+                <span class="mc-message-time">now</span>
+                <span class="mc-live-indicator streaming" title="Streaming">●</span>
+            </div>
+            <div class="mc-message-content mc-streaming-content"></div>
+        `;
+        streamEl.appendChild(streamingEl);
+    }
+
+    const contentEl = streamingEl.querySelector('.mc-streaming-content');
+    if (contentEl) {
+        contentEl.textContent += text;
+    }
+
+    // Auto-scroll to bottom
+    if (mcStickyScroll) {
+        mcStickyScroll.scrollToBottom();
+    }
+}
+
+/**
+ * Clear the streaming text element
+ */
+function clearStreamingText() {
+    const streamEl = document.getElementById('mc-conversation-stream');
+    if (!streamEl) return;
+
+    const streamingEl = streamEl.querySelector('.mc-streaming-text');
+    if (streamingEl) {
+        streamingEl.remove();
+    }
+}
+
+/**
+ * Find a managed process that matches a detected session by cwd
+ * @param {Object} session - The detected session
+ * @returns {string|null} - The process ID if found, null otherwise
+ */
+function findMatchingManagedProcess(session) {
+    if (!session || !session.cwd) return null;
+
+    for (const [processId, process] of managedProcesses) {
+        if (process.cwd === session.cwd && process.state !== 'stopped') {
+            return processId;
+        }
+    }
+    return null;
 }
 
 // Initialize Mission Control on DOM ready
@@ -6314,36 +7156,214 @@ function selectSpawnDirectory(path) {
 }
 
 /**
- * Open native folder picker dialog
+ * Open web-based directory browser modal
  */
 async function browseForFolder() {
-    const btn = document.querySelector('.spawn-browse-btn');
-    const originalText = btn?.innerHTML;
+    // Get current input value as starting path, or default to home
+    const input = document.getElementById('spawn-directory');
+    const startPath = input?.value?.trim() || null;
+
+    showDirectoryBrowser(startPath);
+}
+
+/**
+ * Show the web-based directory browser modal
+ */
+async function showDirectoryBrowser(startPath = null) {
+    // Create modal if it doesn't exist
+    let modal = document.getElementById('directory-browser-modal');
+    if (!modal) {
+        modal = createDirectoryBrowserModal();
+        document.body.appendChild(modal);
+    }
+
+    // Show modal
+    modal.classList.remove('hidden');
+
+    // Load initial directory
+    await loadDirectoryContents(startPath);
+}
+
+/**
+ * Create the directory browser modal element
+ */
+function createDirectoryBrowserModal() {
+    const modal = document.createElement('div');
+    modal.id = 'directory-browser-modal';
+    modal.className = 'directory-browser-modal hidden';
+
+    modal.innerHTML = `
+        <div class="directory-browser-content">
+            <div class="directory-browser-header">
+                <h3>Select Directory</h3>
+                <button class="directory-browser-close" onclick="closeDirectoryBrowser()">×</button>
+            </div>
+            <div class="directory-browser-path">
+                <button class="directory-browser-up" onclick="navigateToParent()" title="Go to parent directory">
+                    ⬆️
+                </button>
+                <input type="text" id="directory-browser-path-input"
+                       placeholder="/path/to/directory"
+                       onkeydown="if(event.key==='Enter') navigateToPath(this.value)">
+            </div>
+            <div class="directory-browser-body">
+                <div id="directory-browser-list" class="directory-list">
+                    <div class="directory-loading">Loading...</div>
+                </div>
+            </div>
+            <div class="directory-browser-footer">
+                <button class="btn btn-secondary" onclick="closeDirectoryBrowser()">Cancel</button>
+                <button class="btn btn-primary" onclick="selectCurrentDirectory()">Select This Folder</button>
+            </div>
+        </div>
+    `;
+
+    // Close on backdrop click
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            closeDirectoryBrowser();
+        }
+    });
+
+    // Close on Escape key
+    modal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeDirectoryBrowser();
+        }
+    });
+
+    return modal;
+}
+
+// Store current directory state
+let currentBrowserPath = null;
+let currentBrowserParent = null;
+
+/**
+ * Load and display directory contents
+ */
+async function loadDirectoryContents(path = null) {
+    const listContainer = document.getElementById('directory-browser-list');
+    const pathInput = document.getElementById('directory-browser-path-input');
+    const upButton = document.querySelector('.directory-browser-up');
+
+    // Show loading state
+    if (listContainer) {
+        listContainer.innerHTML = '<div class="directory-loading">Loading...</div>';
+    }
 
     try {
-        // Show loading state
-        if (btn) {
-            btn.innerHTML = '⏳';
-            btn.disabled = true;
+        const url = path ? `/api/list-directory?path=${encodeURIComponent(path)}` : '/api/list-directory';
+        const response = await fetch(url);
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to load directory');
         }
 
-        const response = await fetch('/api/browse-folder');
         const data = await response.json();
 
-        if (data.path) {
-            selectSpawnDirectory(data.path);
-        } else if (data.error) {
-            console.log('Folder selection cancelled or failed:', data.error);
+        // Update state
+        currentBrowserPath = data.current;
+        currentBrowserParent = data.parent;
+
+        // Update path input
+        if (pathInput) {
+            pathInput.value = data.current;
         }
+
+        // Enable/disable up button
+        if (upButton) {
+            upButton.disabled = !data.parent;
+            upButton.style.opacity = data.parent ? '1' : '0.5';
+        }
+
+        // Render directory list
+        renderDirectoryList(data.directories);
+
     } catch (error) {
-        console.error('Failed to open folder picker:', error);
-        showToast('Failed to open folder picker', 'error');
-    } finally {
-        // Restore button
-        if (btn) {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
+        console.error('Failed to load directory:', error);
+        if (listContainer) {
+            listContainer.innerHTML = `
+                <div class="directory-error">
+                    <span>⚠️ ${error.message}</span>
+                    <button class="btn btn-small" onclick="loadDirectoryContents()">Go Home</button>
+                </div>
+            `;
         }
+    }
+}
+
+/**
+ * Render the list of directories
+ */
+function renderDirectoryList(directories) {
+    const listContainer = document.getElementById('directory-browser-list');
+    if (!listContainer) return;
+
+    if (directories.length === 0) {
+        listContainer.innerHTML = '<div class="directory-empty">No subdirectories</div>';
+        return;
+    }
+
+    const html = directories.map(dir => {
+        const accessibleClass = dir.accessible ? '' : 'inaccessible';
+        const icon = dir.accessible ? '📁' : '🔒';
+        const clickHandler = dir.accessible ? `onclick="navigateToDirectory('${dir.path.replace(/'/g, "\\'")}')"` : '';
+
+        return `
+            <div class="directory-item ${accessibleClass}" ${clickHandler}>
+                <span class="directory-icon">${icon}</span>
+                <span class="directory-name">${escapeHtml(dir.name)}</span>
+            </div>
+        `;
+    }).join('');
+
+    listContainer.innerHTML = html;
+}
+
+/**
+ * Navigate to a specific directory
+ */
+async function navigateToDirectory(path) {
+    await loadDirectoryContents(path);
+}
+
+/**
+ * Navigate to parent directory
+ */
+async function navigateToParent() {
+    if (currentBrowserParent) {
+        await loadDirectoryContents(currentBrowserParent);
+    }
+}
+
+/**
+ * Navigate to a path entered in the input
+ */
+async function navigateToPath(path) {
+    if (path?.trim()) {
+        await loadDirectoryContents(path.trim());
+    }
+}
+
+/**
+ * Select the current directory and close browser
+ */
+function selectCurrentDirectory() {
+    if (currentBrowserPath) {
+        selectSpawnDirectory(currentBrowserPath);
+    }
+    closeDirectoryBrowser();
+}
+
+/**
+ * Close the directory browser modal
+ */
+function closeDirectoryBrowser() {
+    const modal = document.getElementById('directory-browser-modal');
+    if (modal) {
+        modal.classList.add('hidden');
     }
 }
 
@@ -6389,11 +7409,10 @@ async function spawnSession() {
         const placeholderBanner = `<div class="sdk-welcome-banner sdk-placeholder">
 <div class="sdk-banner-info">
 <div class="sdk-banner-title">Claude Code SDK Session</div>
-<div class="sdk-banner-model">Initializing...</div>
 <div class="sdk-banner-cwd">${escapeHtml(data.cwd)}</div>
 </div>
 </div>
-<div class="sdk-ready-message">Session ready — send a message to start</div>`;
+<div class="sdk-ready-message">Send a message to start</div>`;
 
         // Track the managed process with SDK flag
         managedProcesses.set(processId, {
@@ -6402,7 +7421,8 @@ async function spawnSession() {
             state: data.state,
             isSDK: isSDK,
             ws: null,
-            outputBuffer: isSDK ? placeholderBanner : '' // Show placeholder for SDK sessions
+            outputBuffer: isSDK ? placeholderBanner : '', // Show placeholder for SDK sessions
+            startedAt: data.started_at || new Date().toISOString()
         });
 
         hideSpawnModal();
@@ -6552,8 +7572,20 @@ function handleProcessMessage(processId, msg) {
             break;
 
         case 'result':
-            // SDK: Final result from Claude
+            // SDK: Final result from Claude with usage stats
             console.log('[MC-DEBUG] SDK result:', msg.result);
+            // Update usage stats in managed process
+            if (msg.usage) {
+                const proc = managedProcesses.get(processId);
+                if (proc) {
+                    proc.inputTokens = msg.usage.input_tokens || 0;
+                    proc.outputTokens = msg.usage.output_tokens || 0;
+                    proc.totalCostUsd = msg.usage.total_cost_usd || 0;
+                    console.log('[MC-DEBUG] Updated usage:', proc.inputTokens, proc.outputTokens);
+                    // Re-render session list to show updated context %
+                    refreshMissionControl();
+                }
+            }
             break;
 
         case 'system':
@@ -7793,12 +8825,24 @@ async function refreshManagedProcessList() {
                     cwd: p.cwd,
                     state: p.state,
                     ws: null,
-                    outputBuffer: '' // Store all output even when not selected
+                    outputBuffer: '', // Store all output even when not selected
+                    startedAt: p.started_at,
+                    clientCount: p.client_count,
+                    inputTokens: p.input_tokens || 0,
+                    outputTokens: p.output_tokens || 0,
+                    totalCostUsd: p.total_cost_usd || 0
                 });
             } else {
                 const existing = managedProcesses.get(p.id);
                 existing.state = p.state;
                 existing.exitCode = p.exit_code;
+                existing.clientCount = p.client_count;
+                existing.inputTokens = p.input_tokens || existing.inputTokens || 0;
+                existing.outputTokens = p.output_tokens || existing.outputTokens || 0;
+                existing.totalCostUsd = p.total_cost_usd || existing.totalCostUsd || 0;
+                if (!existing.startedAt && p.started_at) {
+                    existing.startedAt = p.started_at;
+                }
             }
         }
 
@@ -7826,6 +8870,9 @@ async function refreshManagedProcessList() {
 function selectManagedProcess(processId) {
     const process = managedProcesses.get(processId);
     if (!process) return;
+
+    // Disconnect MC conversation WebSocket when switching to managed process
+    disconnectMissionControlProcess();
 
     // Deselect detected session
     mcSelectedSessionId = null;
@@ -9021,7 +10068,7 @@ selectMissionControlSession = function(sessionId) {
 };
 
 /**
- * Render managed processes in the session list
+ * Render managed processes in the session list (matches terminal session format)
  */
 function renderManagedProcessesInList(container) {
     if (managedProcesses.size === 0) return '';
@@ -9030,17 +10077,41 @@ function renderManagedProcessesInList(container) {
     html += '<div class="mc-section-header">🖥️  Managed Sessions</div>';
 
     for (const [id, process] of managedProcesses) {
-        const stateEmoji = process.state === 'running' ? '🟢' :
-                          process.state === 'stopped' ? '⚫' : '🔵';
         const dirName = process.cwd.split('/').pop() || process.cwd;
         const isSelected = selectedProcessId === id;
+        const isActive = process.state === 'running' || process.state === 'waiting';
+
+        // Calculate duration like terminal sessions
+        let duration = '--';
+        if (process.startedAt) {
+            const startTime = new Date(process.startedAt).getTime();
+            const elapsed = Date.now() - startTime;
+            const minutes = Math.floor(elapsed / 60000);
+            const hours = Math.floor(minutes / 60);
+            if (hours > 0) {
+                duration = `${hours}h ${minutes % 60}m`;
+            } else {
+                duration = `${minutes}m`;
+            }
+        }
+
+        // Calculate token-based context % (similar to terminal sessions)
+        // Assuming 200k context window
+        const totalTokens = (process.inputTokens || 0) + (process.outputTokens || 0);
+        const contextPct = Math.min(100, Math.round((totalTokens / 200000) * 100));
+
+        // State indicator similar to terminal sessions
+        const stateClass = isActive ? 'active' : '';
 
         html += `
-            <div class="mc-session-item managed ${isSelected ? 'selected' : ''}"
+            <div class="mc-session-item managed ${stateClass} ${isSelected ? 'selected' : ''}"
                  data-process-id="${escapeHtml(id)}"
                  onclick="selectManagedProcess('${escapeJsString(id)}')">
-                <div class="mc-session-name">${stateEmoji} ${escapeHtml(dirName)}<span class="managed-badge">SDK</span></div>
-                <div class="mc-session-meta">${escapeHtml(process.cwd)}</div>
+                <div class="mc-session-name">${escapeHtml(dirName)}<span class="managed-badge">SDK</span></div>
+                <div class="mc-session-meta">
+                    <span>${duration}</span>
+                    <span>${contextPct}% ctx</span>
+                </div>
             </div>
         `;
     }
@@ -9280,7 +10351,8 @@ function groupGraveyardByRepo(sessions) {
  * Render a single graveyard card
  */
 function renderGraveyardCard(session, isGastown = false) {
-    const displayName = session.cwd ? session.cwd.split('/').pop() : session.slug || session.sessionId.slice(0, 8);
+    // Show branch name or short session ID (repo name is already in group header)
+    const displayName = session.gitBranch || session.sessionId.slice(0, 8);
     const contextPct = Math.round(session.tokenPercentage || 0);
     const duration = formatAgentDuration(session.startTimestamp) || '?';
 
@@ -9308,16 +10380,28 @@ function renderGraveyardCard(session, isGastown = false) {
                 ${snippetHtml}
             </div>
         `;
-    } else if (session.summary) {
-        previewContent = `<div class="graveyard-summary">${escapeHtml(session.summary.substring(0, 100))}${session.summary.length > 100 ? '...' : ''}</div>`;
+    } else if (session.focusSummary || session.summary) {
+        // Show focus summary (3-5 words) or longer summary
+        const summaryText = session.focusSummary || session.summary.substring(0, 200);
+        const truncated = !session.focusSummary && session.summary && session.summary.length > 200 ? '...' : '';
+        const summaryClass = session.focusSummary ? 'graveyard-focus-summary' : 'graveyard-summary';
+        previewContent = `<div class="${summaryClass}">${escapeHtml(summaryText)}${truncated}</div>`;
+    } else if (session.hasActivityLog && session.activityLog && session.activityLog.length > 0) {
+        // Fallback: show most recent activity description if no summary
+        const postEvents = session.activityLog.filter(a => a.event === 'PostToolUse' && a.description);
+        if (postEvents.length > 0) {
+            const lastActivity = postEvents[postEvents.length - 1];
+            const activityDesc = lastActivity.description || `Used ${lastActivity.tool}`;
+            previewContent = `<div class="graveyard-summary" title="Most recent activity">${escapeHtml(activityDesc.substring(0, 150))}${activityDesc.length > 150 ? '...' : ''}</div>`;
+        }
     }
 
-    // Activity log section (if available)
+    // Activity log section (if available) - show emoji trail
     let activityLogContent = '';
     if (session.hasActivityLog && session.activityLog && session.activityLog.length > 0) {
         // Filter to only PostToolUse events (more informative)
         const postEvents = session.activityLog.filter(a => a.event === 'PostToolUse');
-        const recentActivities = postEvents.slice(-15); // Last 15 activities
+        const recentActivities = postEvents.slice(-10); // Last 10 activities for row layout
         const activityHtml = recentActivities
             .map(a => {
                 const emoji = getToolEmoji(a.tool || 'unknown');
@@ -9328,7 +10412,7 @@ function renderGraveyardCard(session, isGastown = false) {
         activityLogContent = `
             <div class="graveyard-activity-log">
                 <div class="activity-trail">${activityHtml}</div>
-                <span class="activity-count">${postEvents.length} tools</span>
+                <span class="activity-count">${postEvents.length}</span>
             </div>
         `;
     }
@@ -9346,11 +10430,8 @@ function renderGraveyardCard(session, isGastown = false) {
             ${previewContent}
             ${activityLogContent}
             <div class="graveyard-card-actions">
-                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Resume this session">
+                <button class="graveyard-btn" onclick="event.stopPropagation(); resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Resume session (copies command if SDK unavailable)">
                     ▶️ Resume
-                </button>
-                <button class="graveyard-btn" onclick="event.stopPropagation(); copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')" title="Copy resume command">
-                    📋 Copy
                 </button>
             </div>
         </div>
@@ -9384,6 +10465,7 @@ function showGraveyardDetails(sessionId) {
 
     showModal(`
         <div class="graveyard-details">
+            <button class="modal-close-x" onclick="closeModal()" title="Close (Esc)">&times;</button>
             <h2>💀 ${escapeHtml(displayName)}</h2>
             <div class="graveyard-details-meta">
                 <p><strong>Session ID:</strong> <code>${session.sessionId}</code></p>
@@ -9402,11 +10484,8 @@ function showGraveyardDetails(sessionId) {
             ` : ''}
 
             <div class="graveyard-details-actions">
-                <button class="btn-primary" onclick="resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}'); closeModal();">
+                <button class="btn-primary" onclick="resumeSession('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">
                     ▶️ Resume Session
-                </button>
-                <button class="btn-secondary" onclick="copyResumeCmd('${escapeJsString(session.sessionId)}', '${escapeJsString(session.cwd || '')}')">
-                    📋 Copy Resume Command
                 </button>
                 <button class="btn-secondary" onclick="openJsonl('${escapeJsString(session.sessionId)}')">
                     📂 Open JSONL File
@@ -9417,19 +10496,82 @@ function showGraveyardDetails(sessionId) {
 }
 
 /**
- * Resume a dead session in a new terminal
+ * Resume a dead session via SDK spawn or fallback to clipboard
  */
-function resumeSession(sessionId, cwd) {
-    // Build command with cd to session directory if cwd provided
-    const resumeCmd = `claude --resume ${sessionId}`;
-    const cmd = cwd ? `cd ${cwd} && ${resumeCmd}` : resumeCmd;
+async function resumeSession(sessionId, cwd) {
+    try {
+        // Check SDK availability
+        const sdkResponse = await fetch('/api/sdk-mode');
+        const sdkMode = await sdkResponse.json();
 
-    // Try to copy to clipboard
-    navigator.clipboard.writeText(cmd).then(() => {
-        showToast(`Resume command copied! Paste in terminal to resume.`);
-    }).catch(() => {
-        showToast(`Resume: ${cmd}`, 'info');
-    });
+        if (!sdkMode.sdk_available) {
+            // Fallback to copy command
+            copyResumeCmd(sessionId, cwd);
+            showToast('SDK not available - command copied to clipboard', 'info');
+            return;
+        }
+
+        showToast('Resuming session...', 'info');
+
+        // Spawn session with resume parameter
+        const response = await fetch('/api/spawn', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cwd: cwd || process.env?.HOME || '/tmp',
+                resume: sessionId
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(error.detail || 'Failed to spawn session');
+        }
+
+        const data = await response.json();
+
+        // Close graveyard modal if open
+        closeModal();
+
+        // Add to managed processes
+        const processId = data.process_id;
+        managedProcesses.set(processId, {
+            id: processId,
+            cwd: data.cwd,
+            state: data.state,
+            isSDK: true,
+            ws: null,
+            outputBuffer: `<div class="sdk-welcome-banner sdk-placeholder">
+<div class="sdk-banner-info">
+<div class="sdk-banner-title">📋 Resumed Session</div>
+<div class="sdk-banner-model">${sessionId.substring(0, 8)}...</div>
+<div class="sdk-banner-cwd">${escapeHtml(cwd)}</div>
+</div>
+</div>
+<div class="sdk-ready-message">Session restored — send a message to continue</div>`,
+            startedAt: data.started_at || new Date().toISOString()
+        });
+
+        // Switch to Mission Control view
+        switchView('mission-control');
+
+        // Connect WebSocket and select the process
+        connectToProcess(processId);
+
+        // Refresh the sidebar to show the new process
+        await refreshManagedProcessList();
+        refreshMissionControl();
+
+        // Select the newly resumed process
+        selectManagedProcess(processId);
+
+        showToast('Session resumed in Mission Control', 'success');
+
+    } catch (e) {
+        console.error('Resume failed:', e);
+        copyResumeCmd(sessionId, cwd);
+        showToast(`Resume failed: ${e.message} - command copied`, 'info');
+    }
 }
 
 console.log('Claude Session Visualizer loaded - All features active (including Feature 17: Multi-Machine Support)');

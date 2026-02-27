@@ -40,11 +40,18 @@ from .websocket import ConnectionManager, compute_sessions_hash
 from .services.summary import (
     generate_activity_summary,
     generate_session_summary,
+    update_session_focus_summary,
     get_bedrock_token,
     get_summary_cache,
     BEDROCK_TOKEN_FILE,
     SUMMARY_TTL,
 )
+from .session_detector import (
+    extract_first_user_message,
+    get_recent_messages,
+    count_user_messages,
+)
+from .config import CLAUDE_PROJECTS_DIR
 
 # Import route modules
 from .routes import (
@@ -347,6 +354,56 @@ async def watch_sessions_loop(interval: float = 2.0):
                                 generate_activity_summary(session_id, activities, cwd)
                             )
 
+                    # Focus Summary Generation
+                    for session in sessions:
+                        if session.get('isGastown'):
+                            continue
+                        session_id = session.get('sessionId')
+                        cwd = session.get('cwd', '')
+                        if not session_id or not cwd:
+                            continue
+
+                        # Find JSONL file for this session
+                        jsonl_path = None
+                        project_slug = cwd.replace('/', '-')
+                        if project_slug.startswith('-'):
+                            project_slug = project_slug[1:]  # Remove leading dash
+                        project_dir = CLAUDE_PROJECTS_DIR / f"-{project_slug}"
+                        if project_dir.exists():
+                            candidate = project_dir / f"{session_id}.jsonl"
+                            if candidate.exists():
+                                jsonl_path = candidate
+
+                        if jsonl_path:
+                            # Get data needed for focus summary triggers
+                            message_count = count_user_messages(jsonl_path)
+                            context_pct = int(session.get('tokenPercentage', 0))
+                            last_activity = session.get('lastActivity')
+                            current_summary = session.get('focusSummary')
+
+                            # Get first user message (for initial summary)
+                            first_msg = None
+                            if not current_summary:
+                                first_msg = extract_first_user_message(jsonl_path)
+
+                            # Get recent messages (for updates)
+                            recent_msgs = None
+                            if current_summary and message_count > 0:
+                                recent_msgs = get_recent_messages(jsonl_path, limit=5)
+
+                            # Schedule focus summary update (async)
+                            asyncio.create_task(
+                                update_session_focus_summary(
+                                    session_id=session_id,
+                                    message_count=message_count,
+                                    context_pct=context_pct,
+                                    last_activity_at=last_activity,
+                                    first_user_message=first_msg,
+                                    recent_messages=recent_msgs,
+                                    current_summary=current_summary
+                                )
+                            )
+
                     for session in sessions:
                         session_id = session.get('sessionId')
                         if session_id:
@@ -403,7 +460,7 @@ async def startup_event():
     ws_log_handler.set_broadcast_callback(_create_log_broadcast_callback())
 
     _recording_task = asyncio.create_task(record_snapshots_background())
-    _file_watcher_task = asyncio.create_task(watch_sessions_loop(interval=2.0))
+    _file_watcher_task = asyncio.create_task(watch_sessions_loop(interval=0.5))  # 500ms for faster updates
 
     manager = get_tunnel_manager()
     manager.connect_all()
@@ -441,24 +498,51 @@ def browse_folder():
 
     try:
         if platform.system() == "Darwin":  # macOS
-            # Use osascript for native folder picker
-            script = '''
-            tell application "System Events"
-                activate
-                set folderPath to POSIX path of (choose folder with prompt "Select a directory for Claude session")
-            end tell
-            return folderPath
-            '''
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=120  # 2 minute timeout for user interaction
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return {"path": result.stdout.strip()}
-            else:
-                return {"error": "No folder selected", "details": result.stderr}
+            # Use PyObjC for fast native folder picker (no subprocess overhead)
+            try:
+                from AppKit import NSOpenPanel, NSApplication, NSApp
+
+                # Ensure NSApplication is initialized
+                if NSApp is None:
+                    NSApplication.sharedApplication()
+
+                # Create and configure the open panel
+                panel = NSOpenPanel.openPanel()
+                panel.setCanChooseFiles_(False)
+                panel.setCanChooseDirectories_(True)
+                panel.setAllowsMultipleSelection_(False)
+                panel.setMessage_("Select a directory for Claude session")
+                panel.setPrompt_("Select")
+
+                # Run modal dialog (blocks until user responds)
+                result = panel.runModal()
+
+                if result == 1:  # NSModalResponseOK
+                    urls = panel.URLs()
+                    if urls and len(urls) > 0:
+                        path = urls[0].path()
+                        return {"path": str(path)}
+                return {"error": "No folder selected"}
+
+            except ImportError:
+                # Fallback to osascript if PyObjC not available
+                script = '''
+                tell application "System Events"
+                    activate
+                    set folderPath to POSIX path of (choose folder with prompt "Select a directory for Claude session")
+                end tell
+                return folderPath
+                '''
+                result = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return {"path": result.stdout.strip()}
+                else:
+                    return {"error": "No folder selected", "details": result.stderr}
         else:
             # For Linux/Windows, fall back to tkinter
             import tkinter as tk

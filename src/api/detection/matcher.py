@@ -48,49 +48,23 @@ def get_sessions_for_cwd(cwd: str, activity_tracker: callable = None) -> list[di
 
 
 def match_process_to_session(proc: dict, available_sessions: list[dict]) -> dict | None:
-    """Match a process to its session by comparing start times.
+    """Match a process to its session by file modification time.
+
+    When a user runs /continue, they create a new session but the process keeps
+    running with the same PID. We must match to the most recently modified session
+    file, not the one with the closest start time to the process.
 
     Args:
-        proc: Process dict with 'start_time' key
-        available_sessions: List of session metadata dicts with 'startTimestamp'
+        proc: Process dict with process info
+        available_sessions: List of session metadata dicts with 'file_mtime'
 
     Returns:
-        Best matching session metadata, or None
+        Best matching session metadata (most recently modified), or None
     """
     if not available_sessions:
         return None
 
-    proc_start = proc.get('start_time')
-    if not proc_start:
-        # Fall back to most recent if we can't get process start time
-        available_sessions.sort(key=lambda x: x.get('file_mtime', 0), reverse=True)
-        return available_sessions[0]
-
-    # Find session with start time closest to process start time
-    best_match = None
-    best_diff = float('inf')
-
-    for session in available_sessions:
-        session_start_str = session.get('startTimestamp')
-        if not session_start_str:
-            continue
-
-        try:
-            # Parse ISO timestamp
-            session_start = datetime.fromisoformat(
-                session_start_str.replace('Z', '+00:00')
-            ).timestamp()
-
-            diff = abs(session_start - proc_start)
-            if diff < best_diff:
-                best_diff = diff
-                best_match = session
-        except (ValueError, AttributeError):
-            continue
-
-    # If no timestamp match, fall back to most recent
-    if not best_match and available_sessions:
-        available_sessions.sort(key=lambda x: x.get('file_mtime', 0), reverse=True)
-        best_match = available_sessions[0]
-
-    return best_match
+    # Always prefer the most recently modified session file
+    # This handles /continue correctly - new session, same process
+    available_sessions.sort(key=lambda x: x.get('file_mtime', 0), reverse=True)
+    return available_sessions[0]

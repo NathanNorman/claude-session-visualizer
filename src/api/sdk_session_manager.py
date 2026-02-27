@@ -59,6 +59,10 @@ class SDKSession:
     permission_mode: str = "normal"  # 'normal', 'acceptEdits', 'bypassPermissions', 'planMode'
     _approval_futures: dict = field(default_factory=dict)
     _can_use_tool: Optional[Any] = None
+    # Token usage tracking
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 class SDKSessionManager:
@@ -67,10 +71,14 @@ class SDKSessionManager:
     def __init__(self):
         self.sessions: dict[str, SDKSession] = {}
 
-    async def create_session(self, cwd: str) -> SDKSession:
+    async def create_session(self, cwd: str, resume: Optional[str] = None) -> SDKSession:
         """Create a new SDK session placeholder.
 
         The actual Claude session starts on first message.
+
+        Args:
+            cwd: Working directory for the session
+            resume: Optional session ID to resume from a previous session
         """
         if not SDK_AVAILABLE:
             raise RuntimeError("claude-agent-sdk not installed. Run: pip install claude-agent-sdk")
@@ -80,7 +88,8 @@ class SDKSessionManager:
             id=session_id,
             cwd=cwd,
             state="waiting",
-            started_at=datetime.now(timezone.utc)
+            started_at=datetime.now(timezone.utc),
+            session_id=resume  # Store resume ID for later use when starting the session
         )
 
         # Create tool approval callback
@@ -241,7 +250,7 @@ class SDKSessionManager:
         return self.sessions.get(session_id)
 
     def list_sessions(self) -> list[dict]:
-        """List all sessions with their current state."""
+        """List all sessions with their current state and usage."""
         return [
             {
                 "id": s.id,
@@ -251,6 +260,9 @@ class SDKSessionManager:
                 "client_count": len(s.websocket_clients),
                 "has_pending_approval": s.pending_approval is not None,
                 "has_claude_session": s.session_id is not None,
+                "input_tokens": s.total_input_tokens,
+                "output_tokens": s.total_output_tokens,
+                "total_cost_usd": s.total_cost_usd,
             }
             for s in self.sessions.values()
         ]
@@ -335,13 +347,29 @@ class SDKSessionManager:
                 logger.warning("[SDK] No text blocks found in AssistantMessage")
             return
 
-        # Handle ResultMessage (final result)
+        # Handle ResultMessage (final result with usage stats)
         if ResultMessage and isinstance(message, ResultMessage):
-            if hasattr(message, 'result'):
-                await self._broadcast(session, {
-                    "type": "result",
-                    "result": message.result
-                })
+            # Capture usage statistics
+            if hasattr(message, 'usage') and message.usage:
+                usage = message.usage
+                session.total_input_tokens += getattr(usage, 'input_tokens', 0)
+                session.total_output_tokens += getattr(usage, 'output_tokens', 0)
+                logger.info(f"[SDK] Usage: input={session.total_input_tokens}, output={session.total_output_tokens}")
+
+            if hasattr(message, 'total_cost_usd') and message.total_cost_usd:
+                session.total_cost_usd = message.total_cost_usd
+                logger.info(f"[SDK] Total cost: ${session.total_cost_usd:.4f}")
+
+            # Broadcast result and usage
+            await self._broadcast(session, {
+                "type": "result",
+                "result": getattr(message, 'result', None),
+                "usage": {
+                    "input_tokens": session.total_input_tokens,
+                    "output_tokens": session.total_output_tokens,
+                    "total_cost_usd": session.total_cost_usd
+                }
+            })
             return
 
         # Handle SystemMessage (init, session info, etc.)

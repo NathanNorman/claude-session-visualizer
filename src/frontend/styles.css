@@ -379,6 +379,20 @@ header h1 {
 
 .slug { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
 
+/* Focus Summary styling - when AI-generated summary replaces slug */
+.slug.focus-summary {
+    font-style: italic;
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--text-primary);
+    opacity: 0.95;
+}
+
+.compact-name.focus-summary {
+    font-style: italic;
+    font-size: 13px;
+}
+
 /* Meta row with duration, context, and activity badge - like Mission Control */
 .card-meta-row {
     display: flex;
@@ -3019,12 +3033,14 @@ body.keyboard-mode .session-card .card-number {
 
 .timeline-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start; /* Align to top to accommodate marker space */
     gap: 16px;
     padding: 12px;
+    padding-top: 8px; /* Reduced top padding since track has margin-top */
     background: rgba(0,0,0,0.2);
     border-radius: 8px;
     transition: background 0.2s;
+    min-height: 52px; /* Ensure room for markers + track */
 }
 
 .timeline-row:hover {
@@ -3095,7 +3111,8 @@ body.keyboard-mode .session-card .card-number {
     background: rgba(0,0,0,0.3);
     border-radius: 4px;
     position: relative;
-    overflow: hidden;
+    overflow: visible; /* Allow markers to float above */
+    margin-top: 20px; /* Room for event markers */
 }
 
 .timeline-bar {
@@ -3117,6 +3134,50 @@ body.keyboard-mode .session-card .card-number {
     background: var(--waiting-color);
     opacity: 0.5;
 }
+
+/* Timeline Event Markers */
+.timeline-marker {
+    position: absolute;
+    top: -18px;
+    transform: translateX(-50%);
+    font-size: 14px;
+    cursor: pointer;
+    z-index: 10;
+    transition: transform 0.15s ease;
+    line-height: 1;
+}
+
+.timeline-marker:hover {
+    transform: translateX(-50%) scale(1.3);
+    z-index: 20;
+}
+
+/* Marker type-specific glow effects */
+.timeline-marker.commit {
+    filter: drop-shadow(0 0 2px #4ade80);
+}
+
+.timeline-marker.compaction {
+    filter: drop-shadow(0 0 2px #60a5fa);
+}
+
+.timeline-marker.agent_spawn {
+    filter: drop-shadow(0 0 2px #f59e0b);
+}
+
+.timeline-marker.test_run {
+    filter: drop-shadow(0 0 3px #a78bfa);
+}
+
+.timeline-marker.test_pass {
+    filter: drop-shadow(0 0 3px #4ade80);
+}
+
+.timeline-marker.test_fail {
+    filter: drop-shadow(0 0 3px #ef4444);
+}
+
+/* User prompts removed - too frequent, creates clutter */
 
 .no-activity {
     position: absolute;
@@ -3233,6 +3294,15 @@ body.keyboard-mode .session-card .card-number {
     padding: 2px 6px;
     background: rgba(245, 166, 35, 0.2);
     border-radius: 4px;
+}
+
+/* Idle badge with dynamic gradient color (set via inline style) */
+.idle-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
 }
 
 /* Timeline Popover */
@@ -3942,6 +4012,7 @@ body.keyboard-mode .session-card .card-number {
 .session-card.compact {
     padding: 12px 16px;
     min-height: auto;
+    position: relative;
 }
 
 .session-card.compact::before {
@@ -3954,6 +4025,7 @@ body.keyboard-mode .session-card .card-number {
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 4px;
+    padding-right: 90px; /* Make room for activity pill */
 }
 
 .compact-meta {
@@ -3966,6 +4038,14 @@ body.keyboard-mode .session-card .card-number {
 
 .compact-meta .compact-expand {
     margin-left: auto;
+}
+
+/* Activity pill positioned bottom right */
+.compact-activity {
+    position: absolute;
+    bottom: 10px;
+    right: 12px;
+    font-size: 12px;
 }
 
 /* Legacy compact-row support */
@@ -4026,15 +4106,7 @@ body.keyboard-mode .session-card .card-number {
     color: #ef4444;
 }
 
-.compact-activity {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: 'SF Mono', Monaco, monospace;
-}
+/* compact-activity styles merged above */
 
 .compact-expand {
     background: rgba(255,255,255,0.1);
@@ -4724,6 +4796,7 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     cursor: pointer;
     transition: all 0.2s;
     border-left: 3px solid transparent;
+    position: relative;
 }
 
 .mc-session-item:hover {
@@ -4754,6 +4827,14 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     color: var(--text-secondary);
     display: flex;
     gap: 8px;
+}
+
+/* Activity pill positioned bottom right */
+.mc-session-activity {
+    position: absolute;
+    bottom: 10px;
+    right: 12px;
+    font-size: 11px;
 }
 
 /* Mission Control repo grouping */
@@ -4936,6 +5017,56 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     color: var(--active-color);
 }
 
+/* Live/streaming message indicators */
+.mc-live-indicator {
+    font-size: 8px;
+    color: var(--active-color);
+    animation: pulse-live 2s ease-in-out infinite;
+}
+
+.mc-live-indicator.streaming {
+    color: #f59e0b;
+    animation: pulse-streaming 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse-live {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+@keyframes pulse-streaming {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.2); }
+}
+
+/* Streaming text message */
+.mc-streaming-text {
+    border-left: 3px solid #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.mc-streaming-content {
+    white-space: pre-wrap;
+    font-family: inherit;
+}
+
+/* Live message indicator */
+.mc-live-message {
+    position: relative;
+}
+
+.mc-live-message::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 6px;
+    height: 6px;
+    background: var(--active-color);
+    border-radius: 50%;
+    animation: pulse-live 2s ease-in-out infinite;
+}
+
 .mc-message.system {
     background: rgba(156, 163, 175, 0.1);
     border-left: 3px solid #6b7280;
@@ -4983,9 +5114,108 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
-.mc-compaction {
-    font-size: 0.85em;
+/* Compaction Marker - Accordion Divider (amber theme) */
+.mc-compaction-marker {
+    display: flex;
+    flex-direction: column;
+    margin: 16px 0;
+    padding: 8px 0;
+}
+
+.mc-compaction-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.mc-compaction-line {
+    flex: 1;
+    height: 2px;
+    background: linear-gradient(90deg,
+        transparent, rgba(251, 191, 36, 0.5), transparent);
+}
+
+.mc-compaction-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(251, 191, 36, 0.1);
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    border-radius: 20px;
+    cursor: pointer;
+    color: #fbbf24;
+    font-size: 12px;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.mc-compaction-badge:hover {
+    background: rgba(251, 191, 36, 0.2);
+    border-color: rgba(251, 191, 36, 0.5);
+}
+
+.mc-compaction-icon {
+    font-size: 14px;
+}
+
+.mc-compaction-label {
+    font-weight: 500;
+}
+
+.mc-compaction-toggle {
+    font-size: 10px;
+    opacity: 0.7;
+    transition: transform 0.2s ease;
+}
+
+.mc-compaction-preview {
+    margin-top: 8px;
+    padding: 8px 16px;
+    font-size: 12px;
     color: var(--text-secondary);
+    font-style: italic;
+    text-align: center;
+    opacity: 0.8;
+}
+
+.mc-compaction-details {
+    margin-top: 8px;
+    padding: 12px 16px;
+    background: rgba(251, 191, 36, 0.05);
+    border: 1px solid rgba(251, 191, 36, 0.15);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.mc-compaction-details.hidden {
+    display: none;
+}
+
+.mc-compaction-preview.hidden {
+    display: none;
+}
+
+/* Context Saved - subtle indicator for trailing compactions (no continuation yet) */
+.mc-context-saved {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 16px;
+    margin: 8px 0;
+    color: var(--text-secondary);
+    font-size: 11px;
+    opacity: 0.6;
+}
+
+.mc-context-saved-icon {
+    font-size: 12px;
+}
+
+.mc-context-saved-text {
     font-style: italic;
 }
 
@@ -5167,6 +5397,23 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 .mc-message-content h3 { font-size: 1.1em; }
 .mc-message-content h4 { font-size: 1em; }
 
+/* Markdown rendering for MC messages - links */
+.mc-message-content a {
+    color: #60a5fa;
+    text-decoration: underline;
+    text-decoration-color: rgba(96, 165, 250, 0.4);
+    text-underline-offset: 2px;
+}
+
+.mc-message-content a:hover {
+    color: #93c5fd;
+    text-decoration-color: rgba(147, 197, 253, 0.6);
+}
+
+.mc-message-content a:visited {
+    color: #a78bfa;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
     .mission-control-grid {
@@ -5259,6 +5506,74 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     content: attr(data-placeholder);
     color: var(--text-secondary);
     pointer-events: none;
+}
+
+/* Drag and drop state */
+.mc-input.drag-over {
+    border-color: rgba(96, 165, 250, 0.7);
+    background: rgba(96, 165, 250, 0.1);
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+}
+
+/* Image preview area */
+.mc-image-previews {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 0;
+}
+
+.mc-image-previews.hidden {
+    display: none;
+}
+
+.mc-image-preview {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.mc-image-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.mc-image-preview:hover {
+    border-color: rgba(96, 165, 250, 0.5);
+}
+
+.mc-image-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(239, 68, 68, 0.9);
+    border: none;
+    color: white;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mc-image-preview:hover .mc-image-remove {
+    opacity: 1;
+}
+
+.mc-image-remove:hover {
+    background: rgba(239, 68, 68, 1);
+    transform: scale(1.1);
 }
 
 /* Inline code highlighting */
@@ -6042,6 +6357,120 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 }
 
 .mc-tool-history-panel.hidden {
+    display: none;
+}
+
+/* Task Notification Cards */
+.task-notification {
+    background: rgba(74, 222, 128, 0.1);
+    border-left: 3px solid #4ade80;
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin: 4px 0;
+}
+
+.task-notification.error {
+    background: rgba(239, 68, 68, 0.1);
+    border-left-color: #ef4444;
+}
+
+.task-notification.pending {
+    background: rgba(251, 191, 36, 0.1);
+    border-left-color: #fbbf24;
+}
+
+.task-notification-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.task-notification-icon {
+    font-size: 14px;
+}
+
+.task-notification-summary {
+    font-weight: 500;
+    color: var(--text-primary);
+    flex: 1;
+}
+
+.task-notification-id {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-family: monospace;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.task-notification-result {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    line-height: 1.4;
+}
+
+.task-notification-output {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    font-family: monospace;
+    opacity: 0.7;
+}
+
+.task-notification-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 8px;
+    padding: 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+/* User Message Expandable */
+.user-message-expandable {
+    position: relative;
+}
+
+.user-message-preview,
+.user-message-full {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+}
+
+.user-message-full {
+    max-height: 400px;
+    overflow-y: auto;
+    padding-right: 8px;
+}
+
+.user-message-toggle {
+    background: transparent;
+    border: none;
+    color: #60a5fa;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 0;
+    margin-top: 4px;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.user-message-toggle:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+.user-message-preview.hidden,
+.user-message-full.hidden {
     display: none;
 }
 
@@ -7987,6 +8416,231 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     transform: translateY(0);
 }
 
+/* Directory Browser Modal */
+.directory-browser-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    backdrop-filter: blur(4px);
+}
+
+.directory-browser-modal.hidden {
+    display: none;
+}
+
+.directory-browser-content {
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.directory-browser-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.directory-browser-header h3 {
+    margin: 0;
+    font-size: 16px;
+    color: var(--text-primary);
+}
+
+.directory-browser-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 24px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    transition: color 0.2s;
+}
+
+.directory-browser-close:hover {
+    color: var(--text-primary);
+}
+
+.directory-browser-path {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.directory-browser-up {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.directory-browser-up:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.directory-browser-up:disabled {
+    cursor: not-allowed;
+}
+
+.directory-browser-path input {
+    flex: 1;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+}
+
+.directory-browser-path input:focus {
+    outline: none;
+    border-color: var(--active-color);
+}
+
+.directory-browser-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+    min-height: 200px;
+    max-height: 400px;
+}
+
+.directory-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.directory-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 20px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.directory-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.directory-item.inaccessible {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.directory-item.inaccessible:hover {
+    background: transparent;
+}
+
+.directory-icon {
+    font-size: 18px;
+}
+
+.directory-name {
+    color: var(--text-primary);
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.directory-loading,
+.directory-empty,
+.directory-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 40px 20px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.directory-error {
+    flex-direction: column;
+    color: #ef4444;
+}
+
+.directory-error .btn-small {
+    margin-top: 10px;
+    padding: 6px 12px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.directory-error .btn-small:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary);
+}
+
+.directory-browser-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 16px 20px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.directory-browser-footer .btn {
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.directory-browser-footer .btn-secondary {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: var(--text-secondary);
+}
+
+.directory-browser-footer .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary);
+}
+
+.directory-browser-footer .btn-primary {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    border: none;
+    color: white;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+
+.directory-browser-footer .btn-primary:hover {
+    background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+}
+
 /* Delete Message Confirmation Modal */
 .delete-modal {
     position: fixed;
@@ -8191,7 +8845,7 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     border: none;
     color: var(--text-primary);
     font-size: 13px;
-    width: 160px;
+    width: 220px;
     outline: none;
 }
 
@@ -8227,10 +8881,24 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     font-size: 11px;
     color: var(--text-secondary);
     cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    transition: all 0.2s ease;
+}
+
+.search-content-toggle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
 }
 
 .search-content-toggle input {
     cursor: pointer;
+}
+
+.search-content-toggle input:checked + span {
+    color: #60a5fa;
+    font-weight: 500;
 }
 
 .search-content-toggle input:focus-visible {
@@ -8247,29 +8915,34 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 .graveyard-matches {
     font-size: 11px;
     color: var(--text-secondary);
-    margin-top: 6px;
-    padding: 6px 8px;
-    background: rgba(0, 0, 0, 0.2);
+    padding: 4px 8px;
+    background: rgba(59, 130, 246, 0.1);
     border-radius: 4px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
 }
 
 .match-types {
     color: #3b82f6;
-    margin-bottom: 4px;
     font-weight: 500;
+    font-size: 10px;
+    white-space: nowrap;
 }
 
 .match-snippet {
     color: var(--text-secondary);
-    padding: 2px 0;
     border-left: 2px solid #3b82f6;
-    padding-left: 8px;
-    margin-top: 4px;
+    padding-left: 6px;
+    margin-top: 2px;
     font-size: 10px;
-    line-height: 1.4;
-    max-height: 40px;
+    line-height: 1.3;
+    max-height: 32px;
     overflow: hidden;
     text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
 }
 
 .graveyard-range-select {
@@ -8410,7 +9083,11 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 }
 
 .graveyard-group {
-    margin-bottom: 16px;
+    margin-bottom: 20px;
+    background: rgba(255, 255, 255, 0.02);
+    border-left: 3px solid rgba(96, 165, 250, 0.4);
+    border-radius: 6px;
+    padding: 14px;
 }
 
 .graveyard-group:last-child {
@@ -8418,93 +9095,130 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 }
 
 .graveyard-group-header {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-    margin-bottom: 10px;
-    letter-spacing: 0.5px;
+    color: #60a5fa;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.graveyard-group-header::before {
+    content: "📁";
+    font-size: 14px;
 }
 
 .graveyard-group-sessions {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
+/* Row-based graveyard card layout */
 .graveyard-card {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    padding: 12px;
+    border-radius: 6px;
+    padding: 10px 14px;
     cursor: pointer;
     transition: all 0.2s ease;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 16px;
+    min-height: 52px;
 }
 
 .graveyard-card:hover {
     background: rgba(0, 0, 0, 0.4);
     border-color: rgba(255, 255, 255, 0.2);
-    transform: translateY(-1px);
 }
 
 .graveyard-card-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    margin-bottom: 8px;
+    gap: 10px;
+    min-width: 200px;
+    flex-shrink: 0;
 }
 
 .graveyard-name {
     font-weight: 600;
-    font-size: 14px;
+    font-size: 13px;
     color: #9ca3af;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
 }
 
 .graveyard-ended {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-secondary);
     background: rgba(0, 0, 0, 0.3);
-    padding: 2px 8px;
+    padding: 2px 6px;
     border-radius: 4px;
+    white-space: nowrap;
 }
 
 .graveyard-card-meta {
     display: flex;
-    gap: 12px;
-    font-size: 12px;
+    gap: 10px;
+    font-size: 11px;
     color: var(--text-secondary);
-    margin-bottom: 8px;
+    min-width: 100px;
+    flex-shrink: 0;
 }
 
 .graveyard-summary {
     font-size: 12px;
     color: var(--text-secondary);
     line-height: 1.4;
-    margin-bottom: 10px;
-    padding: 8px;
-    background: rgba(0, 0, 0, 0.2);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    padding: 4px 8px;
+    background: rgba(0, 0, 0, 0.15);
     border-radius: 4px;
     border-left: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.graveyard-focus-summary {
+    font-size: 13px;
+    color: var(--accent-color);
+    font-weight: 500;
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    background: rgba(74, 144, 226, 0.1);
+    border-radius: 4px;
+    border-left: 2px solid var(--accent-color);
 }
 
 /* Graveyard Activity Log - shows emoji trail from session activity */
 .graveyard-activity-log {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 10px;
-    padding: 6px 8px;
+    gap: 6px;
+    padding: 4px 8px;
     background: rgba(74, 222, 128, 0.05);
     border-radius: 4px;
-    border-left: 2px solid rgba(74, 222, 128, 0.3);
+    flex-shrink: 0;
+    max-width: 200px;
 }
 
 .graveyard-activity-log .activity-trail {
     display: flex;
-    gap: 2px;
-    flex-wrap: wrap;
-    font-size: 14px;
+    gap: 1px;
+    flex-wrap: nowrap;
+    font-size: 12px;
+    overflow: hidden;
 }
 
 .graveyard-activity-log .activity-item {
@@ -8513,11 +9227,11 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 }
 
 .graveyard-activity-log .activity-item:hover {
-    transform: scale(1.3);
+    transform: scale(1.2);
 }
 
 .graveyard-activity-log .activity-count {
-    font-size: 10px;
+    font-size: 9px;
     color: var(--text-secondary);
     white-space: nowrap;
 }
@@ -8529,19 +9243,20 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 
 .graveyard-card-actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
+    flex-shrink: 0;
 }
 
 .graveyard-btn {
-    flex: 1;
-    padding: 6px 10px;
-    font-size: 11px;
+    padding: 5px 10px;
+    font-size: 10px;
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 4px;
     color: var(--text-primary);
     cursor: pointer;
     transition: all 0.2s ease;
+    white-space: nowrap;
 }
 
 .graveyard-btn:hover {
@@ -8552,10 +9267,37 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
 /* Graveyard Details Modal */
 .graveyard-details {
     max-width: 500px;
+    position: relative;  /* For absolute X button positioning */
+}
+
+/* Modal X Close Button */
+.modal-close-x {
+    position: absolute;
+    top: 0;
+    right: 0;
+    background: none;
+    border: none;
+    font-size: 28px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 4px 10px;
+    border-radius: 4px;
+    transition: background 0.15s, color 0.15s;
+}
+
+.modal-close-x:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.modal-close-x:active {
+    transform: scale(0.95);
 }
 
 .graveyard-details h2 {
     margin: 0 0 16px 0;
+    padding-right: 40px;  /* Make room for X button */
     color: #9ca3af;
 }
 
@@ -8709,8 +9451,38 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
         align-items: flex-start;
     }
 
-    .graveyard-group-sessions {
-        grid-template-columns: 1fr;
+    /* Stack graveyard cards vertically on narrow screens */
+    .graveyard-card {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        min-height: auto;
+    }
+
+    .graveyard-card-header {
+        min-width: 100%;
+        justify-content: space-between;
+    }
+
+    .graveyard-name {
+        max-width: none;
+    }
+
+    .graveyard-summary {
+        width: 100%;
+    }
+
+    .graveyard-activity-log {
+        max-width: 100%;
+        width: 100%;
+    }
+
+    .graveyard-card-actions {
+        width: 100%;
+    }
+
+    .graveyard-btn {
+        flex: 1;
     }
 
     .graveyard-details-actions {

@@ -4,16 +4,127 @@ This module provides functions for:
 - Extracting activity periods from JSONL files
 - Generating session timelines
 - Bucketing events into activity periods
+- Extracting discrete event markers for timeline visualization
 """
 
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from .jsonl_parser import extract_activity
 
 logger = logging.getLogger(__name__)
+
+
+def extract_event_markers(events: list[dict], session_info: Optional[dict] = None) -> list[dict]:
+    """Extract discrete point-in-time events for timeline markers.
+
+    Scans events for significant discrete moments like compactions, agent spawns,
+    and test runs. Only includes notable events, not routine user prompts.
+
+    Args:
+        events: List of events from extract_session_timeline()
+        session_info: Optional session metadata dict
+
+    Returns:
+        List of marker dicts: {type, icon, timestamp, label}
+    """
+    markers = []
+
+    for event in events:
+        timestamp = event.get('timestamp')
+        if not timestamp:
+            continue
+
+        event_type = event.get('type', '')
+        tool = event.get('tool', '')
+        activity = event.get('activity', '')
+
+        # Compaction events (from summary type with "compacted" in activity)
+        if event_type == 'summary' or (activity and 'compacted' in activity.lower()):
+            markers.append({
+                'type': 'compaction',
+                'icon': '\U0001F5DC\uFE0F',  # 🗜️
+                'timestamp': timestamp,
+                'label': 'Context compacted'
+            })
+            continue
+
+        # Agent spawns (Task tool)
+        if tool == 'Task':
+            # Extract agent description from activity
+            desc = activity[:30] if activity else 'agent'
+            markers.append({
+                'type': 'agent_spawn',
+                'icon': '\U0001F916',  # 🤖
+                'timestamp': timestamp,
+                'label': f'Spawned: {desc}'
+            })
+            continue
+
+        # Test runs (Bash with test commands)
+        if tool == 'Bash' and activity:
+            activity_lower = activity.lower()
+            test_commands = ['pytest', 'jest', 'npm test', 'npm run test', 'cargo test',
+                            'go test', 'mvn test', 'gradle test', 'rspec', 'mocha']
+            if any(tc in activity_lower for tc in test_commands):
+                # Truncate command for display
+                cmd_display = activity[:40] + '...' if len(activity) > 40 else activity
+                markers.append({
+                    'type': 'test_run',
+                    'icon': '\U0001F9EA',  # 🧪
+                    'timestamp': timestamp,
+                    'label': f'Tests: {cmd_display}'
+                })
+                continue
+
+        # Note: User prompts are intentionally NOT included as markers
+        # They're too frequent and create visual clutter
+
+    return dedupe_markers(markers)
+
+
+def dedupe_markers(markers: list[dict], min_gap_seconds: int = 60) -> list[dict]:
+    """Remove markers that are too close together to prevent visual overlap.
+
+    Groups markers by type and removes duplicates within min_gap_seconds.
+    Keeps the first occurrence in each cluster.
+
+    Args:
+        markers: List of marker dicts with timestamps
+        min_gap_seconds: Minimum seconds between markers of the same type
+
+    Returns:
+        Deduplicated list of markers
+    """
+    if not markers:
+        return []
+
+    # Sort by timestamp
+    sorted_markers = sorted(markers, key=lambda m: m.get('timestamp', ''))
+
+    # Track last timestamp per marker type
+    last_ts_by_type: dict[str, datetime] = {}
+    result = []
+
+    for marker in sorted_markers:
+        marker_type = marker.get('type', '')
+        ts_str = marker.get('timestamp', '')
+
+        try:
+            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            continue
+
+        # Check if enough time has passed since last marker of this type
+        last_ts = last_ts_by_type.get(marker_type)
+        if last_ts is None or (ts - last_ts).total_seconds() >= min_gap_seconds:
+            result.append(marker)
+            last_ts_by_type[marker_type] = ts
+
+    return result
 
 
 def extract_session_timeline(jsonl_file: Path) -> list[dict]:
