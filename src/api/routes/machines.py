@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ..session_detector import get_sessions
 from ..tunnel_manager import get_tunnel_manager
+from ..services.summary import get_summary_cache, SUMMARY_TTL, BEDROCK_TOKEN_FILE
 
 router = APIRouter(prefix="/api", tags=["machines"])
 
@@ -82,14 +83,11 @@ def test_machine_connection(host: str, ssh_key: Optional[str] = None):
 @router.get("/sessions/all")
 def get_all_sessions_multi_machine(include_summaries: bool = False):
     """Get sessions from all machines (local + remote)."""
-    # Import here to avoid circular imports
-    from ..server import _summary_cache, SUMMARY_TTL, BEDROCK_TOKEN_FILE
-
     local_sessions = get_sessions()
 
     if include_summaries and BEDROCK_TOKEN_FILE.exists():
         for session in local_sessions:
-            cached = _summary_cache.get(session['sessionId'])
+            cached = get_summary_cache().get(session['sessionId'])
             if cached and (time.time() - cached['timestamp']) < SUMMARY_TTL:
                 session['aiSummary'] = cached['summary']
 

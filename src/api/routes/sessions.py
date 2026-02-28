@@ -41,11 +41,29 @@ from ..git_tracker import (
     get_commits_in_range,
 )
 from ..analytics import get_activity_summaries as db_get_activity_summaries, get_focus_summary, save_focus_summary
-from ..services.summary import generate_focus_summary
+from ..services.summary import generate_focus_summary, get_summary_cache, SUMMARY_TTL, generate_activity_summary, BEDROCK_TOKEN_FILE
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["sessions"])
+
+
+def find_session_jsonl(session_id: str) -> Path:
+    """Find the JSONL file for a session by searching project directories.
+
+    Raises HTTPException(404) if not found.
+    """
+    if not CLAUDE_PROJECTS_DIR.exists():
+        raise HTTPException(404, "Claude projects directory not found")
+
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        jsonl = project_dir / f"{session_id}.jsonl"
+        if jsonl.exists():
+            return jsonl
+
+    raise HTTPException(404, f"Session {session_id} not found")
 
 # Dedup guard and concurrency limit for background summary generation
 _inflight_summaries: set[str] = set()
@@ -89,15 +107,11 @@ IMAGE_UPLOAD_DIR.mkdir(exist_ok=True)
 @router.get("/sessions")
 async def api_get_sessions(include_summaries: bool = False):
     """Get sessions, optionally with AI summaries."""
-    # Import here to avoid circular imports
-    from ..server import _summary_cache, SUMMARY_TTL, generate_activity_summary, BEDROCK_TOKEN_FILE
-    import asyncio
-
     sessions = get_sessions()
 
     if include_summaries and BEDROCK_TOKEN_FILE.exists():
         for session in sessions:
-            cached = _summary_cache.get(session['sessionId'])
+            cached = get_summary_cache().get(session['sessionId'])
             if cached and (time.time() - cached['timestamp']) < SUMMARY_TTL:
                 session['aiSummary'] = cached['summary']
 
@@ -214,20 +228,7 @@ def get_session_timeline(session_id: str, bucket_minutes: int = 5):
         - activityPeriods: Time buckets showing when session was active
         - eventMarkers: Discrete point events (commits, compactions, agent spawns, tests)
     """
-    if not CLAUDE_PROJECTS_DIR.exists():
-        raise HTTPException(404, "Claude projects directory not found")
-
-    jsonl_file = None
-    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        candidate = project_dir / f"{session_id}.jsonl"
-        if candidate.exists():
-            jsonl_file = candidate
-            break
-
-    if not jsonl_file:
-        raise HTTPException(404, f"Session {session_id} not found")
+    jsonl_file = find_session_jsonl(session_id)
 
     events = extract_session_timeline(jsonl_file)
     periods = get_activity_periods(events, bucket_minutes=bucket_minutes)
@@ -286,38 +287,20 @@ def kill_session(request: KillRequest):
 @router.get("/session/{session_id}/jsonl-path")
 def get_jsonl_path(session_id: str):
     """Get the path to a session's JSONL file."""
-    if not CLAUDE_PROJECTS_DIR.exists():
-        raise HTTPException(404, "Claude projects directory not found")
-
-    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        jsonl = project_dir / f"{session_id}.jsonl"
-        if jsonl.exists():
-            return {"path": str(jsonl)}
-
-    raise HTTPException(404, "Session file not found")
+    jsonl = find_session_jsonl(session_id)
+    return {"path": str(jsonl)}
 
 
 @router.get("/session/{session_id}/conversation")
 def get_conversation(session_id: str, limit: int = 0, follow_continuations: bool = True):
     """Get conversation for a session."""
-    if not CLAUDE_PROJECTS_DIR.exists():
-        raise HTTPException(404, "Claude projects directory not found")
-
-    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        jsonl = project_dir / f"{session_id}.jsonl"
-        if jsonl.exists():
-            messages = extract_conversation(jsonl, limit, follow_continuations)
-            has_continuation = any(msg.get('isContinuation') for msg in messages)
-            return {
-                "messages": messages,
-                "hasContinuation": has_continuation
-            }
-
-    raise HTTPException(404, "Session not found")
+    jsonl = find_session_jsonl(session_id)
+    messages = extract_conversation(jsonl, limit, follow_continuations)
+    has_continuation = any(msg.get('isContinuation') for msg in messages)
+    return {
+        "messages": messages,
+        "hasContinuation": has_continuation
+    }
 
 
 @router.get("/session/{session_id}/tools")
@@ -331,21 +314,12 @@ def get_tool_history(session_id: str, limit: int = 50):
     - is_error: whether the tool failed
     - timestamp: when the tool was used
     """
-    if not CLAUDE_PROJECTS_DIR.exists():
-        raise HTTPException(404, "Claude projects directory not found")
-
-    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        jsonl = project_dir / f"{session_id}.jsonl"
-        if jsonl.exists():
-            tools = extract_detailed_tool_history(jsonl, limit)
-            return {
-                "tools": tools,
-                "count": len(tools)
-            }
-
-    raise HTTPException(404, "Session not found")
+    jsonl = find_session_jsonl(session_id)
+    tools = extract_detailed_tool_history(jsonl, limit)
+    return {
+        "tools": tools,
+        "count": len(tools)
+    }
 
 
 class DeleteMessageRequest(BaseModel):
@@ -360,64 +334,46 @@ def delete_message(session_id: str, request: DeleteMessageRequest):
     Only removes the specified line, preserving all other content.
     Returns the new total token count after deletion.
     """
-    if not CLAUDE_PROJECTS_DIR.exists():
-        raise HTTPException(404, "Claude projects directory not found")
+    jsonl = find_session_jsonl(session_id)
+    try:
+        # Read all lines
+        with open(jsonl, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
 
-    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        jsonl = project_dir / f"{session_id}.jsonl"
-        if jsonl.exists():
-            try:
-                # Read all lines
-                with open(jsonl, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
+        # Validate line number
+        if request.line_number < 0 or request.line_number >= len(lines):
+            raise HTTPException(400, f"Invalid line number {request.line_number}. File has {len(lines)} lines.")
 
-                # Validate line number
-                if request.line_number < 0 or request.line_number >= len(lines):
-                    raise HTTPException(400, f"Invalid line number {request.line_number}. File has {len(lines)} lines.")
+        # Remove the specified line
+        lines.pop(request.line_number)
 
-                # Remove the specified line
-                lines.pop(request.line_number)
+        # Write back to file
+        with open(jsonl, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
 
-                # Write back to file
-                with open(jsonl, 'w', encoding='utf-8') as f:
-                    f.writelines(lines)
+        # Re-extract conversation to get new token count
+        messages = extract_conversation(jsonl, limit=0, follow_continuations=False)
+        new_total_tokens = sum(msg.get('tokens', 0) for msg in messages)
 
-                # Re-extract conversation to get new token count
-                messages = extract_conversation(jsonl, limit=0, follow_continuations=False)
-                new_total_tokens = sum(msg.get('tokens', 0) for msg in messages)
+        return {
+            "success": True,
+            "deleted_line_number": request.line_number,
+            "remaining_lines": len(lines),
+            "new_total_tokens": new_total_tokens
+        }
 
-                return {
-                    "success": True,
-                    "deleted_line_number": request.line_number,
-                    "remaining_lines": len(lines),
-                    "new_total_tokens": new_total_tokens
-                }
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                raise HTTPException(500, f"Failed to delete message: {str(e)}")
-
-    raise HTTPException(404, "Session not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to delete message: {str(e)}")
 
 
 @router.get("/session/{session_id}/metrics")
 def get_session_metrics(session_id: str):
     """Get performance metrics for a session."""
-    if not CLAUDE_PROJECTS_DIR.exists():
-        raise HTTPException(404, "Claude projects directory not found")
-
-    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        jsonl = project_dir / f"{session_id}.jsonl"
-        if jsonl.exists():
-            metrics = extract_metrics(jsonl)
-            return metrics
-
-    raise HTTPException(404, "Session not found")
+    jsonl = find_session_jsonl(session_id)
+    metrics = extract_metrics(jsonl)
+    return metrics
 
 
 @router.get("/sessions/{session_id}/git")
