@@ -101,6 +101,9 @@ WEBSOCKET_HEARTBEAT_INTERVAL = 30  # seconds
 # Remote agent default port (for multi-machine support)
 REMOTE_AGENT_PORT = 8081
 
+# UDP notification port for hook-to-server push (realtime session updates)
+CSV_UDP_PORT = int(os.getenv("CSV_UDP_PORT", "8001"))
+
 
 # ============================================================================
 # Timeline Configuration

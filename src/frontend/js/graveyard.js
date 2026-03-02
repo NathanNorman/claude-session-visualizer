@@ -384,6 +384,38 @@ async function takeOverSession(sessionId, cwd) {
         // Select the newly taken over process
         selectManagedProcess(processId);
 
+        // Load conversation history from the JSONL file
+        try {
+            const convResponse = await fetch(`/api/session/${sessionId}/conversation?limit=50`);
+            if (convResponse.ok) {
+                const convData = await convResponse.json();
+                const messages = convData.messages || [];
+                if (messages.length > 0) {
+                    const proc = managedProcesses.get(processId);
+                    if (proc) {
+                        let historyHtml = '<div class="sdk-history-divider">Previous conversation</div>';
+                        for (const m of messages) {
+                            const isUser = m.role === 'human';
+                            const mcRoleClass = isUser ? 'human' : 'assistant';
+                            const roleLabel = isUser ? `${icon('user', {size:14})} You` : `${icon('bot', {size:14})} Assistant`;
+                            const content = isUser
+                                ? `<p>${escapeHtml(m.content || '')}</p>`
+                                : renderMarkdown(m.content || '');
+                            historyHtml += `<div class="mc-message ${mcRoleClass}"><div class="mc-message-header"><span class="mc-message-role">${roleLabel}</span></div><div class="mc-message-content">${content}</div></div>`;
+                        }
+                        historyHtml += '<div class="sdk-history-divider">Session resumed</div>';
+                        // Insert history after the banner but before any new messages
+                        proc.outputBuffer = proc.outputBuffer + historyHtml;
+                        if (selectedProcessId === processId) {
+                            setTerminalHtml(proc.outputBuffer);
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to load conversation history:', e);
+        }
+
         showToast('Session taken over in Mission Control', 'success');
 
     } catch (e) {

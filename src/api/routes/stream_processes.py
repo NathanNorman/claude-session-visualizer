@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 
-from ..session_detector import get_sessions
+from ..session_detector import get_sessions, get_dead_sessions
 from ..stream_process_manager import get_stream_process_manager
 
 router = APIRouter(prefix="/api", tags=["stream_processes"])
@@ -41,6 +41,7 @@ class SpawnRequest(BaseModel):
 
 class TakeoverRequest(BaseModel):
     fork: bool = False
+    cwd: Optional[str] = None  # Fallback cwd for dead/graveyard sessions
 
 
 class MessageRequest(BaseModel):
@@ -156,13 +157,23 @@ async def takeover_session(session_id: str, request: TakeoverRequest = TakeoverR
     Returns:
         New process_id, session_id, and cwd.
     """
-    # 1. Find the session
+    # 1. Find the session (check active first, then dead/graveyard)
     sessions = get_sessions()
     session = next((s for s in sessions if s["sessionId"] == session_id), None)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
 
-    cwd = session.get("cwd", "/tmp")
+    if not session:
+        dead_sessions = get_dead_sessions(max_age_hours=168)  # 7 days
+        session = next(
+            (s for s in dead_sessions if s["sessionId"] == session_id), None
+        )
+
+    if not session:
+        # Session not in active or dead lists — allow takeover if cwd provided
+        if not request.cwd:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session = {"sessionId": session_id, "cwd": request.cwd, "state": "dead"}
+
+    cwd = session.get("cwd") or request.cwd or "/tmp"
     pid = session.get("pid")
     state = session.get("state", "")
 

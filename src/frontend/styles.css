@@ -6692,6 +6692,18 @@ body.focus-mode .session-row:has(.session-row-cards:empty) {
     letter-spacing: 0.03em;
 }
 
+/* History divider between previous conversation and new messages */
+.sdk-history-divider {
+    text-align: center;
+    color: var(--text-muted, #666);
+    font-size: 11px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-color, #333);
+    margin: 8px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
 /* Loading indicator while waiting for response */
 .sdk-loading {
     display: flex;

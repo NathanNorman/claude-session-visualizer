@@ -1238,7 +1238,12 @@ def get_sessions() -> list[dict]:
                 metadata.get('cwd', '')
             ),
             # Activity log for emoji trail (last 20 entries)
-            'activityLog': hook_state.get('activity_log', [])[-20:] if hook_state else [],
+            # Falls back to JSONL-derived recentActivity when hooks unavailable
+            'activityLog': (
+                hook_state.get('activity_log', [])[-20:]
+                if hook_state
+                else synthesize_activity_log(metadata.get('recentActivity', []))
+            ),
         })
 
     # Add basic git info to each session
@@ -1258,6 +1263,105 @@ def get_sessions() -> list[dict]:
     result.sort(key=lambda x: (-1 if x['state'] == 'active' else 0, -x['cpuPercent']))
 
     return result
+
+
+# ============================================================================
+# Activity Log Synthesis (JSONL fallback when hooks unavailable)
+# ============================================================================
+
+# Map description prefixes to tool names for activity trail icons
+_ACTIVITY_PREFIX_TO_TOOL = [
+    ('Reading ', 'Read'),
+    ('Writing ', 'Write'),
+    ('Editing ', 'Edit'),
+    ('Running: ', 'Bash'),
+    ('Running ', 'Bash'),
+    ('Searching', 'Grep'),
+    ('Globbing', 'Glob'),
+    ('Fetching ', 'WebFetch'),
+    ('Launching ', 'Task'),
+]
+
+
+def synthesize_activity_log(recent_activity: list[str]) -> list[dict]:
+    """Convert JSONL-derived recentActivity strings to activityLog format.
+
+    Used as a fallback when hook state files aren't available (e.g. during
+    session takeover). Infers tool names from description prefixes so the
+    frontend can render activity trail icons.
+
+    Args:
+        recent_activity: List of plain-text descriptions from JSONL parsing
+
+    Returns:
+        List of {event, tool, description} dicts matching hook activityLog format
+    """
+    result = []
+    for desc in recent_activity:
+        tool = 'Unknown'
+        for prefix, tool_name in _ACTIVITY_PREFIX_TO_TOOL:
+            if desc.startswith(prefix):
+                tool = tool_name
+                break
+        result.append({
+            'event': 'PostToolUse',
+            'tool': tool,
+            'description': desc,
+        })
+    return result
+
+
+# ============================================================================
+# Fast-Path State File Reading (Two-Tier Watcher)
+# ============================================================================
+
+def read_fast_session_state() -> dict[str, dict]:
+    """Read all state files for the fast-path watcher (no JSONL/process scan).
+
+    Returns:
+        Dict mapping session_id -> state dict with hook-derived fields:
+        state, current_activity, activity_log, spawned_agents, background_shells
+    """
+    return get_all_active_state_files()
+
+
+def merge_fast_state_with_baseline(
+    fast_states: dict[str, dict],
+    baseline_sessions: list[dict],
+) -> list[dict]:
+    """Merge fast-path state data onto the last-known slow-path session list.
+
+    Hook-derived fields (state, currentActivity, activityLog, spawnedAgents,
+    backgroundShells) are overlaid on the JSONL-derived baseline. Fields like
+    contextTokens, estimatedCost, recentActivity are preserved from baseline.
+
+    Args:
+        fast_states: Dict from read_fast_session_state()
+        baseline_sessions: Last-known session list from get_sessions()
+
+    Returns:
+        Merged session list with fresh hook data overlaid on baseline
+    """
+    merged = []
+    for session in baseline_sessions:
+        session_copy = dict(session)
+        session_id = session.get('sessionId')
+
+        if session_id and session_id in fast_states:
+            hook_state = fast_states[session_id]
+            session_copy['state'] = hook_state.get('state', session.get('state', 'waiting'))
+            session_copy['stateSource'] = 'hooks'
+            session_copy['currentActivity'] = hook_state.get('current_activity')
+            session_copy['activityLog'] = hook_state.get('activity_log', [])[-20:]
+            session_copy['spawnedAgents'] = hook_state.get('spawned_agents', [])
+            session_copy['backgroundShells'] = check_background_shell_status(
+                hook_state.get('background_shells', []),
+                session.get('cwd', '')
+            )
+
+        merged.append(session_copy)
+
+    return merged
 
 
 # ============================================================================

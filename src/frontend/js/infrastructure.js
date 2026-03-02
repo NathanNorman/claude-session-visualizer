@@ -39,6 +39,11 @@ function connectLogWebSocket() {
                     // Real-time session updates via WebSocket - much faster than polling!
                     handleWebSocketSessionsUpdate(msg);
                     break;
+                case 'heartbeat':
+                    // Server liveness signal - reset staleness timer without triggering render
+                    lastWsUpdateTime = Date.now();
+                    wsSessionUpdatesActive = true;
+                    break;
                 default:
                     // Other session messages - ignore for log streaming
                     break;
@@ -430,12 +435,11 @@ function handleWebSocketSessionsUpdate(msg) {
             }
             // Quick comparison of key fields that affect display
             if (prev.state !== session.state ||
-                prev.totalTokens !== session.totalTokens ||
-                prev.inputTokens !== session.inputTokens ||
-                prev.outputTokens !== session.outputTokens ||
-                prev.cacheReadTokens !== session.cacheReadTokens ||
-                prev.turns !== session.turns ||
-                prev.conversationPreview !== session.conversationPreview ||
+                prev.contextTokens !== session.contextTokens ||
+                prev.estimatedCost !== session.estimatedCost ||
+                prev.tokenPercentage !== session.tokenPercentage ||
+                prev.currentActivity?.description !== session.currentActivity?.description ||
+                prev.activityLog?.length !== session.activityLog?.length ||
                 JSON.stringify(prev.activitySummaries) !== JSON.stringify(session.activitySummaries)) {
                 hasChanges = true;
                 break;

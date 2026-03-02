@@ -29,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .session_detector import get_sessions
+from .session_detector import get_sessions, read_fast_session_state, merge_fast_state_with_baseline
 from .analytics import (
     init_database,
     record_session_snapshot,
@@ -102,6 +102,37 @@ ws_manager = ConnectionManager()
 _file_watcher_task: asyncio.Task | None = None
 _recording_task: asyncio.Task | None = None
 _last_sessions_hash: str = ""
+_watcher_event: asyncio.Event | None = None
+_udp_transport: asyncio.DatagramTransport | None = None
+
+
+class UDPNotificationProtocol(asyncio.DatagramProtocol):
+    """Receives UDP notifications from hooks to wake the session watcher.
+
+    Hooks send a fire-and-forget UDP datagram containing a session ID
+    after writing state files. This wakes the fast-path watcher immediately
+    for sub-100ms UI updates.
+    """
+
+    def datagram_received(self, data, addr):
+        try:
+            session_id = data.decode('utf-8').strip()
+            # Validate UUID format (8-4-4-4-12 hex chars)
+            if len(session_id) == 36 and all(
+                c in '0123456789abcdef-' for c in session_id
+            ):
+                if _watcher_event:
+                    _watcher_event.set()
+            else:
+                ws_logger.debug(f"Invalid UDP datagram (not UUID): {session_id[:50]}")
+        except Exception:
+            pass
+
+    def error_received(self, exc):
+        ws_logger.debug(f"UDP protocol error: {exc}")
+
+    def connection_lost(self, exc):
+        pass
 
 
 # Request models for remaining routes
@@ -334,98 +365,150 @@ async def websocket_process(websocket: WebSocket, process_id: str):
 
 
 # Background tasks
-async def watch_sessions_loop(interval: float = 2.0):
-    """Background task that watches for session changes and broadcasts updates."""
-    global _last_sessions_hash
+async def watch_sessions_loop(interval: float = 0.5):
+    """Two-tier background watcher for session changes.
 
-    ws_logger.info(f"Starting session watcher (interval={interval}s)")
+    Fast path (every tick): reads hook-generated state files only, merges
+    with cached baseline, broadcasts if state/activity changed.
+
+    Slow path (every Nth tick): runs full get_sessions() pipeline (JSONL
+    parse, process scan, git status), updates baseline, generates summaries.
+
+    Uses asyncio.Event for interruptible sleep so UDP notifications can
+    wake the loop immediately for sub-100ms updates.
+    """
+    global _last_sessions_hash, _watcher_event
+
+    _watcher_event = asyncio.Event()
+    baseline_sessions: list[dict] = []
+    tick_count = 0
+    slow_tick_interval = 10  # Full refresh every 10 ticks (~5s at 500ms)
+    last_broadcast_time = time.time()
+    heartbeat_interval = 5.0  # seconds
+
+    ws_logger.info(
+        f"Starting two-tier session watcher "
+        f"(interval={interval}s, slow_every={slow_tick_interval} ticks)"
+    )
 
     while True:
         try:
             if ws_manager.connection_count > 0:
-                sessions = get_sessions()
-                current_hash = compute_sessions_hash(sessions)
+                is_slow_tick = (tick_count % slow_tick_interval == 0)
+                tick_count += 1
 
-                if current_hash != _last_sessions_hash:
-                    _last_sessions_hash = current_hash
+                if is_slow_tick:
+                    # Slow path: full pipeline
+                    sessions = get_sessions()
 
-                    for session in sessions:
-                        session_id = session.get('sessionId')
-                        if session_id:
-                            activities = session.get('recentActivity', [])
-                            cwd = session.get('cwd', '')
-                            asyncio.create_task(
-                                generate_activity_summary(session_id, activities, cwd)
-                            )
-
-                    # Focus Summary Generation
-                    for session in sessions:
-                        session_id = session.get('sessionId')
-                        cwd = session.get('cwd', '')
-                        if not session_id or not cwd:
-                            continue
-
-                        # Find JSONL file for this session
-                        jsonl_path = None
-                        project_slug = cwd.replace('/', '-')
-                        if project_slug.startswith('-'):
-                            project_slug = project_slug[1:]  # Remove leading dash
-                        project_dir = CLAUDE_PROJECTS_DIR / f"-{project_slug}"
-                        if project_dir.exists():
-                            candidate = project_dir / f"{session_id}.jsonl"
-                            if candidate.exists():
-                                jsonl_path = candidate
-
-                        if jsonl_path:
-                            # Get data needed for focus summary triggers
-                            message_count = count_user_messages(jsonl_path)
-                            context_pct = int(session.get('tokenPercentage', 0))
-                            last_activity = session.get('lastActivity')
-                            current_summary = session.get('focusSummary')
-
-                            # Get first user message (for initial summary)
-                            first_msg = None
-                            if not current_summary:
-                                first_msg = extract_first_user_message(jsonl_path)
-
-                            # Get recent messages (for updates)
-                            recent_msgs = None
-                            if current_summary and message_count > 0:
-                                recent_msgs = get_recent_messages(jsonl_path, limit=5)
-
-                            # Schedule focus summary update (async)
-                            asyncio.create_task(
-                                update_session_focus_summary(
-                                    session_id=session_id,
-                                    message_count=message_count,
-                                    context_pct=context_pct,
-                                    last_activity_at=last_activity,
-                                    first_user_message=first_msg,
-                                    recent_messages=recent_msgs,
-                                    current_summary=current_summary
-                                )
-                            )
-
+                    # Add activity summaries to baseline
                     for session in sessions:
                         session_id = session.get('sessionId')
                         if session_id:
                             session['activitySummaries'] = db_get_activity_summaries(session_id)
+
+                    baseline_sessions = sessions
+                else:
+                    # Fast path: state files only, merge with baseline
+                    fast_states = read_fast_session_state()
+                    sessions = merge_fast_state_with_baseline(fast_states, baseline_sessions)
+
+                # Compute hash and broadcast if changed
+                current_hash = compute_sessions_hash(sessions)
+                now_time = time.time()
+
+                if current_hash != _last_sessions_hash:
+                    _last_sessions_hash = current_hash
+
+                    # Kick off async summary generation only on slow-path changes
+                    if is_slow_tick:
+                        for session in sessions:
+                            session_id = session.get('sessionId')
+                            if session_id:
+                                activities = session.get('recentActivity', [])
+                                cwd = session.get('cwd', '')
+                                asyncio.create_task(
+                                    generate_activity_summary(session_id, activities, cwd)
+                                )
+
+                        # Focus Summary Generation
+                        for session in sessions:
+                            session_id = session.get('sessionId')
+                            cwd = session.get('cwd', '')
+                            if not session_id or not cwd:
+                                continue
+
+                            jsonl_path = None
+                            project_slug = cwd.replace('/', '-')
+                            if project_slug.startswith('-'):
+                                project_slug = project_slug[1:]
+                            project_dir = CLAUDE_PROJECTS_DIR / f"-{project_slug}"
+                            if project_dir.exists():
+                                candidate = project_dir / f"{session_id}.jsonl"
+                                if candidate.exists():
+                                    jsonl_path = candidate
+
+                            if jsonl_path:
+                                message_count = count_user_messages(jsonl_path)
+                                context_pct = int(session.get('tokenPercentage', 0))
+                                last_activity = session.get('lastActivity')
+                                current_summary = session.get('focusSummary')
+
+                                first_msg = None
+                                if not current_summary:
+                                    first_msg = extract_first_user_message(jsonl_path)
+
+                                recent_msgs = None
+                                if current_summary and message_count > 0:
+                                    recent_msgs = get_recent_messages(jsonl_path, limit=5)
+
+                                asyncio.create_task(
+                                    update_session_focus_summary(
+                                        session_id=session_id,
+                                        message_count=message_count,
+                                        context_pct=context_pct,
+                                        last_activity_at=last_activity,
+                                        first_user_message=first_msg,
+                                        recent_messages=recent_msgs,
+                                        current_summary=current_summary
+                                    )
+                                )
 
                     await ws_manager.broadcast({
                         'type': 'sessions_update',
                         'sessions': sessions,
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     })
+                    last_broadcast_time = now_time
                     ws_logger.debug(f"Broadcast update to {ws_manager.connection_count} clients")
 
-            await asyncio.sleep(interval)
+                elif now_time - last_broadcast_time >= heartbeat_interval:
+                    # Heartbeat: keep WebSocket alive during quiet periods
+                    await ws_manager.broadcast({
+                        'type': 'heartbeat',
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    })
+                    last_broadcast_time = now_time
+            else:
+                tick_count = 0  # Reset so next connection gets a slow tick first
+
+            # Interruptible sleep via asyncio.Event
+            try:
+                await asyncio.wait_for(_watcher_event.wait(), timeout=interval)
+                _watcher_event.clear()
+            except asyncio.TimeoutError:
+                pass  # Normal timeout, proceed with next tick
 
         except asyncio.CancelledError:
             ws_logger.info("Session watcher cancelled")
             break
         except Exception as e:
             ws_logger.error(f"Error in session watcher: {e}")
-            await asyncio.sleep(interval)
+            try:
+                await asyncio.wait_for(_watcher_event.wait(), timeout=interval)
+                _watcher_event.clear()
+            except asyncio.TimeoutError:
+                pass
 
 
 async def record_snapshots_background():
@@ -455,14 +538,31 @@ def _create_log_broadcast_callback():
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on app startup."""
-    global _recording_task, _file_watcher_task
+    global _recording_task, _file_watcher_task, _udp_transport
 
     # Wire up log streaming to WebSocket
     ws_log_handler = get_ws_log_handler()
     ws_log_handler.set_broadcast_callback(_create_log_broadcast_callback())
 
     _recording_task = asyncio.create_task(record_snapshots_background())
-    _file_watcher_task = asyncio.create_task(watch_sessions_loop(interval=0.5))  # 500ms for faster updates
+    _file_watcher_task = asyncio.create_task(watch_sessions_loop(interval=0.5))
+
+    # Start UDP listener for hook-to-server push notifications (Phase 2)
+    from .config import CSV_UDP_PORT
+    try:
+        loop = asyncio.get_running_loop()
+        _udp_transport, _ = await loop.create_datagram_endpoint(
+            UDPNotificationProtocol,
+            local_addr=('127.0.0.1', CSV_UDP_PORT)
+        )
+        logger.info(f"UDP notification listener started on 127.0.0.1:{CSV_UDP_PORT}")
+    except OSError as e:
+        logger.warning(
+            f"Could not start UDP listener on port {CSV_UDP_PORT}: {e}. "
+            f"Falling back to poll-only mode."
+        )
+    except Exception as e:
+        logger.warning(f"UDP listener failed: {e}")
 
     manager = get_tunnel_manager()
     manager.connect_all()
@@ -472,13 +572,16 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cancel background tasks on shutdown."""
-    global _recording_task, _file_watcher_task
+    global _recording_task, _file_watcher_task, _udp_transport
 
     if _recording_task:
         _recording_task.cancel()
 
     if _file_watcher_task:
         _file_watcher_task.cancel()
+
+    if _udp_transport:
+        _udp_transport.close()
 
     # Clean up managed processes
     stream_manager = get_stream_process_manager()

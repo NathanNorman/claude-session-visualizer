@@ -6,6 +6,7 @@ as opposed to the PTY-based approach in process_manager.py.
 """
 
 import asyncio
+import collections
 import json
 import os
 import signal
@@ -33,6 +34,15 @@ class ManagedStreamProcess:
     websocket_clients: set = field(default_factory=set)       # Connected WebSocket clients
     message_callbacks: list = field(default_factory=list)     # Callbacks for NDJSON messages
     exit_callbacks: list = field(default_factory=list)        # Callbacks for process exit
+    _stream_state: dict = field(default_factory=lambda: {     # State for stream-json transformer
+        'current_role': 'assistant',
+        'text_buffer': '',
+        'tool_id': None,
+        'tool_name': None,
+        'tool_input_buffer': '',
+        'block_type': None,
+    })
+    _message_history: collections.deque = field(default_factory=lambda: collections.deque(maxlen=500))
     _reader_task: Optional[asyncio.Task] = None
     _stderr_task: Optional[asyncio.Task] = None
     _heartbeat_task: Optional[asyncio.Task] = None
@@ -167,13 +177,152 @@ class StreamProcessManager:
                             f"[{proc.id}] Message callback error: {e}"
                         )
 
-                # Forward to WebSocket clients
-                await self._broadcast_to_websockets(proc, msg)
+                # Transform stream-json events and forward to WebSocket clients
+                transformed_msgs = self._transform_stream_message(proc, msg)
+                if transformed_msgs:
+                    logger.info(
+                        f"[{proc.id}] stream-json: {msg_type}"
+                        f"{'/' + msg_subtype if msg_subtype else ''}"
+                        f" → {[m.get('type') for m in transformed_msgs]}"
+                    )
+                for transformed in transformed_msgs:
+                    # Store messages for replay on reconnect
+                    # Skip heartbeats and empty content messages
+                    t_type = transformed.get("type")
+                    if t_type != "heartbeat":
+                        if t_type == "message" and not transformed.get("content", "").strip():
+                            pass  # Skip empty content messages
+                        else:
+                            proc._message_history.append(transformed)
+                    await self._broadcast_to_websockets(proc, transformed)
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"[{proc.id}] stdout reader error: {e}")
+
+    def _transform_stream_message(
+        self, proc: ManagedStreamProcess, msg: dict
+    ) -> list[dict]:
+        """Transform Claude stream-json events into frontend protocol messages.
+
+        Claude's --output-format stream-json emits low-level streaming events
+        (content_block_start/delta/stop, message_start/delta/stop). The frontend
+        expects higher-level types (message, tool_use, tool_result). This method
+        accumulates streaming events and emits complete messages.
+
+        Returns a list of zero or more transformed messages to broadcast.
+        """
+        msg_type = msg.get("type")
+        state = proc._stream_state
+
+        # Pass through types the frontend already handles
+        if msg_type in ("system", "result", "heartbeat", "process_exited",
+                        "state", "error", "history"):
+            return [msg]
+
+        # Complete assistant message (non-streaming format)
+        if msg_type == "assistant":
+            message = msg.get("message", {})
+            content_blocks = message.get("content", [])
+            results = []
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    text = block.get("text", "").strip()
+                    if not text:
+                        continue  # Skip empty text blocks
+                    results.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": text,
+                    })
+                elif block.get("type") == "tool_use":
+                    results.append({
+                        "type": "tool_use",
+                        "tool_use_id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input": block.get("input", {}),
+                    })
+                elif block.get("type") == "tool_result":
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "is_error": block.get("is_error", False),
+                        "output": block.get("content", ""),
+                    })
+            return results
+
+        # Streaming: message_start — track role
+        if msg_type == "message_start":
+            role = msg.get("message", {}).get("role", "assistant")
+            state["current_role"] = role
+            return []
+
+        # Streaming: content_block_start — begin accumulating
+        if msg_type == "content_block_start":
+            block = msg.get("content_block", {})
+            state["block_type"] = block.get("type")
+            if state["block_type"] == "text":
+                state["text_buffer"] = block.get("text", "")
+            elif state["block_type"] == "tool_use":
+                state["tool_id"] = block.get("id", "")
+                state["tool_name"] = block.get("name", "")
+                state["tool_input_buffer"] = ""
+            return []
+
+        # Streaming: content_block_delta — append to buffer
+        if msg_type == "content_block_delta":
+            delta = msg.get("delta", {})
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                state["text_buffer"] += delta.get("text", "")
+            elif delta_type == "input_json_delta":
+                state["tool_input_buffer"] += delta.get("partial_json", "")
+            return []
+
+        # Streaming: content_block_stop — emit accumulated content
+        if msg_type == "content_block_stop":
+            block_type = state.get("block_type")
+
+            if block_type == "text" and state["text_buffer"].strip():
+                result = {
+                    "type": "message",
+                    "role": state.get("current_role", "assistant"),
+                    "content": state["text_buffer"].strip(),
+                }
+                state["text_buffer"] = ""
+                state["block_type"] = None
+                return [result]
+
+            if block_type == "tool_use":
+                input_data = {}
+                if state["tool_input_buffer"]:
+                    try:
+                        input_data = json.loads(state["tool_input_buffer"])
+                    except json.JSONDecodeError:
+                        input_data = {"raw": state["tool_input_buffer"]}
+                result = {
+                    "type": "tool_use",
+                    "tool_use_id": state["tool_id"] or "",
+                    "name": state["tool_name"] or "",
+                    "input": input_data,
+                }
+                state["tool_input_buffer"] = ""
+                state["tool_id"] = None
+                state["tool_name"] = None
+                state["block_type"] = None
+                return [result]
+
+            state["block_type"] = None
+            return []
+
+        # Streaming: message_delta / message_stop — metadata only, skip
+        if msg_type in ("message_delta", "message_stop"):
+            return []
+
+        # Unknown type — pass through so frontend can log/handle
+        logger.debug(f"[{proc.id}] Unknown stream-json type: {msg_type}")
+        return [msg]
 
     async def _read_stderr_loop(self, proc: ManagedStreamProcess):
         """Read and log stderr output from the subprocess."""
@@ -265,6 +414,11 @@ class StreamProcessManager:
         proc.process.stdin.write(payload.encode("utf-8"))
         await proc.process.stdin.drain()
         proc.state = "running"
+
+        # Echo user message to WebSocket clients so it appears in the UI
+        user_echo = {"type": "message", "role": "user", "content": text}
+        proc._message_history.append(user_echo)
+        await self._broadcast_to_websockets(proc, user_echo)
 
     async def release(self, process_id: str) -> None:
         """Release a process by closing its stdin pipe.
@@ -394,6 +548,18 @@ class StreamProcessManager:
             f"[{process_id}] WebSocket client added, "
             f"total: {len(proc.websocket_clients)}"
         )
+
+        # Replay message history so reconnecting clients see prior conversation
+        if proc._message_history:
+            logger.debug(
+                f"[{process_id}] Replaying {len(proc._message_history)} "
+                f"messages to new client"
+            )
+            for msg in proc._message_history:
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    break
 
     async def remove_websocket_client(self, process_id: str, ws: Any) -> None:
         """Unregister a WebSocket client.

@@ -998,8 +998,12 @@ async function sendProcessInput() {
         // Clear input on success
         if (inputEl) inputEl.innerHTML = '';
         if (statusEl) {
-            statusEl.textContent = 'Sent!';
-            setTimeout(() => { statusEl.textContent = ''; }, 1000);
+            statusEl.textContent = '';
+        }
+
+        // Show thinking indicator immediately for SDK sessions
+        if (isSDKSession) {
+            showSDKLoadingIndicator(selectedProcessId);
         }
 
     } catch (error) {
@@ -1161,13 +1165,23 @@ function renderManagedProcessesInList(container) {
             }
         }
 
-        // Calculate token-based context % (similar to terminal sessions)
-        // Assuming 200k context window
-        const totalTokens = (process.inputTokens || 0) + (process.outputTokens || 0);
-        const contextPct = Math.min(100, Math.round((totalTokens / 200000) * 100));
+        // Calculate context % from tracked tokens
+        const contextTokens = process.contextTokens || ((process.inputTokens || 0) + (process.outputTokens || 0));
+        const contextPct = Math.min(100, Math.round((contextTokens / 200000) * 100));
 
         // State indicator similar to terminal sessions
         const stateClass = isActive ? 'active' : '';
+
+        // Activity/idle badge (same as regular sessions)
+        let activityHtml = '';
+        if (process.lastActivity) {
+            const activityStatus = getActivityStatus(new Date(process.lastActivity).toISOString());
+            if (activityStatus?.text) {
+                activityHtml = `<span class="${activityStatus.class || 'idle-badge'}" style="background: ${activityStatus.color || '#666'}; color: ${activityStatus.textColor || '#fff'}">${activityStatus.text}</span>`;
+            }
+        } else if (isActive) {
+            activityHtml = `<span class="idle-badge" style="background: #4ade80; color: #000">active</span>`;
+        }
 
         html += `
             <div class="mc-session-item managed ${stateClass} ${isSelected ? 'selected' : ''}"
@@ -1178,6 +1192,7 @@ function renderManagedProcessesInList(container) {
                     <span>${duration}</span>
                     <span>${contextPct}% ctx</span>
                 </div>
+                <div class="mc-session-activity">${activityHtml}</div>
             </div>
         `;
     }
@@ -1199,6 +1214,10 @@ renderMissionControlSessions = function(sessions) {
         container.querySelectorAll('.mc-managed-section').forEach(el => el.remove());
 
         if (managedProcesses.size > 0) {
+            // Remove "No active sessions" empty message when managed processes exist
+            const emptyMsg = container.querySelector('.mc-empty');
+            if (emptyMsg) emptyMsg.remove();
+
             // Insert managed processes at the top
             const managedHtml = renderManagedProcessesInList(container);
             container.insertAdjacentHTML('afterbegin', managedHtml);

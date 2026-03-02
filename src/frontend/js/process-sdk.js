@@ -431,6 +431,9 @@ function handleProcessMessage(processId, msg) {
     const process = managedProcesses.get(processId);
     if (!process) return;
 
+    // Track activity for idle timer display
+    process.lastActivity = Date.now();
+
     switch (msg.type) {
         case 'output':
             // Always store in buffer, display if selected
@@ -509,15 +512,24 @@ function handleProcessMessage(processId, msg) {
 
         case 'result':
             // SDK: Final result from Claude with usage stats
-            Logger.debug('mc', 'SDK result:', msg.result);
-            // Update usage stats in managed process
-            if (msg.usage) {
+            Logger.debug('mc', 'SDK result:', msg);
+            {
                 const proc = managedProcesses.get(processId);
                 if (proc) {
-                    proc.inputTokens = msg.usage.input_tokens || 0;
-                    proc.outputTokens = msg.usage.output_tokens || 0;
-                    proc.totalCostUsd = msg.usage.total_cost_usd || 0;
-                    Logger.debug('mc', 'Updated usage:', proc.inputTokens, proc.outputTokens);
+                    // Extract usage from either msg.usage or top-level fields
+                    const usage = msg.usage || msg;
+                    proc.inputTokens = usage.input_tokens || proc.inputTokens || 0;
+                    proc.outputTokens = usage.output_tokens || proc.outputTokens || 0;
+                    proc.totalCostUsd = usage.total_cost_usd || msg.cost_usd || proc.totalCostUsd || 0;
+                    // Context tokens = total tokens used in the session
+                    proc.contextTokens = proc.inputTokens + proc.outputTokens +
+                        (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+                    Logger.debug('mc', 'Updated usage:', { input: proc.inputTokens, output: proc.outputTokens, context: proc.contextTokens });
+
+                    // Update context indicator if this process is selected
+                    if (selectedProcessId === processId) {
+                        updateContextIndicator(proc.contextTokens, MAX_CONTEXT_TOKENS);
+                    }
                     // Re-render session list to show updated context %
                     refreshMissionControl();
                 }
@@ -599,20 +611,21 @@ function appendTerminalOutputDirect(content) {
 function appendTerminalHtml(html) {
     Logger.debug('mc', 'appendTerminalHtml:', { htmlLen: html?.length });
 
-    const terminalEl = document.getElementById('mc-terminal-output');
-    const contentEl = terminalEl?.querySelector('.mc-terminal-content');
-
+    const contentEl = _getSDKTarget();
     if (contentEl) {
         contentEl.innerHTML += html;
-        // Force scroll to bottom after appending
-        if (processOutputStickyScroll) {
-            processOutputStickyScroll.scrollToBottom();
-        }
-        // Fallback: direct scroll
-        if (terminalEl) {
-            terminalEl.scrollTop = terminalEl.scrollHeight;
-        }
+        contentEl.scrollTop = contentEl.scrollHeight;
     }
+}
+
+/** Get the correct content target — mc-conversation-stream for SDK, mc-terminal-content for PTY */
+function _getSDKTarget() {
+    const proc = selectedProcessId ? managedProcesses.get(selectedProcessId) : null;
+    if (proc?.isSDK) {
+        return document.getElementById('mc-conversation-stream');
+    }
+    const terminalEl = document.getElementById('mc-terminal-output');
+    return terminalEl?.querySelector('.mc-terminal-content');
 }
 
 /**
@@ -620,17 +633,10 @@ function appendTerminalHtml(html) {
  * For SDK sessions that store HTML in their buffer
  */
 function setTerminalHtml(html) {
-    const terminalEl = document.getElementById('mc-terminal-output');
-    const contentEl = terminalEl?.querySelector('.mc-terminal-content');
-
+    const contentEl = _getSDKTarget();
     if (contentEl) {
         contentEl.innerHTML = html;
-
-        if (!processOutputStickyScroll && terminalEl) {
-            processOutputStickyScroll = new StickyScroll(terminalEl, { showIndicator: true });
-            processOutputStickyScroll.attach();
-        }
-        processOutputStickyScroll?.scrollToBottom();
+        contentEl.scrollTop = contentEl.scrollHeight;
     }
 }
 
@@ -828,9 +834,8 @@ function appendStructuredMessage(processId, msg) {
     }
 
     const isUser = msg.role === 'user';
-    const roleClass = isUser ? 'user-message' : 'assistant-message';
-    const roleLabel = isUser ? 'You' : 'Claude';
-    const roleIcon = isUser ? icon('user', {size:14}) : icon('bot', {size:14});
+    const mcRoleClass = isUser ? 'human' : 'assistant';
+    const roleLabel = isUser ? `${icon('user', {size:14})} You` : `${icon('bot', {size:14})} Assistant`;
 
     // Render markdown for assistant messages, escape for user messages
     const renderedContent = isUser
@@ -838,29 +843,43 @@ function appendStructuredMessage(processId, msg) {
         : renderMarkdown(msg.content);
 
     // Store raw content for copy (escape quotes for data attribute)
-    const rawContent = (msg.content || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const rawContent = (msg.content || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    // Build message HTML - compact layout with copy button
-    const html = `<div class="sdk-message ${roleClass}"><div class="sdk-message-header"><span class="sdk-role-icon">${roleIcon}</span><span class="sdk-role-label">${roleLabel}</span><button class="mc-copy-btn" onclick="copyMessageContent(this)" data-content="${rawContent}" title="Copy to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button></div><div class="sdk-message-content">${renderedContent}</div></div>`;
+    // Build message HTML matching regular session mc-message structure
+    const html = `<div class="mc-message ${mcRoleClass}">
+        <div class="mc-message-header">
+            <span class="mc-message-role">${roleLabel}</span>
+            <span class="mc-message-time">just now</span>
+            <button class="mc-copy-btn" onclick="copyMessageContent(this)" data-content="${rawContent}" title="Copy to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
+        </div>
+        <div class="mc-message-content">${renderedContent}</div>
+    </div>`;
 
-    // If assistant message, remove loading indicator
     if (!isUser) {
-        removeSDKLoadingIndicator(processId);
-    }
+        // Replace loading wrapper with the response (atomic swap, no visual gap)
+        const loadingWrapperRegex = /<div class="sdk-loading-wrapper"[^>]*>[\s\S]*?<\/div>\s*<\/div>/g;
+        if (process.outputBuffer?.match(loadingWrapperRegex)) {
+            process.outputBuffer = process.outputBuffer.replace(loadingWrapperRegex, html);
+        } else {
+            process.outputBuffer = (process.outputBuffer || '') + html;
+        }
 
-    process.outputBuffer = (process.outputBuffer || '') + html;
-    console.log('[SDK-MSG] Added to buffer, selectedProcessId:', selectedProcessId, 'processId:', processId);
-
-    if (selectedProcessId === processId) {
-        console.log('[SDK-MSG] Appending to terminal');
-        appendTerminalHtml(html);
-
-        // If user message, show loading indicator
-        if (isUser) {
-            showSDKLoadingIndicator(processId);
+        if (selectedProcessId === processId) {
+            const wrapper = document.getElementById(`sdk-loading-wrapper-${processId}`);
+            if (wrapper) {
+                wrapper.insertAdjacentHTML('afterend', html);
+                wrapper.remove();
+            } else {
+                appendTerminalHtml(html);
+            }
         }
     } else {
-        console.log('[SDK-MSG] NOT appending - process not selected');
+        process.outputBuffer = (process.outputBuffer || '') + html;
+
+        if (selectedProcessId === processId) {
+            appendTerminalHtml(html);
+            showSDKLoadingIndicator(processId);
+        }
     }
 }
 
@@ -868,7 +887,21 @@ function appendStructuredMessage(processId, msg) {
  * Show loading indicator while waiting for Claude response
  */
 function showSDKLoadingIndicator(processId) {
-    const loadingHtml = `<div class="sdk-loading" id="sdk-loading-${processId}"><div class="sdk-loading-dots"><span></span><span></span><span></span></div><span>Claude is thinking...</span></div>`;
+    const process = managedProcesses.get(processId);
+    const loadingHtml = `<div class="sdk-loading-wrapper" id="sdk-loading-wrapper-${processId}"><div class="sdk-loading" id="sdk-loading-${processId}"><div class="sdk-loading-dots"><span></span><span></span><span></span></div><span>Claude is thinking...</span></div></div>`;
+
+    // Add to buffer so it survives re-renders (e.g. system/init banner)
+    if (process) {
+        // Remove any existing loading wrapper from buffer first
+        process.outputBuffer = (process.outputBuffer || '').replace(
+            /<div class="sdk-loading-wrapper"[^>]*>[\s\S]*?<\/div>\s*<\/div>/g, ''
+        );
+        process.outputBuffer += loadingHtml;
+    }
+
+    // Also update DOM directly — remove existing wrapper first
+    const existing = document.getElementById(`sdk-loading-wrapper-${processId}`);
+    if (existing) existing.remove();
     appendTerminalHtml(loadingHtml);
 }
 
@@ -876,9 +909,16 @@ function showSDKLoadingIndicator(processId) {
  * Remove loading indicator when response arrives
  */
 function removeSDKLoadingIndicator(processId) {
-    const loadingEl = document.getElementById(`sdk-loading-${processId}`);
-    if (loadingEl) {
-        loadingEl.remove();
+    // Remove wrapper from DOM (single element, no sibling navigation needed)
+    const wrapper = document.getElementById(`sdk-loading-wrapper-${processId}`);
+    if (wrapper) wrapper.remove();
+
+    // Remove from buffer so it doesn't reappear on re-render
+    const process = managedProcesses.get(processId);
+    if (process) {
+        process.outputBuffer = (process.outputBuffer || '').replace(
+            /<div class="sdk-loading-wrapper"[^>]*>[\s\S]*?<\/div>\s*<\/div>/g, ''
+        );
     }
 }
 
@@ -958,12 +998,16 @@ function getToolSummary(toolName, input) {
  * Toggle tool details expansion
  */
 function toggleToolDetails(btn) {
-    const block = btn.closest('.tool-use-block');
+    // Support both old and new tool block structures
+    const block = btn.closest('.mc-inline-tool') || btn.closest('.tool-use-block');
     if (block) {
-        block.classList.toggle('expanded');
-        const icon = btn.querySelector('.tool-expand-icon');
-        if (icon) {
-            icon.textContent = block.classList.contains('expanded') ? '▼' : '▶';
+        const details = block.querySelector('.mc-inline-tool-details');
+        if (details) {
+            details.classList.toggle('hidden');
+            const expandIcon = btn.querySelector('.tool-expand-icon');
+            if (expandIcon) {
+                expandIcon.textContent = details.classList.contains('hidden') ? '▶' : '▼';
+            }
         }
     }
 }
@@ -982,28 +1026,35 @@ function appendToolUseBlock(processId, msg) {
     // Get icon for tool type
     const toolIconHtml = toolIcon(msg.name, 16);
 
+    const inputEscaped = inputStr.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
     const html = `
-        <div class="tool-use-block running" data-tool-id="${escapeHtml(toolId)}">
-            <div class="tool-use-header" onclick="toggleToolDetails(this)">
+        <div class="mc-inline-tools">
+        <div class="mc-inline-tool running" data-tool-id="${escapeHtml(toolId)}">
+            <div class="mc-inline-tool-header" onclick="toggleInlineToolExpand(this)">
                 <span class="tool-expand-icon">▶</span>
-                <span class="tool-icon">${toolIconHtml}</span>
+                <span class="tool-status-icon"><span class="tool-running-pulse"></span></span>
                 <span class="tool-name">${escapeHtml(msg.name)}</span>
                 <span class="tool-summary">${escapeHtml(summary)}</span>
-                <span class="tool-status">
-                    <span class="tool-spinner"></span>
-                    <span class="tool-status-text">Running</span>
-                </span>
             </div>
-            <div class="tool-use-details">
-                <div class="tool-section">
-                    <div class="tool-section-label">Input</div>
-                    <pre class="tool-use-input">${escapeHtml(inputStr)}</pre>
+            <div class="mc-inline-tool-details hidden">
+                <div class="tool-input">
+                    <div class="detail-header">
+                        <span class="detail-label">Input</span>
+                        <button class="detail-copy-btn" onclick="navigator.clipboard.writeText(this.closest('.tool-input').querySelector('pre').textContent)" title="Copy">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                    <pre class="detail-content">${escapeHtml(inputStr)}</pre>
                 </div>
-                <div class="tool-section tool-output-section" style="display: none;">
-                    <div class="tool-section-label">Output</div>
-                    <pre class="tool-use-output"></pre>
+                <div class="tool-output" style="display: none;">
+                    <div class="detail-header">
+                        <span class="detail-label">Output</span>
+                    </div>
+                    <pre class="detail-content tool-output-content"></pre>
                 </div>
             </div>
+        </div>
         </div>
     `;
 
@@ -1017,25 +1068,29 @@ function appendToolUseBlock(processId, msg) {
  * Update a tool use block with result/completion status
  */
 function updateToolUseBlock(toolId, status, output) {
-    const block = document.querySelector(`.tool-use-block[data-tool-id="${toolId}"]`);
+    const block = document.querySelector(`.mc-inline-tool[data-tool-id="${toolId}"]`);
     if (!block) return;
 
     // Update status
     block.classList.remove('running');
-    block.classList.add(status); // 'completed' or 'failed'
+    if (status !== 'completed') {
+        block.classList.add('error');
+    }
 
-    const statusText = block.querySelector('.tool-status-text');
-    if (statusText) {
-        statusText.textContent = status === 'completed' ? 'Done' : 'Failed';
+    // Replace running pulse with status icon
+    const statusIcon = block.querySelector('.tool-status-icon');
+    if (statusIcon) {
+        statusIcon.innerHTML = status === 'completed'
+            ? icon('check-circle', {size: 14})
+            : icon('x-circle', {size: 14});
     }
 
     // Show output if provided
     if (output) {
-        const outputSection = block.querySelector('.tool-output-section');
-        const outputPre = block.querySelector('.tool-use-output');
+        const outputSection = block.querySelector('.tool-output');
+        const outputPre = block.querySelector('.tool-output-content');
         if (outputSection && outputPre) {
             outputSection.style.display = 'block';
-            // Truncate very long output
             const displayOutput = output.length > 2000
                 ? output.substring(0, 2000) + '\n... (truncated)'
                 : output;
@@ -1049,13 +1104,12 @@ function updateToolUseBlock(toolId, status, output) {
  * Called when a new assistant message arrives, indicating tools have finished
  */
 function completeRunningTools() {
-    const runningTools = document.querySelectorAll('.tool-use-block.running');
+    const runningTools = document.querySelectorAll('.mc-inline-tool.running');
     runningTools.forEach(block => {
         block.classList.remove('running');
-        block.classList.add('completed');
-        const statusText = block.querySelector('.tool-status-text');
-        if (statusText) {
-            statusText.textContent = 'Done';
+        const statusIcon = block.querySelector('.tool-status-icon');
+        if (statusIcon) {
+            statusIcon.innerHTML = icon('check-circle', {size: 14});
         }
     });
 }
@@ -1858,7 +1912,7 @@ function selectManagedProcess(processId) {
     }
 
     if (titleEl) {
-        titleEl.textContent = 'Terminal Output';
+        titleEl.textContent = 'Live Conversation';
     }
 
     if (killBtn) {
@@ -1871,17 +1925,20 @@ function selectManagedProcess(processId) {
         releaseBtn.classList.toggle('hidden', process.state === 'stopped');
     }
 
-    // Update context indicator (SDK sessions track tokens via WebSocket updates)
-    const tokens = process.contextTokens || 0;
+    // Update context indicator (contextTokens set by result message handler)
+    const tokens = process.contextTokens || (process.inputTokens || 0) + (process.outputTokens || 0);
     updateContextIndicator(tokens, MAX_CONTEXT_TOKENS);
 
-    // Show terminal output, hide conversation stream
+    // Show conversation stream for SDK sessions (same panel as regular sessions)
     const streamEl = document.getElementById('mc-conversation-stream');
     const terminalEl = document.getElementById('mc-terminal-output');
 
-    if (streamEl) streamEl.classList.add('hidden');
-    if (terminalEl) {
-        terminalEl.classList.remove('hidden');
+    if (process.isSDK) {
+        if (streamEl) streamEl.classList.remove('hidden');
+        if (terminalEl) terminalEl.classList.add('hidden');
+    } else {
+        if (streamEl) streamEl.classList.add('hidden');
+        if (terminalEl) terminalEl.classList.remove('hidden');
     }
 
     // Display buffered output for this process

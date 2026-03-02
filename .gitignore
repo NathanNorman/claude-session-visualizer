@@ -39,3 +39,4 @@ test-results/
 # Temp/lock files
 .~lock.*
 *.lock.#*
+.gitnexus
